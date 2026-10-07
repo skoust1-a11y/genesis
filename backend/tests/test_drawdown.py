@@ -51,7 +51,7 @@ def start(client, approvable, account, policy: dict | None = None, **limits) -> 
         ({"ladder": [{"at_pct": 2, "action": "warn"}], "restore_below_pct": 2}, "below the first level"),
         ({"ladder": [{"at_pct": 25, "action": "pause"}]}, "past the MAX_DRAWDOWN_PCT pause"),
         ({"ladder": [{"at_pct": 20, "action": "warn"}]}, "past the MAX_DRAWDOWN_PCT pause"),
-        ({"ladder": []}, "at least 1 item"),
+            ({"ladder": []}, "set a ladder, a floor, or both"),
         ({"ladder": [{"at_pct": 2, "action": "warn"}], "scope": "portfolio"}, "Extra inputs"),
     ],
 )

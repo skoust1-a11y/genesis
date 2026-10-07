@@ -135,11 +135,23 @@ def parse_risk_limits(raw: dict[str, Any] | None, rules: dict[str, Any] | None =
         limits["max_lots"] = int(raw["max_lots"])
     if "max_daily_loss_pct" in raw:
         limits["max_daily_loss_pct"] = float(raw["max_daily_loss_pct"])
+    capital = limits["capital_inr"]
     if raw.get("drawdown") is not None:
         policy = parse_policy(raw["drawdown"], get_settings().max_drawdown_pct)
+        floor = policy.floor
+        if floor is not None and floor.floor_inr >= capital:
+            raise ValueError(f"risk_limits.drawdown.floor.floor_inr must be below capital_inr ({capital:g})")
+        if floor is not None and floor.raise_once and floor.raise_once.at_equity_inr <= capital:
+            raise ValueError(
+                f"risk_limits.drawdown.floor.raise_once.at_equity_inr must be above capital_inr ({capital:g})"
+            )
         limits["drawdown"] = policy.model_dump(mode="json", exclude_none=True)
     if raw.get("policy") is not None:
         policy = parse_trade_policy(raw["policy"], rules, limits.get("max_lots"))
+        if policy.withdrawal is not None and policy.withdrawal.first_target_inr <= capital:
+            raise ValueError(
+                f"risk_limits.policy.withdrawal.first_target_inr must be above capital_inr ({capital:g})"
+            )
         limits["policy"] = policy.model_dump(mode="json", exclude_none=True)
     return limits
 

@@ -55,6 +55,25 @@ export type PolicyForm = {
   drawdown_basis: "mtm" | "realized";
   restore_below_pct: string;
   ladder: LevelForm[];
+
+  floor: boolean;
+  floor_inr: string;
+  floor_raise: boolean;
+  raise_at_equity_inr: string;
+  raise_to_inr: string;
+  floor_close_positions: boolean;
+  floor_resume_days: string;
+
+  withdrawal: boolean;
+  first_target_inr: string;
+  first_amount_inr: string;
+  then_share_pct: string;
+
+  odds_gate: boolean;
+  odds_vix_bands: string;
+  odds_min_trades: string;
+  odds_min_expectancy_inr: string;
+  odds_lookback_years: string;
 };
 
 export const DEFAULT_FORM: PolicyForm = {
@@ -97,7 +116,32 @@ export const DEFAULT_FORM: PolicyForm = {
     { at_pct: "8", action: "reduce_size", size_factor: "0.5", close_open_positions: false },
     { at_pct: "12", action: "stop_new_entries", size_factor: "", close_open_positions: false },
   ],
+  floor: false,
+  floor_inr: "45000",
+  floor_raise: false,
+  raise_at_equity_inr: "60000",
+  raise_to_inr: "55000",
+  floor_close_positions: true,
+  floor_resume_days: "5",
+  withdrawal: false,
+  first_target_inr: "60000",
+  first_amount_inr: "5000",
+  then_share_pct: "70",
+  odds_gate: false,
+  odds_vix_bands: "13, 16",
+  odds_min_trades: "20",
+  odds_min_expectancy_inr: "0",
+  odds_lookback_years: "",
 };
+
+/** "13, 16" -> [13, 16]; blank entries are dropped. */
+export function parseBands(value: string): number[] {
+  return value
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map(Number);
+}
 
 function num(value: string): number | undefined {
   return value.trim() === "" ? undefined : Number(value);
@@ -154,19 +198,48 @@ export function toRiskLimits(f: PolicyForm): Record<string, unknown> {
     max_lots: num(f.max_lots),
     max_daily_loss_pct: num(f.max_daily_loss_pct),
   });
+  if (f.withdrawal) {
+    policy.withdrawal = compact({
+      first_target_inr: num(f.first_target_inr),
+      first_amount_inr: num(f.first_amount_inr),
+      then_share_pct: num(f.then_share_pct),
+    });
+  }
+  if (f.odds_gate) {
+    const bands = parseBands(f.odds_vix_bands);
+    policy.odds_gate = compact({
+      vix_bands: bands.length ? bands : undefined,
+      min_trades: num(f.odds_min_trades),
+      min_expectancy_inr: num(f.odds_min_expectancy_inr),
+      lookback_years: num(f.odds_lookback_years),
+    });
+  }
   if (Object.keys(policy).length) limits.policy = policy;
-  if (f.drawdown && f.ladder.length) {
+  const ladder = f.drawdown && f.ladder.length;
+  if (ladder || f.floor) {
     limits.drawdown = compact({
       basis: f.drawdown_basis,
-      restore_below_pct: num(f.restore_below_pct),
-      ladder: f.ladder.map((l) =>
-        compact({
-          at_pct: num(l.at_pct),
-          action: l.action,
-          size_factor: l.action === "reduce_size" ? num(l.size_factor) : undefined,
-          close_open_positions: l.action === "pause" ? l.close_open_positions : undefined,
-        }),
-      ),
+      restore_below_pct: ladder ? num(f.restore_below_pct) : undefined,
+      ladder: ladder
+        ? f.ladder.map((l) =>
+            compact({
+              at_pct: num(l.at_pct),
+              action: l.action,
+              size_factor: l.action === "reduce_size" ? num(l.size_factor) : undefined,
+              close_open_positions: l.action === "pause" ? l.close_open_positions : undefined,
+            }),
+          )
+        : undefined,
+      floor: f.floor
+        ? compact({
+            floor_inr: num(f.floor_inr),
+            raise_once: f.floor_raise
+              ? { at_equity_inr: num(f.raise_at_equity_inr), to_inr: num(f.raise_to_inr) }
+              : undefined,
+            close_open_positions: f.floor_close_positions,
+            resume_after_days: num(f.floor_resume_days),
+          })
+        : undefined,
     });
   }
   return limits;

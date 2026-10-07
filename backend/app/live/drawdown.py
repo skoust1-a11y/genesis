@@ -11,6 +11,15 @@ cumulative, so a level also applies every action below it:
 
 MAX_DRAWDOWN_PCT adds a pause level no policy can remove. Levels step down only once drawdown is
 below `restore_below_pct` (immediately when it is not set). Exits are never blocked.
+
+A floor is a fixed-rupee line under equity, on the same basis as the ladder:
+- an entry is allowed only while equity is above the floor and the trade's max loss fits in the
+  buffer left (equity minus floor);
+- equity below the floor pauses the deployment, closing open positions unless told not to;
+- `raise_once` lifts the floor a single time, once equity reaches `at_equity_inr`;
+- with `resume_after_days`, the pause is a break: after that many trading days the deployment starts
+  again by itself if equity is above the starting floor (a deposit tops it up), with the floor back
+  at `floor_inr`. Without it, only a person can restart it.
 """
 
 from __future__ import annotations
@@ -28,6 +37,8 @@ ACTIONS = ("warn", "reduce_size", "stop_new_entries", "pause")
 SEVERITY = {a: i for i, a in enumerate(ACTIONS)}
 BLOCKING = ("stop_new_entries", "pause")
 ENTRIES_CHECK = "drawdown.entries_allowed"
+FLOOR_CHECK = "drawdown.floor"
+BUFFER_CHECK = "drawdown.floor_buffer"
 
 
 class _Strict(BaseModel):
@@ -49,19 +60,46 @@ class DrawdownLevel(_Strict):
         return self
 
 
+class FloorRaise(_Strict):
+    at_equity_inr: float = Field(gt=0)
+    to_inr: float = Field(gt=0)
+
+    @model_validator(mode="after")
+    def _below(self) -> FloorRaise:
+        if self.to_inr >= self.at_equity_inr:
+            raise ValueError("to_inr must be below at_equity_inr")
+        return self
+
+
+class Floor(_Strict):
+    floor_inr: float = Field(gt=0)
+    raise_once: FloorRaise | None = None
+    close_open_positions: bool = True
+    resume_after_days: int | None = Field(default=None, ge=1, le=60)  # trading days
+
+    @model_validator(mode="after")
+    def _raised_above(self) -> Floor:
+        if self.raise_once is not None and self.raise_once.to_inr <= self.floor_inr:
+            raise ValueError("raise_once.to_inr must be above floor_inr")
+        return self
+
+
 class DrawdownPolicy(_Strict):
     basis: Literal["mtm", "realized"] = "mtm"
-    ladder: list[DrawdownLevel] = Field(min_length=1)
+    ladder: list[DrawdownLevel] = Field(default_factory=list)
     restore_below_pct: float | None = Field(default=None, ge=0)
+    floor: Floor | None = None
 
     @model_validator(mode="after")
     def _ordered(self) -> DrawdownPolicy:
+        if not self.ladder and self.floor is None:
+            raise ValueError("set a ladder, a floor, or both")
         for lower, upper in zip(self.ladder, self.ladder[1:]):
             if upper.at_pct <= lower.at_pct:
                 raise ValueError("ladder at_pct values must increase")
             if SEVERITY[upper.action] < SEVERITY[lower.action]:
                 raise ValueError(f"{upper.action} at {upper.at_pct:g}% is weaker than {lower.action} below it")
-        if self.restore_below_pct is not None and self.restore_below_pct >= self.ladder[0].at_pct:
+        if self.restore_below_pct is not None and (not self.ladder or self.restore_below_pct >= self.ladder[0].at_pct):
             raise ValueError("restore_below_pct must be below the first level")
         return self
 
@@ -152,3 +190,30 @@ def decide(
 
 def scaled_lots(lots: int, size_factor: float) -> int:
     return lots if size_factor >= 1 else max(1, math.floor(lots * size_factor))
+
+
+# The floor
+
+
+def floor_in_force(floor: Floor, raised: bool) -> float:
+    return floor.raise_once.to_inr if raised and floor.raise_once else floor.floor_inr
+
+
+def floor_raise_due(floor: Floor, raised: bool, equity: float) -> bool:
+    return floor.raise_once is not None and not raised and equity >= floor.raise_once.at_equity_inr
+
+
+def floor_breached(floor_inr: float, equity: float) -> bool:
+    """Below, not at: equity left exactly on the floor (say by a withdrawal) blocks entries but does not pause."""
+    return equity < floor_inr
+
+
+def floor_checks(floor_inr: float, equity: float, max_loss: float | None) -> list[Check]:
+    """Entries need equity above the floor and the trade's max loss within the buffer left.
+    An unknown max loss fails the buffer check."""
+    equity, buffer = round(equity, 2), round(equity - floor_inr, 2)
+    loss = round(max_loss, 2) if max_loss is not None else None
+    return [
+        Check(FLOOR_CHECK, "equity_inr", ">", floor_inr, equity, equity > floor_inr),
+        Check(BUFFER_CHECK, "max_loss_inr", "<=", buffer, loss, loss is not None and loss <= buffer),
+    ]

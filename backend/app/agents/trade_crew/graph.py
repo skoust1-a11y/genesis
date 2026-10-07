@@ -44,6 +44,8 @@ from app.db.types import utcnow
 from app.engine.costs import CostProfile, leg_costs, resolve_cost_profile
 from app.engine.sim import outcome_label
 from app.live import drawdown, veto
+from app.live import money as money_rules
+from app.live import odds as live_odds
 from app.live.equity import EquityState, capital_in_force, day_pnl, equity_state
 from app.live.store import TERMINAL_STATUSES, LiveStore
 from app.market.context import ContextProvider
@@ -60,6 +62,7 @@ from app.strategies.rules import (
     with_common_risk,
 )
 from app.strategies.schema import parse_strategy_markdown
+from app.trading import odds as odds_gate
 from app.trading import policy as trade_policy
 from app.trading.decisions import (
     MissingMarketConfig,
@@ -114,12 +117,14 @@ class TickState(TypedDict, total=False):
     open_positions: int
     equity: EquityState
     ladder: drawdown.LadderDecision
+    floor_inr: float  # the floor in force, when the deployment has one
     daily_check: Check
     entry_checks: list[Check]
     max_lots: int
     sizing_check: Check | None
     unscaled_lots: int
     vix_factor: float
+    odds: odds_gate.Odds  # the odds gate's view of today's VIX band, when the policy has one
     proposal: dict
     risk_checks: list[Check]
     approval: str
@@ -869,14 +874,18 @@ def _track_phantom(state: TickState, opinion: TradeOpinion, intent: TradeIntent)
 
 
 def _drawdown(state: TickState) -> TickState:
-    """Measure drawdown from peak equity and apply the ladder. Runs after exits, so it never blocks one."""
+    """Measure drawdown from peak equity and apply the ladder, then the floor. Runs after exits, so it
+    never blocks one."""
     ctx, deployment = state["ctx"], state["deployment"]
     policy = drawdown.policy_for(deployment)
     ladder = drawdown.effective_ladder(policy, ctx.settings.max_drawdown_pct)
-    if not ladder:
-        return {}
     store = LiveStore(ctx.live)
+    floor = money_rules.floor_state(store, deployment)
+    if not ladder and floor is None:
+        return {}
     eq = equity_state(store, ctx.settings, [deployment], include_unrealized=policy is None or policy.basis == "mtm")
+    if not ladder:
+        return _floor(state, floor, eq, {"equity": eq})
     decision = drawdown.decide(
         ladder, policy.restore_below_pct if policy else None, eq.drawdown_pct, store.drawdown_level(deployment.id)
     )
@@ -895,7 +904,43 @@ def _drawdown(state: TickState) -> TickState:
         ctx.live.commit()
     if decision.pause is not None:
         return _drawdown_pause(state, decision)
-    return {"equity": eq, "ladder": decision}
+    out = {"equity": eq, "ladder": decision}
+    return _floor(state, floor, eq, out) if floor is not None else out
+
+
+def _floor(state: TickState, fs: money_rules.FloorState, eq: EquityState, out: TickState) -> TickState:
+    """Raise the floor once if equity reached the raise level; pause if equity fell below it."""
+    ctx = state["ctx"]
+    store, equity = LiveStore(ctx.live), eq.equity_inr
+    if drawdown.floor_raise_due(fs.floor, fs.raised, equity):
+        reason = (
+            f"equity ₹{equity:,.0f} reached ₹{fs.floor.raise_once.at_equity_inr:,.0f}: floor raised from "
+            f"₹{fs.floor_inr:,.0f} to ₹{fs.floor.raise_once.to_inr:,.0f}"
+        )
+        store.add_deployment_event(ctx.deployment_id, money_rules.FLOOR_RAISED, reason)
+        ctx.live.commit()
+        alerts.notify(ctx.settings, money_rules.FLOOR_RAISED, ctx.deployment_id, reason)
+        fs = replace(fs, raised=True, floor_inr=fs.floor.raise_once.to_inr)
+    if not drawdown.floor_breached(fs.floor_inr, equity):
+        return out | {"floor_inr": fs.floor_inr}
+    reason = f"equity ₹{equity:,.0f} fell below the ₹{fs.floor_inr:,.0f} floor"
+    if fs.floor.resume_after_days:
+        reason += (
+            f"; break of {fs.floor.resume_after_days} trading day(s), then it starts again by itself if equity "
+            f"is above ₹{fs.floor.floor_inr:,.0f}"
+        )
+    exits = list(state.get("exits", []))
+    if fs.floor.close_open_positions:
+        trigger = Check(drawdown.FLOOR_CHECK, "equity_inr", "<", fs.floor_inr, round(equity, 2), True)
+        error = _close_all(state, trigger, exits)
+        if error:
+            return {"stop": True, "outcome": "halted", "detail": error, "exits": exits}
+    if store.deployment_status(ctx.deployment_id) == "started":
+        store.add_deployment_event(ctx.deployment_id, "paused", reason)
+        store.add_deployment_event(ctx.deployment_id, money_rules.FLOOR_PAUSED, reason)
+        ctx.live.commit()
+        alerts.notify(ctx.settings, "paused", ctx.deployment_id, reason)
+    return {"stop": True, "outcome": "paused", "detail": reason, "exits": exits}
 
 
 def _drawdown_pause(state: TickState, decision: drawdown.LadderDecision) -> TickState:
@@ -935,8 +980,10 @@ def _close_all(state: TickState, trigger: Check, exits: list[dict]) -> str | Non
 
 def _daily(state: TickState) -> TickState:
     """The policy's daily profit target: once today's P&L reaches it, block new entries (and with
-    on_hit=close_all, close every open position). Runs after exits, so it never blocks one."""
+    on_hit=close_all, close every open position). Runs after exits, so it never blocks one. Also
+    alerts when the withdrawal rule says money is due."""
     ctx, deployment = state["ctx"], state["deployment"]
+    money_rules.notify_withdrawal_due(LiveStore(ctx.live), ctx.settings, deployment)
     policy = trade_policy.policy_from_limits(deployment.risk_limits)
     target = policy.daily_target if policy else None
     if target is None:
@@ -986,7 +1033,7 @@ def _entry(state: TickState) -> TickState:
     lots = max(lots, 1)  # a sizing check that failed still records the entry, as blocked
     if lots != proposal["lots"]:
         proposal = resize_proposal(rules, proposal, lots)
-    return {
+    out: TickState = {
         "entry_checks": checks,
         "proposal": proposal,
         "max_lots": max_lots,
@@ -994,6 +1041,14 @@ def _entry(state: TickState) -> TickState:
         "unscaled_lots": unscaled,
         "vix_factor": vix_factor,
     }
+    gate = policy.odds_gate if policy is not None else None
+    if gate is not None:
+        snapshot = state["snapshot"]
+        trades = live_odds.history(
+            deployment.id, snapshot.rules_sha256, rules, state["profile"], ctx.settings, market.as_of
+        )
+        out["odds"] = odds_gate.odds_for(trades, market.as_of, market.vix, gate)
+    return out
 
 
 def _risk(state: TickState) -> TickState:
@@ -1009,17 +1064,18 @@ def _risk_checks(state: TickState, proposal: dict) -> list[Check]:
     now = ctx.clock()
     today = now.date()
     portfolio_open = sum(len(store.open_intents(d.id)) for d in store.active_deployments())
+    closed_today = store.trades_closed_on(today, ctx.deployment_id)
+    entries = [i.decided_at for i in store.intents(ctx.deployment_id) if i.action == "open" and i.approval == "auto"]
+    last_trade = max(entries + [t.closed_at for t in store.closed_trades([ctx.deployment_id])], default=None)
     account = AccountState(
         open_positions=state["open_positions"],
-        pnl_today=float(sum(t.net for t in store.trades_closed_on(today, ctx.deployment_id))),
+        pnl_today=float(sum(t.net for t in closed_today)),
         portfolio_open_positions=portfolio_open,
         portfolio_pnl_today=float(sum(t.net for t in store.trades_closed_on(today))),
-        entries_today=sum(
-            1
-            for i in store.intents(ctx.deployment_id)
-            if i.action == "open" and i.approval == "auto" and i.decided_at.date() == today
-        ),
+        entries_today=sum(1 for at in entries if at.date() == today),
         cooldown_days_left=_cooldown_days_left(ctx, rules, store, now),
+        losses_today=sum(1 for t in closed_today if not t.partial and t.net < 0),
+        minutes_since_last_trade=(now - last_trade).total_seconds() / 60 if last_trade else None,
     )
     raw_limits = deployment.risk_limits
     limits = RiskLimits(
@@ -1033,7 +1089,13 @@ def _risk_checks(state: TickState, proposal: dict) -> list[Check]:
     ladder = state.get("ladder")
     if ladder is not None and ladder.check is not None:
         checks.append(ladder.check)
+    if state.get("floor_inr") is not None:
+        economics = proposal["economics"]
+        max_loss = economics.max_loss if economics else None
+        checks += drawdown.floor_checks(state["floor_inr"], state["equity"].equity_inr, max_loss)
     checks += [c for c in (state.get("sizing_check"), state.get("daily_check")) if c is not None]
+    if state.get("odds") is not None:
+        checks += odds_gate.odds_checks(state["odds"], live_odds.gate_for(deployment))
     margin = _margin_check(ctx, proposal)
     if margin is not None:
         checks.append(margin)
@@ -1178,6 +1240,8 @@ def _explain(state: TickState) -> TickState:
             default += f" {' and '.join(cuts)} cut {state['unscaled_lots']} to {rules_lots} lots."
         if state.get("rules_lots", state["proposal"]["lots"]) != state["proposal"]["lots"]:
             default += f" The LLM opinion reduced {state['rules_lots']} to {state['proposal']['lots']} lots: {why}."
+    if state.get("odds") is not None:
+        default += f" Odds: {odds_gate.odds_text(state['odds'])}."
     facts = {
         "action": "blocked" if failed else "vetoed" if state["approval"] == "vetoed" else "open",
         "entry_checks": [_describe(c) for c in state["entry_checks"]],

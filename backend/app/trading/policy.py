@@ -11,7 +11,12 @@ policy can only make a deployment more careful than its strategy rules:
 - time exits close a position some days before expiry (optionally from a time of day, IST) or
   before a scheduled event;
 - the daily profit target stops new entries, or closes everything, once the day's P&L reaches it;
-- VIX sizing trades fewer lots when India VIX is high.
+- VIX sizing trades fewer lots when India VIX is high;
+- the withdrawal rule says when profit should come out of the account: a first fixed amount once
+  realized equity reaches a target, then a share of every rise above the equity left after the
+  latest withdrawal. Live, it only alerts; a person records the withdrawal. Backtests apply it;
+- the odds gate allows an entry only when the strategy's own past trades in today's VIX band
+  made money after costs (`app.trading.odds`).
 
 Pure functions shared by the Trade Crew and the simulator.
 """
@@ -144,6 +149,35 @@ class VixSizing(_Strict):
         return self
 
 
+class Withdrawal(_Strict):
+    first_target_inr: float = Field(gt=0)  # realized equity at which the first withdrawal is due
+    first_amount_inr: float = Field(gt=0)
+    then_share_pct: float | None = Field(default=None, gt=0, le=100)  # of each later rise in realized equity
+
+    @model_validator(mode="after")
+    def _below(self) -> Withdrawal:
+        if self.first_amount_inr >= self.first_target_inr:
+            raise ValueError("first_amount_inr must be below first_target_inr")
+        return self
+
+
+class OddsGate(_Strict):
+    """Enter only when the strategy's own past trades in today's India VIX band made money (`app.trading.odds`)."""
+
+    vix_bands: list[float] = Field(default_factory=lambda: [13.0, 16.0], min_length=1, max_length=4)
+    min_trades: int = Field(default=20, ge=5, le=500)
+    min_expectancy_inr: float = 0.0  # average net per lot the band's past trades must beat
+    lookback_years: int | None = Field(default=None, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _rising(self) -> OddsGate:
+        if any(e <= 0 for e in self.vix_bands):
+            raise ValueError("vix_bands must be above 0")
+        if any(b <= a for a, b in zip(self.vix_bands, self.vix_bands[1:])):
+            raise ValueError("vix_bands must increase")
+        return self
+
+
 class TradePolicy(_Strict):
     sizing: Sizing | None = None
     booking: Booking | None = None
@@ -151,6 +185,8 @@ class TradePolicy(_Strict):
     daily_target: DailyTarget | None = None
     compounding: Compounding | None = None
     vix_sizing: VixSizing | None = None
+    withdrawal: Withdrawal | None = None
+    odds_gate: OddsGate | None = None
 
     @model_validator(mode="after")
     def _compounding_needs_risk_sizing(self) -> TradePolicy:
@@ -320,6 +356,26 @@ def _past(at: str | None, now: datetime | None) -> bool:
 def partial_lots(lots_opened: int, lots_open: int, close_pct: float) -> int:
     """Lots a partial booking closes: `close_pct` of the lots opened, at least 1, always leaving 1 open."""
     return min(max(1, round(lots_opened * close_pct / 100)), lots_open - 1) if lots_open > 1 else 0
+
+
+def withdrawal_due(
+    rule: Withdrawal, equity: float, withdrawn: float, base: float | None, keep_above: float | None = None
+) -> float:
+    """Rupees due out of the account now, from realized `equity`.
+
+    `withdrawn` is the total withdrawn so far and `base` the realized equity left just after the
+    latest withdrawal. Until `first_amount_inr` has come out, it is due once equity reaches
+    `first_target_inr`; after that, `then_share_pct` of equity above `base`. A withdrawal never takes
+    equity below `keep_above` (the floor in force)."""
+    if withdrawn < rule.first_amount_inr:
+        due = rule.first_amount_inr - withdrawn if equity >= rule.first_target_inr else 0.0
+    elif rule.then_share_pct is not None and base is not None:
+        due = max(0.0, equity - base) * rule.then_share_pct / 100
+    else:
+        due = 0.0
+    if keep_above is not None:
+        due = min(due, equity - keep_above)
+    return float(math.floor(due)) if due >= 1 else 0.0
 
 
 def daily_target_check(target: DailyTarget, day_pnl: float) -> Check:

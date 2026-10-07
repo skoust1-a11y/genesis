@@ -80,6 +80,8 @@ class Settings(BaseSettings):
     max_consecutive_losses: int = Field(default=0, ge=0, alias="MAX_CONSECUTIVE_LOSSES")
     loss_cooldown_days: int = Field(default=0, ge=0, le=30, alias="LOSS_COOLDOWN_DAYS")
     max_loss_pct_of_capital: float = Field(default=0, ge=0, le=100, alias="MAX_LOSS_PCT_OF_CAPITAL")
+    max_losses_per_day: int = Field(default=0, ge=0, alias="MAX_LOSSES_PER_DAY")
+    min_minutes_between_trades: int = Field(default=0, ge=0, le=375, alias="MIN_MINUTES_BETWEEN_TRADES")
     # Fallback when the data has no lot size (NSE/FAOP/70616: from the January 2026 expiries)
     lot_sizes: str = Field(default="NIFTY:65,BANKNIFTY:30", alias="LOT_SIZES")
     strike_steps: str = Field(default="NIFTY:50,BANKNIFTY:100", alias="STRIKE_STEPS")
@@ -144,6 +146,8 @@ class Settings(BaseSettings):
             "max_consecutive_losses": self.max_consecutive_losses,
             "cooldown_days": self.loss_cooldown_days,
             "max_loss_pct_of_capital": self.max_loss_pct_of_capital,
+            "max_losses_per_day": self.max_losses_per_day,
+            "min_minutes_between_trades": self.min_minutes_between_trades,
         }
         return {k: v for k, v in values.items() if v}
 

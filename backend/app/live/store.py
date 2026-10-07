@@ -40,6 +40,8 @@ JSON_FIELDS = {
 }  # fmt: skip
 TERMINAL_STATUSES = ("stopped", "halted")
 VETO_EVENTS = ("llm_veto_enabled", "llm_veto_disabled")  # settings, not lifecycle: ignored by deployment_status
+MONEY_EVENTS = ("floor_paused", "floor_raised", "floor_top_up_needed", "withdrawal_due")  # notices, also ignored
+NOTICE_EVENTS = VETO_EVENTS + MONEY_EVENTS
 REVIEW_FIELDS = (
     "followed_plan", "process_verdict", "what_went_well", "what_went_wrong", "mistake_tags",
     "lesson", "improvement_suggestion", "suggested_rule_change", "confidence", "supersedes_review_id",
@@ -220,7 +222,7 @@ class LiveStore:
     def deployment_status(self, deployment_id: str) -> str:
         latest = self.session.scalar(
             select(DeploymentEvent.event)
-            .where(DeploymentEvent.deployment_id == deployment_id, DeploymentEvent.event.not_in(VETO_EVENTS))
+            .where(DeploymentEvent.deployment_id == deployment_id, DeploymentEvent.event.not_in(NOTICE_EVENTS))
             .order_by(DeploymentEvent.id.desc())
             .limit(1)
         )

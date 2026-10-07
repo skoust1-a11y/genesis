@@ -10,8 +10,12 @@ uses, so a simulated run and a paper run of the same rules on the same data take
 
 With a `Management` (a deployment's trade policy and drawdown ladder), the same policy code as the
 Trade Crew also runs: booking and time exits after the strategy's exits, then the drawdown ladder
-and daily profit target, then sizing at entry. A pause stops entries for the rest of the window,
-since nobody restarts a backtest.
+and daily profit target, then sizing at entry. A ladder pause stops entries for the rest of the
+window, since nobody restarts a backtest. A floor pause with `resume_after_days` is a break: after
+it, the account is topped up to the approved capital and trading starts again with the floor reset.
+The withdrawal rule is applied as soon as it is due on a day with no open position. The odds gate
+checks each entry signal against a rules-only run of the same strategy over all the market data,
+counting only trades that closed before that day.
 
 Assumptions (also written into every report):
 - end-of-day data: rules are checked at the close and fills happen at the close, so a stop breached
@@ -25,7 +29,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass, field, fields, replace
-from datetime import date
+from datetime import date, timedelta
 from typing import Any
 
 from app.agents.trade_crew.legs import signed
@@ -44,6 +48,7 @@ from app.strategies.rules import (
     with_common_risk,
 )
 from app.strategies.schema import StrategyDocument
+from app.trading import odds as odds_gate
 from app.trading import policy as trade_policy
 from app.trading.decisions import (
     MissingMarketConfig,
@@ -187,6 +192,7 @@ class Management:
     max_drawdown_pct: float = 0
     capital_inr: float | None = None
     max_lots: int | None = None
+    odds_history: list[odds_gate.HistTrade] | None = None  # rules-only trades behind the policy's odds gate
 
     @classmethod
     def from_limits(cls, risk_limits: dict[str, Any], max_drawdown_pct: float) -> Management:
@@ -480,6 +486,14 @@ def _close(
     )
 
 
+def _minutes_since(day: str, open_positions: list[_Position], trades: list[TradeResult]) -> float | None:
+    """Minutes since the latest entry or exit, at end-of-day resolution: 0 on the same day."""
+    days = [p.entry_date for p in open_positions] + [d for t in trades for d in (t.date, t.exit_date) if d]
+    if not days:
+        return None
+    return float((date.fromisoformat(day) - date.fromisoformat(max(days))).days * 24 * 60)
+
+
 def _drawdown_stats(curve: list[dict]) -> tuple[float, int]:
     peak, max_dd, run, longest = float("-inf"), 0.0, 0, 0
     for point in curve:
@@ -523,6 +537,14 @@ def simulate(
     realized_basis = bool(m and m.drawdown and m.drawdown.basis == "realized")
     level, peak_equity, paused_on = 0, capital, None
     ladder_events: list[dict] = []
+    floor = m.drawdown.floor if m and m.drawdown else None
+    withdrawal = policy.withdrawal if policy else None
+    approved = capital
+    money = {"floor_events": [], "withdrawals": [], "deposited_inr": 0.0, "withdrawn_inr": 0.0}
+    floor_raised, floor_paused_on, withdraw_base = False, None, None
+    gate = policy.odds_gate if policy else None
+    odds_history = (m.odds_history or []) if m else []
+    odds_blocked = 0
     trades: list[TradeResult] = []
     open_positions: list[_Position] = []
     skipped: dict[str, int] = {}
@@ -544,6 +566,17 @@ def simulate(
         for position in list(open_positions):
             close(position, position.last_quotes, fired)
             open_positions.remove(position)
+
+    def equity_now(on_closed: bool) -> float:
+        if on_closed:
+            return capital + sum(t.net for t in trades + closed_today)
+        return capital + realized + sum(_unrealized(p, p.last_quotes) for p in open_positions)
+
+    def move_capital(amount: float) -> None:
+        nonlocal capital, peak_equity
+        capital += amount
+        peak_equity += amount
+        limits.capital_inr = capital
 
     for index in range(days):
         held = sorted({(leg["strike"], leg["option_type"], leg["expiry"]) for p in open_positions for leg in p.legs})
@@ -603,6 +636,41 @@ def simulate(
             if decision.check is not None:
                 extra.append(decision.check)
             size_factor = decision.size_factor
+        floor_now = None
+        if floor is not None and floor_paused_on is None:
+            account = equity_now(realized_basis)
+            if drawdown.floor_raise_due(floor, floor_raised, account):
+                floor_raised = True
+                money["floor_events"].append(
+                    {"date": market.as_of, "event": "floor_raised", "floor_inr": floor.raise_once.to_inr,
+                     "equity_inr": round(account, 2)}
+                )  # fmt: skip
+            floor_now = drawdown.floor_in_force(floor, floor_raised)
+        if withdrawal is not None and floor_paused_on is None and not open_positions:
+            on_closed = equity_now(True)
+            due = trade_policy.withdrawal_due(withdrawal, on_closed, money["withdrawn_inr"], withdraw_base, floor_now)
+            if due:
+                move_capital(-due)
+                money["withdrawn_inr"] += due
+                withdraw_base = on_closed - due
+                money["withdrawals"].append({"date": market.as_of, "amount_inr": due, "equity_after_inr": withdraw_base})
+        if floor_now is not None:
+            account = equity_now(realized_basis)
+            if drawdown.floor_breached(floor_now, account):
+                floor_paused_on = market.as_of
+                money["floor_events"].append(
+                    {"date": market.as_of, "event": "floor_paused", "floor_inr": floor_now, "equity_inr": round(account, 2)}
+                )
+                if floor.close_open_positions:
+                    close_all(Check(drawdown.FLOOR_CHECK, "equity_inr", "<", floor_now, round(account, 2), True))
+                floor_now = None
+        elif floor_paused_on is not None and floor.resume_after_days is not None:
+            if day_index[market.as_of] - day_index[floor_paused_on] > floor.resume_after_days:
+                top_up = max(0.0, approved - equity_now(realized_basis))
+                move_capital(top_up)
+                money["deposited_inr"] += top_up
+                money["floor_events"].append({"date": market.as_of, "event": "resumed", "top_up_inr": round(top_up, 2)})
+                floor_paused_on, floor_raised, floor_now = None, False, floor.floor_inr
         if policy is not None and policy.daily_target is not None:
             unrealized = sum(_unrealized(p, p.last_quotes) for p in open_positions)
             day_pnl = realized + unrealized - (curve[-1]["equity"] if curve else 0.0)
@@ -614,9 +682,14 @@ def simulate(
 
         if not closed_today and len(open_positions) < rules.risk.max_open_positions:
             entry = check_entry(rules, market)
-            if all(c.passed for c in entry) and paused_on is not None:
-                skipped["drawdown.paused"] = skipped.get("drawdown.paused", 0) + 1
+            if all(c.passed for c in entry) and (paused_on is not None or floor_paused_on is not None):
+                reason = "drawdown.paused" if paused_on is not None else "drawdown.floor_paused"
+                skipped[reason] = skipped.get(reason, 0) + 1
             elif all(c.passed for c in entry):
+                if gate is not None:
+                    odds_now = odds_gate.odds_checks(odds_gate.odds_for(odds_history, market.as_of, market.vix, gate), gate)
+                    odds_blocked += not all(c.passed for c in odds_now)
+                    extra += odds_now
                 try:
                     proposal = build_entry_proposal(rules, market, settings, lots, capital)
                 except MissingMarketConfig:
@@ -627,6 +700,9 @@ def simulate(
                         rules, proposal, policy, capital, sum(t.net for t in trades), size_factor, market.vix
                     )
                     extra += [sizing] if sizing else []
+                if proposal is not None and floor_now is not None:
+                    e = proposal["economics"]
+                    extra += drawdown.floor_checks(floor_now, equity_now(realized_basis), e.max_loss if e else None)
                 if proposal is not None:
                     pnl_today = sum(t.net for t in trades if t.exit_date == market.as_of)
                     today = day_index[market.as_of]
@@ -642,6 +718,10 @@ def simulate(
                             [(t.exit_date, t.net) for t in trades if not t.partial and t.exit_date in day_index],
                             lambda day, today=today: today - day_index[day],
                         ),
+                        losses_today=sum(
+                            1 for t in trades if t.exit_date == market.as_of and not t.partial and t.net < 0
+                        ),
+                        minutes_since_last_trade=_minutes_since(market.as_of, open_positions, trades),
                     )
                     risk = entry_risk_checks(rules, limits, account, proposal) + extra
                     failed = [c.rule for c in risk if not c.passed]
@@ -718,21 +798,51 @@ def simulate(
         data_source=data_source,
         by_year=by_year,
         skipped=skipped,
-        management=_management_summary(trades, ladder_events, paused_on, level) if m else {},
+        management=(
+            _management_summary(trades, ladder_events, paused_on, level, money, floor_paused_on)
+            | _odds_summary(gate, odds_history, odds_blocked, last_market.as_of if last_market else None)
+            if m else {}
+        ),
     )
 
 
-def _management_summary(trades: list[TradeResult], ladder_events: list[dict], paused_on: str | None, level: int):
+def _odds_summary(
+    gate: trade_policy.OddsGate | None, history: list[odds_gate.HistTrade], blocked: int, end: str | None
+) -> dict:
+    """Signals the odds gate blocked and, per VIX band, the past trades it knew of by the window's end."""
+    if gate is None:
+        return {}
+    after_end = (date.fromisoformat(end) + timedelta(days=1)).isoformat() if end else "9999-12-31"
+    return {
+        "odds_blocked": blocked,
+        "odds_bands": [o.as_dict() for o in odds_gate.odds_table(history, after_end, gate)],
+        "odds_history_trades": len(history),
+    }
+
+
+def _management_summary(
+    trades: list[TradeResult], ladder_events: list[dict], paused_on: str | None, level: int,
+    money: dict, floor_paused_on: str | None,
+) -> dict:  # fmt: skip
     exits: dict[str, int] = {}
     for t in trades:
         if t.exit_reason.startswith(("policy.", "drawdown.")):
             exits[t.exit_reason] = exits.get(t.exit_reason, 0) + 1
+    deposited, withdrawn = round(money["deposited_inr"], 2), round(money["withdrawn_inr"], 2)
     return {
         "policy_exits": exits,
         "partial_closes": sum(1 for t in trades if t.partial),
         "drawdown_events": ladder_events,
         "drawdown_level": level,
         "paused_on": paused_on,
+        "floor_events": money["floor_events"],
+        "floor_paused_on": floor_paused_on,
+        "floor_pauses": sum(1 for e in money["floor_events"] if e["event"] == "floor_paused"),
+        "restarts": sum(1 for e in money["floor_events"] if e["event"] == "resumed"),
+        "withdrawals": money["withdrawals"],
+        "withdrawn_inr": withdrawn,
+        "topped_up_inr": deposited,
+        "withdrawn_less_topped_up_inr": round(withdrawn - deposited, 2),
     }
 
 
@@ -746,6 +856,10 @@ def run_window(
     management: Management | None = None,
 ) -> SimResult:
     rules = scenario.parsed
+    gate = management.policy.odds_gate if management and management.policy else None
+    if gate is not None and management.odds_history is None and dates:
+        history = odds_gate.strategy_history(rules, source, profile, settings, until=dates[-1])
+        management = replace(management, odds_history=history)
     feed = source.feed(dates, dte_window(rules))
     return simulate(
         rules, feed, len(dates), profile, settings,

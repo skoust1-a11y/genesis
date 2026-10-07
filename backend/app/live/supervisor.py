@@ -5,7 +5,8 @@ crew subprocess (`python -m app.agents.trade_crew run`); a crew that crashes is 
 exponential backoff (it reconciles with the broker before its first tick), and one whose
 deployment is paused, stopped or halted is terminated. Alerts go out when a crew misses its
 heartbeat for HEARTBEAT_MAX_AGE_S and when it keeps crashing. A crew that exits cleanly (its replay
-feed ran out) is not restarted.
+feed ran out) is not restarted. Each pass also ends floor breaks that are over (`app.live.money`),
+so a deployment paused by its floor with `resume_after_days` starts again without a person.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from sqlalchemy.orm import Session
 from app import alerts
 from app.config import Settings
 from app.db.types import utcnow
+from app.live import money
 from app.live.store import LiveStore
 
 log = logging.getLogger("genesis.supervisor")
@@ -121,6 +123,15 @@ class Supervisor:
         actions: dict[str, str] = {}
         try:
             store = LiveStore(live)
+            for deployment in store.active_deployments():
+                try:
+                    ended = money.resume_if_due(store, self.settings, deployment, self.clock())
+                except Exception as exc:  # one deployment's break must not stop the supervisor
+                    live.rollback()
+                    log.error("floor break check failed for %s: %s: %s", deployment.id, type(exc).__name__, exc)
+                    continue
+                if ended:
+                    actions[deployment.id] = ended
             started = {d.id for d in store.active_deployments() if store.deployment_status(d.id) == "started"}
             for deployment_id in list(self.children):
                 if deployment_id not in started:

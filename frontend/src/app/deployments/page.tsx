@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 
 import { EquityChart } from "@/components/EquityChart";
+import { type OddsBand, OddsTable } from "@/components/OddsTable";
 import { api, getActor, inr, pct, setActor } from "@/lib/api";
 
 type Deployment = {
@@ -42,6 +43,37 @@ type Drawdown = {
   events: { id: number; created_at: string; level: number; action: string; drawdown_pct: number; detail: string }[];
 };
 type Position = { open_intent_id: string; opened_at: string; pnl: number | null; peak_pct?: number | null; dte?: number | null; marked_at: string | null; legs?: { quantity: number }[] };
+type Money = {
+  floor: {
+    floor_inr: number;
+    raise_once?: { at_equity_inr: number; to_inr: number };
+    resume_after_days?: number;
+    close_open_positions: boolean;
+    basis: string;
+    raised: boolean;
+    floor_in_force_inr: number;
+    equity_inr: number;
+    buffer_inr: number;
+    on_break: boolean;
+    break_days_left: number | null;
+  } | null;
+  withdrawal: {
+    rule: { first_target_inr: number; first_amount_inr: number; then_share_pct?: number };
+    due_inr: number;
+    withdrawn_inr: number;
+    realized_equity_inr: number;
+  } | null;
+};
+type Odds = {
+  gate: { vix_bands: number[]; min_trades: number; min_expectancy_inr: number; lookback_years?: number };
+  as_of: string;
+  vix_date: string | null;
+  today: OddsBand & { vix: number | null };
+  entries_open: boolean;
+  summary: string;
+  bands: OddsBand[];
+  history_trades: number;
+} | null;
 type CapitalEvents = { capital_in_force_inr: number; capital_events: { id: number; kind: string; amount_inr: number; note: string | null; actor: string; created_at: string }[] };
 
 const STATUS_CLASS: Record<string, string> = {
@@ -69,6 +101,9 @@ export default function DeploymentsPage() {
   const [drawdown, setDrawdown] = useState<Drawdown | null>(null);
   const [positions, setPositions] = useState<Position[]>([]);
   const [capital, setCapital] = useState<CapitalEvents | null>(null);
+  const [money, setMoney] = useState<Money | null>(null);
+  const [odds, setOdds] = useState<Odds | undefined>(undefined);
+  const [oddsError, setOddsError] = useState<string | null>(null);
   const [actor, setActorName] = useState("");
   const [reason, setReason] = useState("");
   const [capitalKind, setCapitalKind] = useState("deposit");
@@ -90,13 +125,15 @@ export default function DeploymentsPage() {
       api<Drawdown>(`/api/live/deployments/${id}/drawdown`),
       api<{ positions: Position[] }>(`/api/live/positions?deployment_id=${id}`),
       api<CapitalEvents>(`/api/live/deployments/${id}/capital-events`),
+      api<Money>(`/api/live/deployments/${id}/money`),
     ])
-      .then(([d, eq, dd, pos, cap]) => {
+      .then(([d, eq, dd, pos, cap, m]) => {
         setDetail(d);
         setEquity(eq);
         setDrawdown(dd);
         setPositions(pos.positions);
         setCapital(cap);
+        setMoney(m);
       })
       .catch((e) => setError(e.message));
   }, []);
@@ -109,6 +146,16 @@ export default function DeploymentsPage() {
   useEffect(() => {
     if (selected) loadDetail(selected);
   }, [selected, loadDetail]);
+
+  useEffect(() => {
+    if (!selected) return;
+    setOdds(undefined);
+    setOddsError(null);
+    // Loaded on its own: the first request of the day backtests the strategy's whole history.
+    api<{ odds: Odds }>(`/api/live/deployments/${selected}/odds`)
+      .then((d) => setOdds(d.odds))
+      .catch((e) => setOddsError(e.message));
+  }, [selected]);
 
   const [notice, setNotice] = useState<string | null>(null);
 
@@ -286,6 +333,93 @@ export default function DeploymentsPage() {
               )}
             </div>
           </section>
+
+          {(odds || oddsError) && (
+            <section className="rounded-xl border bg-white p-5 shadow-sm space-y-3">
+              <h3 className="font-medium">Odds gate</h3>
+              {oddsError && <p className="text-sm text-rose-800">Could not load the odds: {oddsError}</p>}
+              {odds && (
+                <>
+                  <p
+                    className={`rounded-md px-3 py-2 text-sm ${odds.entries_open ? "bg-emerald-50 text-emerald-900" : "bg-amber-50 text-amber-900"}`}
+                  >
+                    {odds.entries_open ? "Entries allowed" : "Entries blocked"} at the latest VIX
+                    {odds.today.vix !== null ? ` (${odds.today.vix.toFixed(2)} on ${odds.vix_date})` : ""}: {odds.summary}.
+                  </p>
+                  <OddsTable bands={odds.bands} current={odds.today.band} />
+                  <p className="text-xs text-zinc-500">
+                    Needs at least {odds.gate.min_trades} past trades in the band and an average above {inr(odds.gate.min_expectancy_inr)} per lot
+                    after costs. Past trades come from a rules-only backtest of this strategy ({odds.history_trades} trades
+                    {odds.gate.lookback_years ? `, last ${odds.gate.lookback_years} years counted` : ""}), counted only once closed. The crew
+                    checks the band of the live VIX at each entry.
+                  </p>
+                </>
+              )}
+            </section>
+          )}
+
+          {money && (money.floor || money.withdrawal) && (
+            <section className="grid gap-6 lg:grid-cols-2">
+              {money.floor && (
+                <div className="rounded-xl border bg-white p-5 shadow-sm space-y-3">
+                  <h3 className="font-medium">Capital floor · {inr(money.floor.floor_in_force_inr)}</h3>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <Stat label={`Equity (${money.floor.basis})`} value={inr(money.floor.equity_inr)} />
+                    <Stat label="Buffer left" value={inr(money.floor.buffer_inr)} />
+                  </div>
+                  <ul className="text-sm space-y-1">
+                    <li>Starting floor {inr(money.floor.floor_inr)}</li>
+                    {money.floor.raise_once && (
+                      <li className={money.floor.raised ? "font-medium text-emerald-800" : ""}>
+                        Raised once to {inr(money.floor.raise_once.to_inr)} when equity reaches {inr(money.floor.raise_once.at_equity_inr)}
+                        {money.floor.raised ? " (raised)" : ""}
+                      </li>
+                    )}
+                    <li>
+                      {money.floor.resume_after_days
+                        ? `After a floor pause: a ${money.floor.resume_after_days}-trading-day break, then it starts again by itself if equity is above the floor`
+                        : "After a floor pause: only a person restarts it"}
+                    </li>
+                  </ul>
+                  {money.floor.on_break && (
+                    <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                      On a break:{" "}
+                      {money.floor.break_days_left
+                        ? `${money.floor.break_days_left} trading day(s) left.`
+                        : "over; deposit enough to bring equity above the floor and it starts again."}
+                    </p>
+                  )}
+                </div>
+              )}
+              {money.withdrawal && (
+                <div className="rounded-xl border bg-white p-5 shadow-sm space-y-3">
+                  <h3 className="font-medium">Withdrawal rule</h3>
+                  <p className="text-sm">
+                    First {inr(money.withdrawal.rule.first_amount_inr)} once realized equity reaches {inr(money.withdrawal.rule.first_target_inr)}
+                    {money.withdrawal.rule.then_share_pct ? `, then ${money.withdrawal.rule.then_share_pct}% of each rise after a withdrawal` : ""}.
+                  </p>
+                  <div className="grid gap-2 sm:grid-cols-3">
+                    <Stat label="Due now" value={inr(money.withdrawal.due_inr)} />
+                    <Stat label="Withdrawn so far" value={inr(money.withdrawal.withdrawn_inr)} />
+                    <Stat label="Realized equity" value={inr(money.withdrawal.realized_equity_inr)} />
+                  </div>
+                  {money.withdrawal.due_inr > 0 && (
+                    <button
+                      className="rounded-md border px-3 py-1.5 text-sm hover:bg-zinc-50"
+                      onClick={() => {
+                        setCapitalKind("withdrawal");
+                        setCapitalAmount(String(money.withdrawal?.due_inr ?? ""));
+                        setCapitalNote("withdrawal rule");
+                      }}
+                    >
+                      Fill in a {inr(money.withdrawal.due_inr)} withdrawal below
+                    </button>
+                  )}
+                  <p className="text-xs text-zinc-500">Nothing moves money by itself: take it out at the broker, then record it under Capital.</p>
+                </div>
+              )}
+            </section>
+          )}
 
           <section className="grid gap-6 lg:grid-cols-2">
             <div className="rounded-xl border bg-white p-5 shadow-sm space-y-3">

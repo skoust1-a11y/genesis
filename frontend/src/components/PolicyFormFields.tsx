@@ -141,6 +141,29 @@ export function PolicyFormFields({ form, onChange, profitTargetPct }: Props) {
       </Section>
 
       <Section
+        title="Odds gate"
+        note="Trade only when the odds favour you: an entry needs the strategy's own past trades in today's India VIX band to have made money on average, per lot after costs. Past trades come from a rules-only backtest and only count once closed, so early on every band is blocked until it has enough of them."
+      >
+        <Toggle checked={form.odds_gate} onChange={(v) => set("odds_gate", v)} label="Enter only when the odds favour the trade" />
+        {form.odds_gate && (
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="VIX band edges" hint="Comma-separated, rising, up to 4. 13, 16 gives below 13, 13–16 and 16 or more">
+              <input className={input} value={form.odds_vix_bands} onChange={(e) => set("odds_vix_bands", e.target.value)} />
+            </Field>
+            <Field label="Min past trades in the band" hint="5 to 500; fewer blocks the entry">
+              <input className={input} inputMode="numeric" value={form.odds_min_trades} onChange={(e) => set("odds_min_trades", e.target.value)} />
+            </Field>
+            <Field label="Min average net per lot (₹)" hint="The band's past trades must beat this">
+              <input className={input} inputMode="decimal" value={form.odds_min_expectancy_inr} onChange={(e) => set("odds_min_expectancy_inr", e.target.value)} />
+            </Field>
+            <Field label="Look back (years)" hint="Blank: all history">
+              <input className={input} inputMode="numeric" value={form.odds_lookback_years} onChange={(e) => set("odds_lookback_years", e.target.value)} />
+            </Field>
+          </div>
+        )}
+      </Section>
+
+      <Section
         title="Profit booking"
         note={`Runs only when the strategy's own exits did not fire, so thresholds must sit below ${target} profit target. Percentages are of the credit received, or of the premium paid when buying options.`}
       >
@@ -313,6 +336,69 @@ export function PolicyFormFields({ form, onChange, profitTargetPct }: Props) {
             >
               Add level
             </button>
+          </div>
+        )}
+      </Section>
+
+      <Section
+        title="Capital floor"
+        note="A fixed ₹ line under equity. An entry needs equity above it and its max loss within the buffer left (equity minus floor). Falling below it pauses the deployment."
+      >
+        <Toggle checked={form.floor} onChange={(v) => set("floor", v)} label="Use a capital floor" />
+        {form.floor && (
+          <div className="space-y-3">
+            <div className="grid gap-3 sm:grid-cols-3">
+              <Field label="Floor (₹)" hint="Below the capital">
+                <input className={input} inputMode="decimal" value={form.floor_inr} onChange={(e) => set("floor_inr", e.target.value)} />
+              </Field>
+              <Field label="Break (trading days)" hint="Blank: only a person restarts it">
+                <input className={input} inputMode="numeric" value={form.floor_resume_days} onChange={(e) => set("floor_resume_days", e.target.value)} />
+              </Field>
+              {!form.drawdown && (
+                <Field label="Measure equity on">
+                  <select className={input} value={form.drawdown_basis} onChange={(e) => set("drawdown_basis", e.target.value as PolicyForm["drawdown_basis"])}>
+                    <option value="mtm">Mark-to-market (includes open positions)</option>
+                    <option value="realized">Closed trades only</option>
+                  </select>
+                </Field>
+              )}
+            </div>
+            <Toggle checked={form.floor_close_positions} onChange={(v) => set("floor_close_positions", v)} label="Close open positions when the floor is broken" />
+            <Toggle checked={form.floor_raise} onChange={(v) => set("floor_raise", v)} label="Raise the floor once" />
+            {form.floor_raise && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Once equity reaches (₹)" hint="Above the capital">
+                  <input className={input} inputMode="decimal" value={form.raise_at_equity_inr} onChange={(e) => set("raise_at_equity_inr", e.target.value)} />
+                </Field>
+                <Field label="Raise the floor to (₹)">
+                  <input className={input} inputMode="decimal" value={form.raise_to_inr} onChange={(e) => set("raise_to_inr", e.target.value)} />
+                </Field>
+              </div>
+            )}
+            <p className="text-xs text-zinc-500">
+              After the break the supervisor starts the deployment again by itself if equity is above the floor (deposit to top it up), with the floor back at its starting
+              level. Backtests top up to the capital and report it.
+            </p>
+          </div>
+        )}
+      </Section>
+
+      <Section
+        title="Withdrawal rule"
+        note="When profit should come out, on closed trades. Live, you get an alert and record the withdrawal yourself; backtests take it on the first day with no open position."
+      >
+        <Toggle checked={form.withdrawal} onChange={(v) => set("withdrawal", v)} label="Use a withdrawal rule" />
+        {form.withdrawal && (
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field label="First, once equity reaches (₹)" hint="Above the capital">
+              <input className={input} inputMode="decimal" value={form.first_target_inr} onChange={(e) => set("first_target_inr", e.target.value)} />
+            </Field>
+            <Field label="Withdraw (₹)">
+              <input className={input} inputMode="decimal" value={form.first_amount_inr} onChange={(e) => set("first_amount_inr", e.target.value)} />
+            </Field>
+            <Field label="Then, share of each rise (%)" hint="Blank: only the first withdrawal">
+              <input className={input} inputMode="decimal" value={form.then_share_pct} onChange={(e) => set("then_share_pct", e.target.value)} />
+            </Field>
           </div>
         )}
       </Section>

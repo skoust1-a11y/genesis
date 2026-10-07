@@ -15,8 +15,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.db.hashing import canonical_json, normalize_json, sha256_hex
 
-EntryField = Literal["iv_rank", "dte", "spot", "vix", "pct_from_prev_high", "pct_from_prev_low"]
-ENTRY_FIELDS = ("iv_rank", "dte", "spot", "vix", "pct_from_prev_high", "pct_from_prev_low")
+EntryField = Literal[
+    "iv_rank", "dte", "spot", "vix", "pct_from_prev_high", "pct_from_prev_low",
+    "pct_high_from_prev_high", "pct_low_from_prev_low",
+]  # fmt: skip
+ENTRY_FIELDS = (
+    "iv_rank", "dte", "spot", "vix", "pct_from_prev_high", "pct_from_prev_low",
+    "pct_high_from_prev_high", "pct_low_from_prev_low",
+)  # fmt: skip
 OPS = {">=": operator.ge, "<=": operator.le, ">": operator.gt, "<": operator.lt, "==": operator.eq}
 Structure = Literal[
     "iron_condor", "short_strangle", "short_straddle", "long_call", "long_put", "bull_call_spread", "bear_put_spread"
@@ -90,6 +96,8 @@ class RiskRules(_Strict):
     max_consecutive_losses: int | None = Field(default=None, ge=1)
     cooldown_days: int | None = Field(default=None, ge=1, le=30)  # trading days without entries after the streak
     max_loss_pct_of_capital: float | None = Field(default=None, gt=0, le=100)  # 100 = never risk more than the account
+    max_losses_per_day: int | None = Field(default=None, ge=1)  # losing trades closed today that stop new entries
+    min_minutes_between_trades: int | None = Field(default=None, ge=1, le=375)  # since the last entry or exit
 
     @model_validator(mode="after")
     def _streak_and_cooldown(self) -> RiskRules:
@@ -284,6 +292,8 @@ class AccountState:
     portfolio_pnl_today: float
     entries_today: int = 0
     cooldown_days_left: int = 0  # from `losing_streak_cooldown`
+    losses_today: int = 0  # closed trades with a net loss today
+    minutes_since_last_trade: float | None = None  # since the latest entry or exit; None before the first
 
 
 @dataclass
@@ -322,7 +332,8 @@ def _strictest(*values: float | None) -> float | None:
 
 def with_common_risk(rules: StrategyRules, common: dict[str, float]) -> StrategyRules:
     """`rules` with the account-wide risk rules (`Settings.common_risk`) applied. For each key the stricter
-    of the two wins: fewer entries, a shorter losing streak, a longer cooldown, a smaller loss cap."""
+    of the two wins: fewer entries, a shorter losing streak, a longer cooldown, a smaller loss cap, fewer
+    losses a day, a longer gap between trades."""
     if not common:
         return rules
     r = rules.risk
@@ -334,6 +345,12 @@ def with_common_risk(rules: StrategyRules, common: dict[str, float]) -> Strategy
     if "max_consecutive_losses" in common:
         update["max_consecutive_losses"] = int(_strictest(r.max_consecutive_losses, common["max_consecutive_losses"]))
         update["cooldown_days"] = int(max(r.cooldown_days or 0, common["cooldown_days"]))
+    if "max_losses_per_day" in common:
+        update["max_losses_per_day"] = int(_strictest(r.max_losses_per_day, common["max_losses_per_day"]))
+    if "min_minutes_between_trades" in common:
+        update["min_minutes_between_trades"] = int(
+            max(r.min_minutes_between_trades or 0, common["min_minutes_between_trades"])
+        )
     return rules.model_copy(update={"risk": r.model_copy(update=update)})
 
 
@@ -358,6 +375,16 @@ def check_risk(rules: StrategyRules, limits: RiskLimits, account: AccountState, 
     if r.max_consecutive_losses is not None:
         checks.append(
             _compare("risk.losing_streak_cooldown", "cooldown_days_left", "==", 0, account.cooldown_days_left)
+        )
+    if r.max_losses_per_day is not None:
+        checks.append(
+            _compare("risk.max_losses_per_day", "losses_today", "<", r.max_losses_per_day, account.losses_today)
+        )
+    if r.min_minutes_between_trades is not None:
+        gap, n = account.minutes_since_last_trade, r.min_minutes_between_trades
+        gap = round(gap, 1) if gap is not None else None  # None: no trade yet, so nothing to wait for
+        checks.append(
+            Check("risk.min_minutes_between_trades", "minutes_since_last_trade", ">=", n, gap, gap is None or gap >= n)
         )
     if r.max_loss_pct_of_capital is not None:
         cap = limits.capital_inr * r.max_loss_pct_of_capital / 100 if limits.capital_inr else None

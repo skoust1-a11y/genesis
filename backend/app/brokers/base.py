@@ -95,6 +95,8 @@ class Quote:
     bid: Decimal | None
     ask: Decimal | None
     timestamp: datetime
+    high: Decimal | None = None  # the day's high and low so far, for index quotes when the broker sends them
+    low: Decimal | None = None
 
 
 @runtime_checkable

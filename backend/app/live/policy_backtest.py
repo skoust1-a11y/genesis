@@ -1,8 +1,8 @@
 """Backtest a strategy version with and without the risk limits you are about to approve.
 
 Both runs replay the version's own rules over the whole market history with the same capital and
-max lots; the second also applies the trade policy and drawdown ladder (including the
-MAX_DRAWDOWN_PCT pause), through the same code the Trade Crew uses.
+max lots; the second also applies the trade policy (including the odds gate) and drawdown ladder
+(including the MAX_DRAWDOWN_PCT pause), through the same code the Trade Crew uses.
 """
 
 from __future__ import annotations
@@ -23,8 +23,15 @@ from app.strategies.store import StrategyStore
 POLICY_ASSUMPTIONS = [
     "Policy exits are checked at the daily close like the strategy's exits; a time of day on a time exit "
     "is ignored, so it fires at that day's close.",
-    "A drawdown pause stops new entries for the rest of the history: a backtest is never restarted.",
+    "A drawdown ladder pause stops new entries for the rest of the history: a backtest is never restarted.",
+    "A floor pause with resume_after_days restarts after the break with the account topped up to the approved "
+    "capital and the floor reset; top-ups are reported, and without resume_after_days the pause is final.",
+    "Withdrawals due under the withdrawal rule are taken at the close of the first day with no open position; "
+    "they lower capital and peak equally, so they are not drawdown. Live, the rule only alerts.",
     "The ladder measures equity against the approved capital; entry costs count from the day of entry.",
+    "The odds gate judges each entry signal by a rules-only run of the same strategy over all the market data, "
+    "counting only trades that closed before that day, per lot and after costs, in that day's VIX band. Until a "
+    "band has min_trades past trades, entries in it are blocked.",
 ]
 
 

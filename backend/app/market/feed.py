@@ -58,6 +58,20 @@ class MarketSnapshot:
         """Spot vs the previous day's low, in %: below 0 means spot broke below it."""
         return round((self.spot - self.prev_low) / self.prev_low * 100, 4) if self.prev_low else None
 
+    @property
+    def pct_high_from_prev_high(self) -> float | None:
+        """The day's high vs the previous day's high, in %: above 0 means the high was swept today."""
+        if not self.prev_high or self.day_high is None:
+            return None
+        return round((self.day_high - self.prev_high) / self.prev_high * 100, 4)
+
+    @property
+    def pct_low_from_prev_low(self) -> float | None:
+        """The day's low vs the previous day's low, in %: below 0 means the low was swept today."""
+        if not self.prev_low or self.day_low is None:
+            return None
+        return round((self.day_low - self.prev_low) / self.prev_low * 100, 4)
+
     def quote(self, strike: float, option_type: str, expiry: str | None = None) -> float | None:
         return self.quotes.get((float(strike), option_type, expiry or self.expiry))
 
@@ -318,6 +332,8 @@ class BrokerFeed:
             stale=stale,
             events=self.events(underlying, as_of) if self.events else None,
             vix=vix,
+            day_high=_num(spot_quote.high),
+            day_low=_num(spot_quote.low),
             prev_high=prev_high,
             prev_low=prev_low,
         )

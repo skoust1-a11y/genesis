@@ -16,8 +16,10 @@ from app.db.models import LiveAuditEvent
 from app.db.serialize import row_to_dict
 from app.db.session import get_db, get_live_db, live_schema_ready
 from app.db.types import utcnow
-from app.live import approvals, drawdown, equity, kill_switch, opinion_eval, policy_backtest, veto
+from app.live import approvals, drawdown, equity, kill_switch, money, opinion_eval, policy_backtest, veto
+from app.live import odds as live_odds
 from app.live.store import LiveStore
+from app.market.feed import IST
 
 router = APIRouter(prefix="/api/live")
 
@@ -304,6 +306,23 @@ def get_drawdown(deployment_id: str, db: Session = Depends(live_db)):
         "level": store.drawdown_level(deployment_id),
         "events": [row_to_dict(e) for e in store.drawdown_events(deployment_id)],
     }
+
+
+@router.get("/deployments/{deployment_id}/money")
+def get_money(deployment_id: str, db: Session = Depends(live_db)):
+    """The floor (in force, buffer left, any break) and what the withdrawal rule says is due."""
+    store = LiveStore(db)
+    deployment = or_404(store.deployment, deployment_id)
+    return money.money_status(store, get_settings(), deployment, utcnow())
+
+
+@router.get("/deployments/{deployment_id}/odds")
+def get_odds(deployment_id: str, db: Session = Depends(live_db)):
+    """The odds gate: every VIX band's past trades and whether the band of the latest VIX allows entries."""
+    store = LiveStore(db)
+    deployment = or_404(store.deployment, deployment_id)
+    as_of = utcnow().astimezone(IST).date().isoformat()
+    return {"odds": live_odds.odds_status(store, get_settings(), deployment, as_of)}
 
 
 def _scope(store: LiveStore, deployment_id: str | None, mode: str) -> list:

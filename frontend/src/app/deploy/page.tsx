@@ -5,12 +5,19 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { BrokerAccountPanel } from "@/components/BrokerAccountPanel";
 import { EquityChart } from "@/components/EquityChart";
+import { type OddsBand, OddsTable } from "@/components/OddsTable";
 import { PolicyFormFields } from "@/components/PolicyFormFields";
 import { api, type BrokerAccount, getActor, getToken, inr, pct, setActor, setToken } from "@/lib/api";
 import { DEFAULT_FORM, type PolicyForm, toRiskLimits } from "@/lib/policy";
 
 type Strategy = { id: string; name: string; current_version: number; archived_at: string | null };
-type CommonRiskKey = "max_entries_per_day" | "max_consecutive_losses" | "cooldown_days" | "max_loss_pct_of_capital";
+type CommonRiskKey =
+  | "max_entries_per_day"
+  | "max_consecutive_losses"
+  | "cooldown_days"
+  | "max_loss_pct_of_capital"
+  | "max_losses_per_day"
+  | "min_minutes_between_trades";
 
 function riskInForce(preview: Preview): string[] {
   const r = preview.risk_in_force;
@@ -30,6 +37,12 @@ function riskInForce(preview: Preview): string[] {
     );
   if (r.max_loss_pct_of_capital !== undefined)
     out.push(`one trade risks at most ${r.max_loss_pct_of_capital}% of capital${source(["max_loss_pct_of_capital"])}`);
+  if (r.max_losses_per_day !== undefined)
+    out.push(
+      `no entries after ${r.max_losses_per_day} losing trade${r.max_losses_per_day === 1 ? "" : "s"} in a day${source(["max_losses_per_day"])}`,
+    );
+  if (r.min_minutes_between_trades !== undefined)
+    out.push(`at least ${r.min_minutes_between_trades} minutes between trades${source(["min_minutes_between_trades"])}`);
   return out;
 }
 type Preview = {
@@ -55,7 +68,21 @@ type RunSummary = {
   max_drawdown_days: number;
   exit_reasons: Record<string, number>;
   skipped_signals: Record<string, number>;
-  management: { partial_closes?: number; paused_on?: string | null; drawdown_events?: unknown[] };
+  management: {
+    partial_closes?: number;
+    paused_on?: string | null;
+    drawdown_events?: unknown[];
+    floor_pauses?: number;
+    restarts?: number;
+    floor_paused_on?: string | null;
+    withdrawals?: unknown[];
+    withdrawn_inr?: number;
+    topped_up_inr?: number;
+    withdrawn_less_topped_up_inr?: number;
+    odds_blocked?: number;
+    odds_bands?: OddsBand[];
+    odds_history_trades?: number;
+  };
   equity_curve: { date: string; equity: number }[];
 };
 type Backtest = {
@@ -171,16 +198,31 @@ export default function DeployPage() {
     ["Longest drawdown (days)", (r) => String(r.max_drawdown_days)],
     ["Partial closes", (r) => String(r.management.partial_closes ?? 0)],
     ["Paused on", (r) => r.management.paused_on ?? "—"],
+    ["Floor pauses / restarts", (r) => (r.management.floor_pauses ? `${r.management.floor_pauses} / ${r.management.restarts ?? 0}` : "—")],
+    ["Still on a floor pause from", (r) => r.management.floor_paused_on ?? "—"],
+    [
+      "Withdrawn / topped up",
+      (r) =>
+        r.management.withdrawn_inr || r.management.topped_up_inr
+          ? `${inr(r.management.withdrawn_inr ?? 0)} (${r.management.withdrawals?.length ?? 0}×) / ${inr(r.management.topped_up_inr ?? 0)}`
+          : "—",
+    ],
+    [
+      "Withdrawn less topped up",
+      (r) => (r.management.withdrawn_inr || r.management.topped_up_inr ? inr(r.management.withdrawn_less_topped_up_inr ?? 0) : "—"),
+    ],
+    ["Blocked by the odds gate", (r) => (r.management.odds_bands ? String(r.management.odds_blocked ?? 0) : "—")],
     ["Exit reasons", (r) => counts(r.exit_reasons)],
     ["Signals not taken", (r) => counts(r.skipped_signals)],
   ];
+  const oddsBands = backtest?.with_policy.management.odds_bands;
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-10 space-y-6">
       <header className="space-y-1">
         <h1 className="text-2xl font-semibold tracking-tight">Deploy a strategy</h1>
         <p className="text-sm text-zinc-600 max-w-3xl">
-          Set the trade management policy and drawdown ladder, backtest the strategy with and without them, then
+          Set the trade management policy, odds gate, drawdown ladder, capital floor and withdrawal rule, backtest the strategy with and without them, then
           approve. Everything here is frozen with the deployment; a policy can only make trading more careful than
           the strategy&apos;s own rules.
         </p>
@@ -291,6 +333,17 @@ export default function DeployPage() {
               </tbody>
             </table>
           </div>
+          {oddsBands && (
+            <div className="space-y-2">
+              <h3 className="text-sm font-medium">Odds by VIX band</h3>
+              <p className="text-xs text-zinc-500">
+                The strategy&apos;s rules-only trades ({backtest.with_policy.management.odds_history_trades ?? 0} in all), per lot after costs,
+                as the gate knew them at the end of the window. Entries are allowed in a band only with enough trades and an average above the
+                minimum.
+              </p>
+              <OddsTable bands={oddsBands} />
+            </div>
+          )}
           <EquityChart
             series={[
               { label: "Rules only", color: "#a1a1aa", points: backtest.rules_only.equity_curve.map((p) => ({ x: p.date, y: p.equity })) },

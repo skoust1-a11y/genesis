@@ -56,6 +56,8 @@ class SandboxMarket:
     iv_rank: float = 50.0
     vix: float = 14.0
     dte: int = 14
+    day_high: float | None = None  # the index's high and low so far today, when set
+    day_low: float | None = None
     lot_size: int = 75
     strike_step: float = 50
     spread_pct: float = 1.0
@@ -231,7 +233,8 @@ class SandboxBroker:
             m.expiry = (self._today() + timedelta(days=bar.dte)).isoformat()
             self._save()
         spot = Decimal(str(m.spot))
-        return Quote(m.underlying, spot, spot, spot, self.clock())
+        high, low = (Decimal(str(v)) if v is not None else None for v in (m.day_high, m.day_low))
+        return Quote(m.underlying, spot, spot, spot, self.clock(), high=high, low=low)
 
     def vix_quote(self) -> Quote | None:
         vix = Decimal(str(self.market.vix))

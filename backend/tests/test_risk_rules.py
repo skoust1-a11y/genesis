@@ -87,6 +87,20 @@ def test_new_risk_checks():
     assert not {"risk.max_entries_per_day", "risk.losing_streak_cooldown"} & set(run_risk(rules()))
 
 
+def test_reentry_checks():
+    r = rules(max_losses_per_day=1, min_minutes_between_trades=30)
+    assert all(run_risk(r).values())  # no trade yet: nothing to wait for
+    assert run_risk(r, AccountState(0, 0, 0, 0, losses_today=1))["risk.max_losses_per_day"] is False
+    assert run_risk(r, AccountState(0, 0, 0, 0, minutes_since_last_trade=29.9))["risk.min_minutes_between_trades"] is False
+    assert run_risk(r, AccountState(0, 0, 0, 0, minutes_since_last_trade=30))["risk.min_minutes_between_trades"] is True
+    assert not {"risk.max_losses_per_day", "risk.min_minutes_between_trades"} & set(run_risk(rules()))
+    common = {"max_losses_per_day": 2, "min_minutes_between_trades": 60}
+    merged = with_common_risk(r, common).risk
+    assert (merged.max_losses_per_day, merged.min_minutes_between_trades) == (1, 60)
+    s = Settings(_env_file=None, MAX_LOSSES_PER_DAY=1, MIN_MINUTES_BETWEEN_TRADES=45)
+    assert s.common_risk == {"max_losses_per_day": 1, "min_minutes_between_trades": 45}
+
+
 def test_common_risk_applies_to_every_strategy_and_the_stricter_value_wins():
     common = {"max_entries_per_day": 1, "max_consecutive_losses": 3, "cooldown_days": 3, "max_loss_pct_of_capital": 100}
     plain = with_common_risk(rules(), common).risk
@@ -244,6 +258,35 @@ def test_crew_max_entries_per_day(client, live_session, make_ctx, approve_md, pa
     assert outcomes[2]["detail"] == "risk.max_entries_per_day"
     clock.advance(days=1)
     assert run_tick(ctx)["outcome"] == "entered"
+
+
+def test_crew_no_reentry_after_a_loss_that_day(client, live_session, make_ctx, approve_md, paper_account):
+    strategy = approve_md(markdown(max_losses_per_day=1))
+    deployment_id = approve_and_start(client, strategy, paper_account)
+    clock = Clock()
+    ctx = make_ctx(deployment_id, [ENTRY, RALLY, ENTRY, ENTRY], clock=clock)
+    outcomes = []
+    for _ in range(3):
+        outcomes.append(run_tick(ctx))
+        clock.advance(hours=1)
+    assert [r["outcome"] for r in outcomes] == ["entered", "exited", "blocked"]
+    assert "risk.max_losses_per_day" in outcomes[2]["detail"].split(", ")  # the loss also trips the daily caps
+    clock.advance(days=1)
+    assert run_tick(ctx)["outcome"] == "entered"
+
+
+def test_crew_waits_between_trades(client, live_session, make_ctx, approve_md, paper_account):
+    strategy = approve_md(markdown(min_minutes_between_trades=90))
+    deployment_id = approve_and_start(client, strategy, paper_account)
+    clock = Clock()
+    ctx = make_ctx(deployment_id, [ENTRY, CALM, ENTRY, ENTRY], clock=clock)
+    outcomes = []
+    for _ in range(3):
+        outcomes.append(run_tick(ctx))
+        clock.advance(hours=1)
+    assert [r["outcome"] for r in outcomes] == ["entered", "exited", "blocked"]
+    assert outcomes[2]["detail"] == "risk.min_minutes_between_trades"
+    assert run_tick(ctx)["outcome"] == "entered"  # two hours after the exit
 
 
 def test_crew_applies_common_risk_rules(client, live_session, make_ctx, approvable, paper_account):

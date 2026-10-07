@@ -70,7 +70,8 @@ def send(settings: Settings, subject: str, body: str) -> list[str]:
 
 
 def notify(settings: Settings, event: str, deployment_id: str | None, detail: str) -> list[str]:
-    """`event`: halted | paused | protective_stop | reconcile_mismatch | heartbeat_missed | crashes."""
+    """`event`: halted | paused | resumed | protective_stop | reconcile_mismatch | heartbeat_missed | crashes |
+    floor_raised | floor_top_up_needed | withdrawal_due."""
     try:
         target = f"deployment {deployment_id}" if deployment_id else "trade crew"
         return send(settings, f"[genesis] {event}: {target}", detail)
