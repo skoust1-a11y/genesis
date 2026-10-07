@@ -1,0 +1,14 @@
+Strategy briefing from a premium selling video on NIFTY options.
+
+Entry rules discussed:
+- Sell defined-risk premium when IV rank is above 40.
+- Prefer 7 to 21 days to expiry (DTE).
+- Use iron condor or credit spread with width around 100 points.
+
+Exit rules:
+- Take profit near 50% of maximum credit.
+- Cut loss if loss reaches 100% of credit received.
+
+Risk:
+- Keep size small, max 2 lots for retail.
+- Do not trade if daily loss exceeds 2% of capital.
