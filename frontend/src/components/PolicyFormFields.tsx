@@ -142,7 +142,7 @@ export function PolicyFormFields({ form, onChange, profitTargetPct }: Props) {
 
       <Section
         title="Profit booking"
-        note={`Runs only when the strategy's own exits did not fire, so thresholds must sit below ${target} profit target. Percentages are of the credit received.`}
+        note={`Runs only when the strategy's own exits did not fire, so thresholds must sit below ${target} profit target. Percentages are of the credit received, or of the premium paid when buying options.`}
       >
         <div className="space-y-2">
           <div className="flex items-center justify-between">

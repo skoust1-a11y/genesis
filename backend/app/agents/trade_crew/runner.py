@@ -19,6 +19,7 @@ from app.config import Settings, get_settings
 from app.db.session import get_live_sessionmaker, live_schema_ready
 from app.db.types import utcnow
 from app.engine.costs import resolve_cost_profile
+from app.engine.sim import dte_window
 from app.live import gates
 from app.live.store import TERMINAL_STATUSES, LiveStore
 from app.market.calendar import event_lookup
@@ -71,7 +72,9 @@ def build_context(
     if adapter.mode == "live" and not isinstance(adapter, LiveBrokerAdapter):
         raise ValueError(f"adapter {adapter.name!r} lacks get_order/margin/reconciliation, which live trading needs")
     if feed is None:
-        feed = registry.get_feed(feed_kind, adapter, rules.instrument.underlying, settings, clock, event_lookup(settings))
+        feed = registry.get_feed(
+            feed_kind, adapter, rules.instrument.underlying, settings, clock, event_lookup(settings), dte_window(rules)
+        )
     live.rollback()
     ctx = CrewContext(
         live, deployment_id, adapter, feed, settings, clock=clock, explain=explain,

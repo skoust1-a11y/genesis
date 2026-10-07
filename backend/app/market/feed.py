@@ -2,7 +2,8 @@
 
 `ReplayFeed` replays `data/sample_nifty_options.csv` one bar per snapshot with synthetic option
 quotes, for paper runs and tests. `BrokerFeed` builds snapshots from a broker's `QuoteSource`:
-the nearest expiry's chain around spot plus every held contract, priced at the bid/ask mid.
+the chain around spot for the expiry a backtest would pick (`choose_expiry`) plus every held contract,
+priced at the bid/ask mid.
 """
 
 from __future__ import annotations
@@ -44,6 +45,18 @@ class MarketSnapshot:
     day_open: float | None = None  # index open/high/low on `as_of`, when the feed knows them
     day_high: float | None = None
     day_low: float | None = None
+    prev_high: float | None = None  # index high/low on the previous trading day
+    prev_low: float | None = None
+
+    @property
+    def pct_from_prev_high(self) -> float | None:
+        """Spot vs the previous day's high, in %: above 0 means spot broke above it."""
+        return round((self.spot - self.prev_high) / self.prev_high * 100, 4) if self.prev_high else None
+
+    @property
+    def pct_from_prev_low(self) -> float | None:
+        """Spot vs the previous day's low, in %: below 0 means spot broke below it."""
+        return round((self.spot - self.prev_low) / self.prev_low * 100, 4) if self.prev_low else None
 
     def quote(self, strike: float, option_type: str, expiry: str | None = None) -> float | None:
         return self.quotes.get((float(strike), option_type, expiry or self.expiry))
@@ -64,6 +77,8 @@ class MarketSnapshot:
             "day_open": self.day_open,
             "day_high": self.day_high,
             "day_low": self.day_low,
+            "prev_high": self.prev_high,
+            "prev_low": self.prev_low,
         }
 
 
@@ -71,6 +86,23 @@ class MarketFeed(Protocol):
     def snapshot(self, underlying: str, contracts: Iterable[Contract] = ()) -> MarketSnapshot | None:
         """`contracts` must be quoted in addition to the current expiry's chain, such as open positions."""
         ...
+
+
+def days_between(start: str, end: str) -> int:
+    return (date.fromisoformat(end) - date.fromisoformat(start)).days
+
+
+def choose_expiry(day: str, expiries: Iterable[str], dte_window: tuple[int, int] | None) -> str | None:
+    """The nearest expiry inside the strategy's DTE window, else the nearest one after today."""
+    ahead = sorted(e for e in expiries if days_between(day, e) >= 1)
+    if not ahead:
+        return None
+    if dte_window:
+        lo, hi = dte_window
+        inside = [e for e in ahead if lo <= days_between(day, e) <= hi]
+        if inside:
+            return inside[0]
+    return ahead[0]
 
 
 def snapshot_age_seconds(snapshot: MarketSnapshot, now: datetime) -> float:
@@ -194,6 +226,23 @@ def vix_iv_rank(settings: Settings) -> IvRank:
     return rank
 
 
+PrevRange = Callable[[str, str], tuple[float, float] | None]  # (underlying, as_of) -> previous day's (high, low)
+
+
+def stored_prev_range(settings: Settings) -> PrevRange:
+    """The previous trading day's high and low from the imported index history."""
+    from app.market.store import open_market_store
+
+    def prev_range(underlying: str, as_of: str) -> tuple[float, float] | None:
+        store = open_market_store(settings)
+        try:
+            return store.previous_range(underlying, as_of)
+        finally:
+            store.close()
+
+    return prev_range
+
+
 class BrokerFeed:
     """Snapshots from a broker's quotes. Never exhausted; a missing index quote means no snapshot."""
 
@@ -207,13 +256,17 @@ class BrokerFeed:
         events: EventLookup | None = None,
         iv_rank: IvRank | None = None,
         strikes_each_side: int = 40,
+        prev_range: PrevRange | None = None,
+        dte_window: tuple[int, int] | None = None,
     ) -> None:
         self.source = source
         self.settings = settings
         self.clock = clock
         self.events = events
         self.iv_rank = iv_rank or vix_iv_rank(settings)
+        self.prev_range = prev_range or stored_prev_range(settings)
         self.strikes_each_side = strikes_each_side
+        self.dte_window = dte_window
         self._chains: dict[str, tuple[str, list[Instrument]]] = {}
 
     def _chain(self, underlying: str, as_of: str) -> list[Instrument]:
@@ -231,9 +284,9 @@ class BrokerFeed:
         if spot is None or spot_quote is None:
             return None
         chain = [i for i in self._chain(underlying, as_of) if i.expiry >= as_of]
-        if not chain:
+        expiry = choose_expiry(as_of, {i.expiry for i in chain}, self.dte_window)
+        if expiry is None:
             return None
-        expiry = min(i.expiry for i in chain)
         step = self.settings.strike_step(underlying) or 50
         near = [i for i in chain if i.expiry == expiry and abs(i.strike - spot) <= self.strikes_each_side * step]
         by_key = {(float(i.strike), i.option_type, i.expiry): i for i in chain}
@@ -251,19 +304,22 @@ class BrokerFeed:
             if wide:
                 stale.add(key)
         vix, _ = quote_price(self.source.vix_quote(), float("inf"))
+        prev_high, prev_low = self.prev_range(underlying, as_of) or (None, None)
         return MarketSnapshot(
             underlying=underlying,
             timestamp=spot_quote.timestamp,
             as_of=as_of,
             spot=spot,
             iv_rank=self.iv_rank(underlying, vix, as_of),
-            dte=(date.fromisoformat(expiry) - date.fromisoformat(as_of)).days,
+            dte=days_between(as_of, expiry),
             expiry=expiry,
             quotes=quotes,
             lot_size=next((i.lot_size for i in near), None),
             stale=stale,
             events=self.events(underlying, as_of) if self.events else None,
             vix=vix,
+            prev_high=prev_high,
+            prev_low=prev_low,
         )
 
     def instrument(self, underlying: str, strike: float, option_type: str, expiry: str) -> Instrument | None:

@@ -9,7 +9,8 @@ from sqlalchemy import create_engine, inspect, text
 
 from app.config import get_settings
 from app.engine.market import market_data_fingerprint
-from app.market.historical import HistoricalFeed, choose_expiry, option_price
+from app.market.feed import choose_expiry
+from app.market.historical import HistoricalFeed, option_price
 from app.market.models import IndexBar, OptionEod
 from app.market.nse import (
     bhavcopy_layout,

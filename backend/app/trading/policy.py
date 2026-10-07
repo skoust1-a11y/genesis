@@ -6,7 +6,8 @@ policy can only make a deployment more careful than its strategy rules:
 - sizing chooses how many lots to trade, never more than the approved max_lots; with compounding,
   a share of realized profit is added to the capital that risk-based sizing works from;
 - booking exits close all or part of a position before the strategy's profit target; the strategy's
-  own exits (expiry, stop loss, profit target, DTE) are checked first and always apply;
+  own exits (expiry, stop loss, profit target, DTE) are checked first and always apply; for debit
+  structures the `*_pct_of_credit` thresholds are percentages of the premium paid;
 - time exits close a position some days before expiry (optionally from a time of day, IST) or
   before a scheduled event;
 - the daily profit target stops new entries, or closes everything, once the day's P&L reaches it;
@@ -193,7 +194,7 @@ def parse_policy(raw: Any, rules: dict[str, Any] | None = None, max_lots: int | 
 
 def _profit_target(rules: dict[str, Any] | None) -> float | None:
     for e in (rules or {}).get("exit", []):
-        if e.get("kind") == "profit_target_pct_of_credit":
+        if e.get("kind") in ("profit_target_pct_of_credit", "profit_target_pct_of_debit"):
             return float(e["value"])
     return None
 
@@ -247,7 +248,8 @@ class BookingExit:
 
 
 def pnl_pct(mark: PositionMark) -> float | None:
-    return mark.pnl / mark.credit * 100 if mark.credit > 0 else None
+    """P&L as % of the premium received or, for debit structures, paid."""
+    return mark.pnl / abs(mark.credit) * 100 if mark.credit else None
 
 
 def update_peak(peak_pct: float | None, mark: PositionMark | None) -> float | None:

@@ -116,13 +116,17 @@ def get_feed(
     settings: Settings,
     clock: Callable[[], datetime],
     events: EventLookup | None,
+    dte_window: tuple[int, int] | None = None,
 ) -> MarketFeed:
     if kind == "replay":
         return ReplayFeed(underlying, strike_step=settings.strike_step(underlying) or 50, clock=clock, events=events)
     if kind == "broker":
         if not isinstance(adapter, QuoteSource):
             raise ValueError(f"broker {adapter.name!r} provides no quotes; use --feed replay")
-        return BrokerFeed(adapter, settings, clock=clock, events=events, iv_rank=getattr(adapter, "iv_rank", None))
+        return BrokerFeed(
+            adapter, settings, clock=clock, events=events, iv_rank=getattr(adapter, "iv_rank", None),
+            dte_window=dte_window,
+        )  # fmt: skip
     raise ValueError(f"feed must be one of {', '.join(FEEDS)}")
 
 

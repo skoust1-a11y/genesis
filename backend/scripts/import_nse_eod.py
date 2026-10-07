@@ -10,6 +10,7 @@ Files already imported (same SHA-256) are skipped, so the script is safe to re-r
 
     uv run python scripts/import_nse_eod.py [--raw-dir data/nse/raw] [--underlyings NIFTY]
     uv run python scripts/import_nse_eod.py --download-from 2024-01-01 --download-to 2024-03-31
+    uv run python scripts/import_nse_eod.py --history-from 2024-01-01 --download-from 2025-01-01
 
 NSE often blocks scripted downloads; when it does, download the files in a browser and drop them
 into the raw directory instead.
@@ -74,6 +75,50 @@ def download_bhavcopies(raw_dir: Path, start: date, end: date, pause: float = 1.
     return saved
 
 
+HISTORY_API = "https://www.nseindia.com/api/historicalOR"
+INDEX_NAMES = {"NIFTY": "NIFTY 50", "BANKNIFTY": "NIFTY BANK"}
+HISTORY_CHUNK_DAYS = 90  # the API caps how many days one request returns
+
+
+def download_history(raw_dir: Path, underlyings: list[str], start: date, end: date, pause: float = 1.0) -> list[Path]:
+    """Daily open/high/low/close for each index and India VIX, from NSE's history API, written as CSVs
+    that `classify` and `parse_daily_bars` understand (`index_<UNDERLYING>_...csv`, `vix_...csv`)."""
+    import csv
+
+    import httpx
+
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    series = [(f"index_{u}", f"indicesHistory?indexType={INDEX_NAMES[u]}") for u in underlyings if u in INDEX_NAMES]
+    series.append(("vix", "vixhistory?"))
+    saved = []
+    with httpx.Client(headers=BROWSER_HEADERS, follow_redirects=True, timeout=30) as client:
+        client.get("https://www.nseindia.com/")
+        for prefix, query in series:
+            chunk = start
+            while chunk <= end:
+                last = min(chunk + timedelta(days=HISTORY_CHUNK_DAYS - 1), end)
+                target = raw_dir / f"{prefix}_{chunk:%Y%m%d}_{last:%Y%m%d}.csv"
+                if not target.exists():
+                    sep = "" if query.endswith("?") else "&"
+                    url = f"{HISTORY_API}/{query}{sep}from={chunk:%d-%m-%Y}&to={last:%d-%m-%Y}"
+                    response = client.get(url)
+                    rows = response.json().get("data", []) if response.status_code == 200 else []
+                    if rows:
+                        with target.open("w", newline="") as f:
+                            writer = csv.writer(f)
+                            writer.writerow(["Date", "Open", "High", "Low", "Close"])
+                            for r in rows:
+                                writer.writerow([
+                                    r["EOD_TIMESTAMP"], r["EOD_OPEN_INDEX_VAL"], r["EOD_HIGH_INDEX_VAL"],
+                                    r["EOD_LOW_INDEX_VAL"], r["EOD_CLOSE_INDEX_VAL"],
+                                ])  # fmt: skip
+                    time.sleep(pause)
+                if target.exists():
+                    saved.append(target)
+                chunk = last + timedelta(days=1)
+    return saved
+
+
 def import_dir(raw_dir: Path, underlyings: list[str]) -> dict[str, int]:
     counts = {"bhavcopy": 0, "index": 0, "vix": 0, "skipped": 0}
     store = open_market_store()
@@ -109,8 +154,16 @@ def main() -> None:
     parser.add_argument("--underlyings", default="NIFTY", help="comma-separated, e.g. NIFTY,BANKNIFTY")
     parser.add_argument("--download-from", type=date.fromisoformat)
     parser.add_argument("--download-to", type=date.fromisoformat)
+    parser.add_argument(
+        "--history-from", type=date.fromisoformat,
+        help="also download index and India VIX daily history from this date (start a year before the "
+        "bhavcopies so IV rank has a full lookback)",
+    )  # fmt: skip
     args = parser.parse_args()
     underlyings = [u.strip().upper() for u in args.underlyings.split(",") if u.strip()]
+    if args.history_from:
+        saved = download_history(args.raw_dir, underlyings, args.history_from, args.download_to or date.today())
+        print(f"downloaded or found {len(saved)} index and VIX history files in {args.raw_dir}")
     if args.download_from:
         saved = download_bhavcopies(args.raw_dir, args.download_from, args.download_to or date.today())
         print(f"downloaded or found {len(saved)} bhavcopies in {args.raw_dir}")

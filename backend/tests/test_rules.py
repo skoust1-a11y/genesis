@@ -65,7 +65,7 @@ def test_missing_block_is_an_error():
 @pytest.mark.parametrize(
     ("mutate", "expected"),
     [
-        (lambda r: r["entry"].append({"field": "vix", "op": ">=", "value": 15}), "rules.entry.3.field"),
+        (lambda r: r["entry"].append({"field": "rsi", "op": ">=", "value": 15}), "rules.entry.3.field"),
         (lambda r: r["entry"].append({"field": "dte", "op": "!=", "value": 15}), "rules.entry.3.op"),
         (lambda r: r["exit"].append({"kind": "trailing_stop", "value": 15}), "rules.exit.2.kind"),
         (lambda r: r["risk"].update(leverage=3), "rules.risk.leverage"),

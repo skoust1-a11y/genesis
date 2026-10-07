@@ -13,15 +13,11 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable, Iterable
-from datetime import date, datetime
+from datetime import datetime
 
 from app.db.types import utcnow
-from app.market.feed import Contract, EventLookup, MarketSnapshot, intrinsic
+from app.market.feed import Contract, EventLookup, MarketSnapshot, choose_expiry, days_between, intrinsic
 from app.market.store import MarketStore, OptionQuote
-
-
-def _days(start: str, end: str) -> int:
-    return (date.fromisoformat(end) - date.fromisoformat(start)).days
 
 
 def option_price(row: OptionQuote) -> tuple[float | None, bool]:
@@ -31,19 +27,6 @@ def option_price(row: OptionQuote) -> tuple[float | None, bool]:
     if row.settle and row.settle > 0:
         return row.settle, True
     return None, False
-
-
-def choose_expiry(day: str, expiries: Iterable[str], dte_window: tuple[int, int] | None) -> str | None:
-    """The nearest expiry inside the strategy's DTE window, else the nearest one after today."""
-    ahead = sorted(e for e in expiries if _days(day, e) >= 1)
-    if not ahead:
-        return None
-    if dte_window:
-        lo, hi = dte_window
-        inside = [e for e in ahead if lo <= _days(day, e) <= hi]
-        if inside:
-            return inside[0]
-    return ahead[0]
 
 
 class HistoricalFeed:
@@ -108,13 +91,14 @@ class HistoricalFeed:
                 if is_stale:
                     stale.add(key)
 
+        prev_high, prev_low = self.store.previous_range(self.underlying, day) or (None, None)
         return MarketSnapshot(
             underlying=self.underlying,
             timestamp=self.clock(),
             as_of=day,
             spot=bar.close,
             iv_rank=bar.iv_rank,
-            dte=_days(day, expiry),
+            dte=days_between(day, expiry),
             expiry=expiry,
             quotes=quotes,
             lot_size=lots.most_common(1)[0][0] if lots else None,
@@ -124,4 +108,6 @@ class HistoricalFeed:
             day_open=bar.open,
             day_high=bar.high,
             day_low=bar.low,
+            prev_high=prev_high,
+            prev_low=prev_low,
         )

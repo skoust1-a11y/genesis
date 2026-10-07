@@ -56,10 +56,13 @@ def build_entry_proposal(rules: StrategyRules, market: MarketSnapshot, settings:
         raise MissingMarketConfig(f"no lot size or strike step configured for {instrument.underlying}")
     legs = build_legs(instrument, market.spot, step)
     quotes = [market.quote(leg.strike, leg.option_type) for leg in legs]
-    return _proposal(rules, market.expiry, legs, quotes, lots, lot_size)
+    illiquid = [(leg.strike, leg.option_type, market.expiry) in market.stale for leg in legs]
+    return _proposal(rules, market.expiry, legs, quotes, lots, lot_size, illiquid)
 
 
-def _proposal(rules: StrategyRules, expiry: str, legs, quotes, lots: int, lot_size: int) -> dict[str, Any]:
+def _proposal(
+    rules: StrategyRules, expiry: str, legs, quotes, lots: int, lot_size: int, illiquid: list[bool]
+) -> dict[str, Any]:
     quantity = lots * lot_size
     leg_dicts = [
         {
@@ -68,8 +71,9 @@ def _proposal(rules: StrategyRules, expiry: str, legs, quotes, lots: int, lot_si
             "tradingsymbol": tradingsymbol(rules.instrument.underlying, expiry, leg.strike, leg.option_type),
             "quantity": quantity,
             "quote": q,
+            "illiquid": thin,  # a wide bid/ask live, or no trade that day in end-of-day data
         }
-        for leg, q in zip(legs, quotes, strict=True)
+        for leg, q, thin in zip(legs, quotes, illiquid, strict=True)
     ]
     economics = entry_economics(rules, legs, quotes, quantity) if quantity and None not in quotes else None
     return {"lots": lots, "lot_size": lot_size, "quantity": quantity, "legs": leg_dicts, "economics": economics}
@@ -80,7 +84,8 @@ def resize_proposal(rules: StrategyRules, proposal: dict[str, Any], lots: int) -
     legs = [Leg(leg["side"], leg["option_type"], leg["strike"]) for leg in proposal["legs"]]
     quotes = [leg["quote"] for leg in proposal["legs"]]
     expiry = proposal["legs"][0]["expiry"] if proposal["legs"] else ""
-    return _proposal(rules, expiry, legs, quotes, lots, proposal["lot_size"])
+    illiquid = [leg.get("illiquid", False) for leg in proposal["legs"]]
+    return _proposal(rules, expiry, legs, quotes, lots, proposal["lot_size"], illiquid)
 
 
 def entry_risk_checks(
@@ -89,9 +94,14 @@ def entry_risk_checks(
     economics: Economics | None = proposal["economics"]
     missing = sum(1 for leg in proposal["legs"] if leg["quote"] is None)
     credit = economics.credit if economics else 0.0
+    premium = Check("risk.positive_credit", "credit", ">", 0, credit, credit > 0)
+    if rules.instrument.is_debit:
+        premium = Check("risk.positive_debit", "debit", ">", 0, -credit, -credit > 0)
+    illiquid = sum(1 for leg in proposal["legs"] if leg.get("illiquid"))
     checks = [
         Check("market.quotes", "missing_quotes", "==", 0, missing, missing == 0),
-        Check("risk.positive_credit", "credit", ">", 0, credit, credit > 0),
+        Check("market.liquidity", "illiquid_legs", "==", 0, illiquid, illiquid == 0),
+        premium,
     ]
     return checks + check_risk(
         rules,

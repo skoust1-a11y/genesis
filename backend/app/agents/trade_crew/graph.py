@@ -49,7 +49,6 @@ from app.live.store import TERMINAL_STATUSES, LiveStore
 from app.market.context import ContextProvider
 from app.market.feed import IST, MarketFeed, MarketSnapshot, snapshot_age_seconds
 from app.market.hours import market_status, trading_days_between
-from app.trading.orders import EXCHANGE, PRODUCT, OrderManager, RateLimiter, split_quantity
 from app.strategies.rules import (
     AccountState,
     Check,
@@ -75,6 +74,7 @@ from app.trading.decisions import (
     proposal_lots,
     resize_proposal,
 )
+from app.trading.orders import EXCHANGE, PRODUCT, OrderManager, RateLimiter, split_quantity
 
 __all__ = ["EXCHANGE", "PRODUCT", "CrewContext", "halt", "run_tick"]
 
@@ -463,13 +463,13 @@ def _stops_enabled(ctx: CrewContext) -> bool:
 def _place_protective_stops(ctx: CrewContext, state: TickState, intent: TradeIntent, legs: list[dict]) -> str | None:
     """A stop-limit BUY at the broker on every short leg: a backstop set `PROTECTIVE_STOP_MULTIPLIER` times
     the strategy's stop distance above the entry premium, so the crew's own exit normally fires first."""
-    if not _stops_enabled(ctx):
+    settings, rules = ctx.settings, state["rules"]
+    if not _stops_enabled(ctx) or rules.instrument.is_debit:  # a debit spread's short leg is covered by its long
         return None
     shorts = [leg for leg in legs if leg["side"] == "SELL"]
     if not shorts:
         return None
-    settings, rules = ctx.settings, state["rules"]
-    stop_pct = rules.exit_value("stop_loss_pct_of_credit") or 100
+    stop_pct = rules.stop_loss_pct or 100
     distance = Decimal(str(settings.protective_stop_multiplier * stop_pct / 100))
     buffer = Decimal(str(settings.protective_stop_limit_buffer_pct / 100))
     stops = []
@@ -1080,8 +1080,9 @@ def _opinion(state: TickState) -> TickState:
     context = ContextProvider(ctx.settings).context(state["rules"].instrument.underlying, ctx.clock(), state["market"])
     ctx.live.rollback()  # release the SQLite write lock while the LLM runs
     result = get_opinion(
-        ctx.settings, context, state["proposal"], state["entry_checks"], state["risk_checks"], lessons
-    )
+        ctx.settings, context, state["proposal"], state["entry_checks"], state["risk_checks"], lessons,
+        parse_strategy_markdown(state["snapshot"].markdown),
+    )  # fmt: skip
     rules_lots = state["proposal"]["lots"]
     update: TickState = {"opinion": result, "opinion_mode": mode, "rules_lots": rules_lots}
     if mode == "veto" and result.status == "ok" and result.lots is not None:

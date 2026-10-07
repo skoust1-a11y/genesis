@@ -5,6 +5,7 @@ backend/data/reports/
 backend/data/*.db*
 backend/data/sandbox/
 backend/data/logs/
+backend/data/nse/raw/
 data/*.db*
 backend/.pytest_cache/
 frontend/node_modules/

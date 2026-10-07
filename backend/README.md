@@ -106,7 +106,12 @@ rules:
   risk: {max_lots: 2, max_daily_loss_pct: 2, min_risk_reward: 0.4, max_open_positions: 1}
 ```
 
-Supported: entry fields `iv_rank`, `dte`, `spot` with `>=`, `<=`, `>`, `<`, `==`; structures `iron_condor`, `short_strangle`, `short_straddle`; exits `profit_target_pct_of_credit`, `stop_loss_pct_of_credit` (both required) and `dte_at_or_below`. Optional risk keys: `max_entries_per_day`; `max_consecutive_losses` with `cooldown_days` (after that many losing trades in a row, no entries that day or for the next `cooldown_days` trading days); `max_loss_pct_of_capital` (one trade's maximum loss as a % of capital, so `100` forbids risking more than the account).
+Supported: entry fields `iv_rank`, `dte`, `spot`, `vix`, `pct_from_prev_high` and `pct_from_prev_low` (spot against the previous trading day's high or low, in %: above 0 broke the high, below 0 broke the low) with `>=`, `<=`, `>`, `<`, `==`; exit `dte_at_or_below` with any structure.
+
+- **Option selling:** `iron_condor`, `short_strangle`, `short_straddle`, sized by `short_distance` (spot to the short strikes) and `wing_width` (short to long strikes). Exits `profit_target_pct_of_credit` and `stop_loss_pct_of_credit` are both required, as % of the premium received.
+- **Option buying:** `long_call`, `long_put`, `bull_call_spread`, `bear_put_spread`. `strike_offset` (optional, default 0) is the distance from the at-the-money strike to the bought one, positive meaning out of the money; spreads also sell `wing_width` points further out. Exits `profit_target_pct_of_debit` and `stop_loss_pct_of_debit` are both required, as % of the premium paid; the stop cannot exceed 100. A spread's target is capped at what the spread can pay. Example: `instrument: {underlying: NIFTY, structure: long_call}` with `entry: [{field: pct_from_prev_high, op: '>', value: 0}, ...]` and `exit: [{kind: profit_target_pct_of_debit, value: 80}, {kind: stop_loss_pct_of_debit, value: 40}]`.
+
+The previous day's range comes from the imported index history (`scripts/import_nse_eod.py --history-from`), both in backtests and live; without it the `pct_from_prev_*` checks fail and no entry is made. Optional risk keys: `max_entries_per_day`; `max_consecutive_losses` with `cooldown_days` (after that many losing trades in a row, no entries that day or for the next `cooldown_days` trading days); `max_loss_pct_of_capital` (one trade's maximum loss as a % of capital, so `100` forbids risking more than the account).
 
 The same four rules can be set once for every strategy in `.env`: `MAX_ENTRIES_PER_DAY`, `MAX_CONSECUTIVE_LOSSES` with `LOSS_COOLDOWN_DAYS`, and `MAX_LOSS_PCT_OF_CAPITAL` (0 turns each off). They apply to backtests, reviews and the Trade Crew, existing strategies included, without changing any strategy's rules or hash. When a strategy also sets one, the stricter value wins: fewer entries, a shorter losing streak, a longer cooldown, a smaller loss cap. Reports record the values in `settings_snapshot.common_risk`. Unknown fields are validation errors, never skipped. The extractor emits this block but never invents thresholds; anything it cannot express goes into Gaps. The demo strategy deliberately lacks `short_distance`, so it cannot be approved.
 
@@ -129,7 +134,7 @@ A **live** approval also needs an API token (see [API authentication](#api-authe
 
 - `LIVE_TRADING_ENABLED=true`.
 - The account's broker is registered with `live` in its modes, and every required credential resolves (database or `.env`).
-- The strategy's structure is in `LIVE_ALLOWED_STRUCTURES` (default `iron_condor`: defined risk only). Allowing `short_strangle` or `short_straddle` means changing that setting; the allowed list in force is written to the approval's audit event.
+- The strategy's structure is in `LIVE_ALLOWED_STRUCTURES` (default `iron_condor,long_call,long_put,bull_call_spread,bear_put_spread`: defined risk only). Allowing `short_strangle` or `short_straddle` means changing that setting; the allowed list in force is written to the approval's audit event.
 - With `LIVE_MIN_PAPER_DAYS=N`, the same strategy version has at least N trading days (IST) of Trade Crew ticks on the **broker feed** in paper deployments that were never halted.
 
 **Backtest warning:** report verdicts come from four fixed parameter sets and a synthetic same-day outcome. They do not test the strategy's own `rules:` block, so a `Profitable` verdict is not evidence that the rules make money.
@@ -164,7 +169,7 @@ uv run python -m app.live supervise [--feed broker] [--interval 60]   # one crew
 Run one process per deployment, separate from the API, or let the supervisor do it. Every write is stamped `trade_crew/<deployment_id>`. The adapter comes from the account's broker in the registry (`app/brokers/registry.py`), and the market data comes from the feed:
 
 - **`--feed replay`** (default for paper) replays bars one per tick with synthetic option quotes: imported NSE data, or `data/sample_nifty_options.csv`. It is refused for live deployments.
-- **`--feed broker`** (default for live) builds each snapshot from the broker's own quotes (`QuoteSource`). It covers the nearest expiry's chain plus every held contract and prices each option at the bid/ask mid. A spread wider than `MAX_SPREAD_PCT` of the mid marks the quote stale. Lot size and freeze quantity come from the broker's instrument list. IV rank is today's India VIX quote ranked against the VIX history in the market database. A paper account on a broker with quotes (`sandbox`, or a real broker in paper mode) on this feed is "paper trading on real data": the first stage before live.
+- **`--feed broker`** (default for live) builds each snapshot from the broker's own quotes (`QuoteSource`). It covers one expiry's chain plus every held contract and prices each option at the bid/ask mid. The expiry is chosen as in backtests: the nearest one inside the strategy's `dte` entry window, else the nearest one after today. A spread wider than `MAX_SPREAD_PCT` of the mid marks the quote stale, and an entry with any stale leg is blocked (`market.liquidity`); backtests apply the same check to contracts that did not trade that day. The previous day's high and low come from the market database. Lot size and freeze quantity come from the broker's instrument list. IV rank is today's India VIX quote ranked against the VIX history in the market database. A paper account on a broker with quotes (`sandbox`, or a real broker in paper mode) on this feed is "paper trading on real data": the first stage before live.
 
 `PaperBroker` fills LIMIT orders immediately at the quote plus `SLIPPAGE_BPS`, with charges from the cost model. It has no quotes, so it runs on the replay feed only.
 
@@ -348,7 +353,7 @@ policy:
 
 - **VIX sizing.** The highest band at or below today's India VIX multiplies lots by its `size_factor`, together with any `reduce_size` drawdown level, never below one lot. Bands must rise in VIX and fall in factor (up to 5). With no VIX reading the last band applies. Backtests use the imported VIX close; live runs use the broker's VIX quote.
 - **Sizing.** `fixed` trades `lots` (default `max_lots`). `risk_pct` and `risk_inr` trade as many lots as keep the trade's max loss within the budget, capped at `max_lots`; below `min_lots` the entry is `blocked` with `policy.sizing` failed. `risk_pct` is of capital in force. With `compounding`, `profit_share_pct` of realized net profit is added to that capital, up to `ceiling_inr`; a net loss leaves it at capital in force. A `reduce_size` drawdown level then scales the result.
-- **Booking.** Percentages are of the credit received. Every threshold must sit below the strategy's profit target, or approval is refused. A partial level closes `close_pct` of the lots opened (at least one lot, always leaving one open). `lock_in` closes the rest once profit falls back to `lock_pct_of_credit` after reaching `after_pct_of_credit`. `trailing` closes once profit gives back `giveback_pct` of its peak.
+- **Booking.** Percentages are of the credit received, or of the premium paid for option-buying structures (the `_pct_of_credit` key names are kept for both). Every threshold must sit below the strategy's profit target, or approval is refused. A partial level closes `close_pct` of the lots opened (at least one lot, always leaving one open). `lock_in` closes the rest once profit falls back to `lock_pct_of_credit` after reaching `after_pct_of_credit`. `trailing` closes once profit gives back `giveback_pct` of its peak.
 - **Time exits.** Close the whole position `days_before_expiry` days before expiry (from `at`, IST, if set), or `event_days_before` days before a scheduled event of the listed kinds.
 - Order each tick: the strategy's exits first, then time, event, lock-in, trailing, partial.
 
@@ -356,7 +361,7 @@ policy:
 
 ### LLM trade opinions: off, shadow, veto
 
-`LLM_TRADE_OPINION` (default `off`) lets an LLM review entries the rules already approved. It sees the proposal, every check, the market snapshot, upcoming events, recent headlines and the deployment's recent lessons. It can answer take, reduce (fewer lots) or skip; it can never add lots, unblock a trade, or touch exits. A timeout or error is recorded and the rules decide.
+`LLM_TRADE_OPINION` (default `off`) lets an LLM review entries the rules already approved. It sees the proposal, every check, the market snapshot (including VIX, the day's range and the previous day's high and low), upcoming events, recent headlines and the deployment's recent lessons. It also gets the strategy's write-up (thesis plus the Entry, Exit and Risk bullets) as a checklist, and lists any item the data shows unmet, or cannot verify, as `checklist: ...` risk flags: this covers the parts of a video's method that the `rules:` block cannot express. It uses `LLM_PROVIDER` (OpenAI or Claude). It can answer take, reduce (fewer lots) or skip; it can never add lots, unblock a trade, or touch exits. A timeout or error is recorded and the rules decide.
 
 - **shadow:** the opinion is stored in `trade_opinions` with the prompt hash, context, model and latency. Trading is unchanged.
 - **Lessons:** while opinions are on, each closed trade gets a short LLM post-trade review, stored as a `reviewer_type = agent` review (`reviewer = llm:<model>`). Its lesson is fed into later opinions. Lessons never change rules; that still goes through improvements and human approval.
@@ -373,14 +378,14 @@ policy:
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `LIVE_TRADING_ENABLED` | `false` | Master switch for live deployments |
-| `LIVE_ALLOWED_STRUCTURES` | `iron_condor` | Structures allowed live, comma-separated |
+| `LIVE_ALLOWED_STRUCTURES` | `iron_condor,long_call,long_put,bull_call_spread,bear_put_spread` | Structures allowed live, comma-separated |
 | `LIVE_MIN_PAPER_DAYS` | `0` | Broker-feed paper days required before a live approval |
 | `SANDBOX_ALLOW_LIVE` | `false` | Lets the Sandbox broker have live accounts |
 | `SANDBOX_STATE_DIR` | `DATA_DIR/sandbox` | Sandbox orders and positions, one JSON file per account |
 | `BROKER_CREDENTIALS_KEY` | — | Fernet key for stored credentials |
 | `BROKER_<BROKER>_<FIELD>` | — | Credential fallback, e.g. `BROKER_ZERODHA_ACCESS_TOKEN` |
 | `API_TOKENS` | — | `name:sha256` pairs, comma-separated |
-| `MAX_SPREAD_PCT` | `5` | Wider bid/ask spreads mark a quote stale |
+| `MAX_SPREAD_PCT` | `5` | Wider bid/ask spreads mark a quote stale, which blocks entries on that leg |
 | `ORDER_FILL_TIMEOUT_S` / `ORDER_POLL_INTERVAL_S` | `30` / `1` | How long to wait for a fill, and how often to poll |
 | `ORDER_REPRICE_STEPS` / `MAX_SLIPPAGE_BPS` | `2` / `100` | Re-prices toward the market, and how far from the quote |
 | `ORDER_EXIT_RETRIES` | `2` | Retries for a rejected exit order before halting |

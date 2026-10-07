@@ -19,7 +19,7 @@ from app.db.types import utcnow
 from app.live import gates
 from app.live.drawdown import parse_policy
 from app.live.store import LiveStore
-from app.strategies.rules import rules_sha256
+from app.strategies.rules import rules_sha256, with_common_risk
 from app.strategies.schema import parse_strategy_markdown
 from app.strategies.store import StrategyStore
 from app.trading.policy import parse_policy as parse_trade_policy
@@ -98,6 +98,8 @@ def preview(
         blockers.append("no completed report for this version; run a review first")
     if mode == "live":
         blockers += live_preview_blockers(live, row.id, raw_rules, broker_account_id)
+    common_risk = get_settings().common_risk
+    rules = doc.rules
     return {
         "strategy_id": strategy_id,
         "version": row.version,
@@ -107,6 +109,10 @@ def preview(
         "rules": raw_rules,
         "rules_sha256": rules_sha256(raw_rules) if raw_rules is not None else None,
         "rules_errors": doc.rules_errors,
+        "common_risk": common_risk,
+        "risk_in_force": (
+            with_common_risk(rules, common_risk).risk.model_dump(mode="json", exclude_none=True) if rules else None
+        ),
         "gaps": doc.gaps,
         "report_id": report.id if report else None,
         "verdict_label": report.verdict_label if report else None,

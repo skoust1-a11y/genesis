@@ -193,6 +193,20 @@ class MarketStore:
     def index_bar(self, underlying: str, day: str) -> IndexBar | None:
         return self.session.get(IndexBar, (underlying.upper(), day))
 
+    def previous_range(self, underlying: str, day: str) -> tuple[float, float] | None:
+        """(high, low) of the last trading day before `day` that has both."""
+        stmt = (
+            select(IndexBar.high, IndexBar.low)
+            .where(
+                IndexBar.underlying == underlying.upper(), IndexBar.date < day,
+                IndexBar.high.is_not(None), IndexBar.low.is_not(None),
+            )  # fmt: skip
+            .order_by(IndexBar.date.desc())
+            .limit(1)
+        )
+        row = self._memo(("previous_range", underlying.upper(), day), lambda: self.session.execute(stmt).first())
+        return (row[0], row[1]) if row else None
+
     def _memo(self, key: tuple, load):
         if key not in self._cache:
             self._cache[key] = load()

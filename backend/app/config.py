@@ -78,7 +78,8 @@ class Settings(BaseSettings):
     max_consecutive_losses: int = Field(default=0, ge=0, alias="MAX_CONSECUTIVE_LOSSES")
     loss_cooldown_days: int = Field(default=0, ge=0, le=30, alias="LOSS_COOLDOWN_DAYS")
     max_loss_pct_of_capital: float = Field(default=0, ge=0, le=100, alias="MAX_LOSS_PCT_OF_CAPITAL")
-    lot_sizes: str = Field(default="NIFTY:75,BANKNIFTY:35", alias="LOT_SIZES")
+    # Fallback when the data has no lot size (NSE/FAOP/70616: from the January 2026 expiries)
+    lot_sizes: str = Field(default="NIFTY:65,BANKNIFTY:30", alias="LOT_SIZES")
     strike_steps: str = Field(default="NIFTY:50,BANKNIFTY:100", alias="STRIKE_STEPS")
     max_snapshot_age_seconds: int = Field(default=120, alias="MAX_SNAPSHOT_AGE_SECONDS")
     trade_crew_explain: bool = Field(default=False, alias="TRADE_CREW_EXPLAIN")
@@ -88,7 +89,9 @@ class Settings(BaseSettings):
     sandbox_allow_live: bool = Field(default=False, alias="SANDBOX_ALLOW_LIVE")
     sandbox_state_dir: str | None = Field(default=None, alias="SANDBOX_STATE_DIR")  # default: DATA_DIR/sandbox
     live_min_paper_days: int = Field(default=0, ge=0, alias="LIVE_MIN_PAPER_DAYS")
-    live_allowed_structures: str = Field(default="iron_condor", alias="LIVE_ALLOWED_STRUCTURES")
+    live_allowed_structures: str = Field(
+        default="iron_condor,long_call,long_put,bull_call_spread,bear_put_spread", alias="LIVE_ALLOWED_STRUCTURES"
+    )
     broker_credentials_key: str | None = Field(default=None, alias="BROKER_CREDENTIALS_KEY")
     max_spread_pct: float = Field(default=5, gt=0, alias="MAX_SPREAD_PCT")
     order_fill_timeout_s: float = Field(default=30, gt=0, alias="ORDER_FILL_TIMEOUT_S")

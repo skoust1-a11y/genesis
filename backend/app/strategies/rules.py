@@ -15,12 +15,21 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.db.hashing import canonical_json, normalize_json, sha256_hex
 
-ENTRY_FIELDS = ("iv_rank", "dte", "spot")
+EntryField = Literal["iv_rank", "dte", "spot", "vix", "pct_from_prev_high", "pct_from_prev_low"]
+ENTRY_FIELDS = ("iv_rank", "dte", "spot", "vix", "pct_from_prev_high", "pct_from_prev_low")
 OPS = {">=": operator.ge, "<=": operator.le, ">": operator.gt, "<": operator.lt, "==": operator.eq}
-STRUCTURES = ("iron_condor", "short_strangle", "short_straddle")
-DEFINED_RISK = ("iron_condor",)
+Structure = Literal[
+    "iron_condor", "short_strangle", "short_straddle", "long_call", "long_put", "bull_call_spread", "bear_put_spread"
+]
+CREDIT_STRUCTURES = ("iron_condor", "short_strangle", "short_straddle")
+DEBIT_STRUCTURES = ("long_call", "long_put", "bull_call_spread", "bear_put_spread")
+STRUCTURES = CREDIT_STRUCTURES + DEBIT_STRUCTURES
+DEFINED_RISK = ("iron_condor", *DEBIT_STRUCTURES)
 NEEDS_SHORT_DISTANCE = ("iron_condor", "short_strangle")
-EXIT_KINDS = ("profit_target_pct_of_credit", "stop_loss_pct_of_credit", "dte_at_or_below")
+NEEDS_WING_WIDTH = ("iron_condor", "bull_call_spread", "bear_put_spread")
+CREDIT_EXITS = ("profit_target_pct_of_credit", "stop_loss_pct_of_credit")
+DEBIT_EXITS = ("profit_target_pct_of_debit", "stop_loss_pct_of_debit")
+EXIT_KINDS = (*CREDIT_EXITS, *DEBIT_EXITS, "dte_at_or_below")
 EVENT_KINDS = ("rbi_policy", "budget", "fomc", "election", "results", "board_meeting", "other")
 BLACKOUT_MAX_DAYS_BEFORE = 14  # the event calendar lookup always covers at least this far ahead
 BLACKOUT_MAX_DAYS_AFTER = 7  # and this far back
@@ -32,28 +41,40 @@ class _Strict(BaseModel):
 
 class Instrument(_Strict):
     underlying: str
-    structure: Literal["iron_condor", "short_strangle", "short_straddle"]
-    short_distance: float | None = Field(default=None, gt=0)
-    wing_width: float | None = Field(default=None, gt=0)
+    structure: Structure
+    short_distance: float | None = Field(default=None, gt=0)  # credit structures: spot to the short strikes
+    wing_width: float | None = Field(default=None, gt=0)  # short to long strike (condor), bought to sold (spreads)
+    strike_offset: float | None = None  # debit structures: ATM to the bought strike, + out of the money, - in it
     lot_size: int | None = Field(default=None, gt=0)
 
     @model_validator(mode="after")
     def _structure_fields(self) -> Instrument:
         if self.structure in NEEDS_SHORT_DISTANCE and self.short_distance is None:
             raise ValueError(f"short_distance is required for {self.structure}")
-        if self.structure in DEFINED_RISK and self.wing_width is None:
+        if self.structure in NEEDS_WING_WIDTH and self.wing_width is None:
             raise ValueError(f"wing_width is required for {self.structure}")
+        if self.structure in DEBIT_STRUCTURES and self.short_distance is not None:
+            raise ValueError(f"short_distance does not apply to {self.structure}; use strike_offset")
+        if self.structure in CREDIT_STRUCTURES and self.strike_offset is not None:
+            raise ValueError(f"strike_offset only applies to {', '.join(DEBIT_STRUCTURES)}")
         return self
+
+    @property
+    def is_debit(self) -> bool:
+        return self.structure in DEBIT_STRUCTURES
 
 
 class EntryCondition(_Strict):
-    field: Literal["iv_rank", "dte", "spot"]
+    field: EntryField
     op: Literal[">=", "<=", ">", "<", "=="]
     value: float
 
 
 class ExitRule(_Strict):
-    kind: Literal["profit_target_pct_of_credit", "stop_loss_pct_of_credit", "dte_at_or_below"]
+    kind: Literal[
+        "profit_target_pct_of_credit", "stop_loss_pct_of_credit",
+        "profit_target_pct_of_debit", "stop_loss_pct_of_debit", "dte_at_or_below",
+    ]  # fmt: skip
     value: float = Field(ge=0)
 
 
@@ -94,13 +115,28 @@ class StrategyRules(_Strict):
     @model_validator(mode="after")
     def _target_and_stop(self) -> StrategyRules:
         kinds = {e.kind for e in self.exit}
-        missing = {"profit_target_pct_of_credit", "stop_loss_pct_of_credit"} - kinds
+        debit = self.instrument.is_debit
+        wanted, other = (DEBIT_EXITS, CREDIT_EXITS) if debit else (CREDIT_EXITS, DEBIT_EXITS)
+        missing = set(wanted) - kinds
         if missing:
             raise ValueError(f"exit needs {', '.join(sorted(missing))}")
+        if wrong := kinds & set(other):
+            raise ValueError(f"{', '.join(sorted(wrong))} does not apply to {self.instrument.structure}")
+        if debit and self.stop_loss_pct > 100:
+            raise ValueError("stop_loss_pct_of_debit cannot exceed 100: a bought position loses at most its debit")
         return self
 
     def exit_value(self, kind: str) -> float | None:
         return next((e.value for e in self.exit if e.kind == kind), None)
+
+    @property
+    def profit_target_pct(self) -> float:
+        """Profit target as % of the premium received (credit structures) or paid (debit structures)."""
+        return self.exit_value(f"profit_target_pct_of_{'debit' if self.instrument.is_debit else 'credit'}")
+
+    @property
+    def stop_loss_pct(self) -> float:
+        return self.exit_value(f"stop_loss_pct_of_{'debit' if self.instrument.is_debit else 'credit'}")
 
 
 def _format_error(err: dict) -> str:
@@ -168,18 +204,20 @@ def check_blackout(blackout: EntryBlackout, events: list[dict] | None) -> Check:
 
 @dataclass
 class PositionState:
-    credit: float  # premium received when the position was opened, in INR
+    credit: float  # net premium when the position was opened, in INR: received is positive, paid negative
     pnl: float  # unrealized P&L at current quotes, in INR
 
 
 def check_exit(rules: StrategyRules, position: PositionState, snapshot: Any) -> list[Check]:
-    """One check per exit rule; `passed` means the exit is triggered."""
+    """One check per exit rule; `passed` means the exit is triggered. Targets and stops are percentages
+    of the premium received or paid."""
+    premium = abs(position.credit)
     checks = []
     for e in rules.exit:
-        if e.kind == "profit_target_pct_of_credit":
-            checks.append(_compare("exit.profit_target", "pnl", ">=", position.credit * e.value / 100, position.pnl))
-        elif e.kind == "stop_loss_pct_of_credit":
-            checks.append(_compare("exit.stop_loss", "pnl", "<=", -position.credit * e.value / 100, position.pnl))
+        if e.kind in ("profit_target_pct_of_credit", "profit_target_pct_of_debit"):
+            checks.append(_compare("exit.profit_target", "pnl", ">=", premium * e.value / 100, position.pnl))
+        elif e.kind in ("stop_loss_pct_of_credit", "stop_loss_pct_of_debit"):
+            checks.append(_compare("exit.stop_loss", "pnl", "<=", -premium * e.value / 100, position.pnl))
         else:
             checks.append(_compare("exit.dte", "dte", "<=", e.value, getattr(snapshot, "dte", None)))
     return checks

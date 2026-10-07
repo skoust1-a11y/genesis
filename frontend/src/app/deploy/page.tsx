@@ -10,11 +10,35 @@ import { api, type BrokerAccount, getActor, getToken, inr, pct, setActor, setTok
 import { DEFAULT_FORM, type PolicyForm, toRiskLimits } from "@/lib/policy";
 
 type Strategy = { id: string; name: string; current_version: number; archived_at: string | null };
+type CommonRiskKey = "max_entries_per_day" | "max_consecutive_losses" | "cooldown_days" | "max_loss_pct_of_capital";
+
+function riskInForce(preview: Preview): string[] {
+  const r = preview.risk_in_force;
+  if (!r) return [];
+  const own = (preview.rules?.risk ?? {}) as Partial<Record<CommonRiskKey, number>>;
+  const source = (keys: CommonRiskKey[]) => {
+    const fromStrategy = keys.filter((k) => own[k] === r[k]).length;
+    return fromStrategy === keys.length ? " (strategy)" : fromStrategy === 0 ? " (common)" : " (strategy + common)";
+  };
+  const out: string[] = [];
+  if (r.max_entries_per_day !== undefined)
+    out.push(`at most ${r.max_entries_per_day} entr${r.max_entries_per_day === 1 ? "y" : "ies"} a day${source(["max_entries_per_day"])}`);
+  if (r.max_consecutive_losses !== undefined)
+    out.push(
+      `after ${r.max_consecutive_losses} losses in a row, no entries for ${r.cooldown_days} trading days` +
+        source(["max_consecutive_losses", "cooldown_days"]),
+    );
+  if (r.max_loss_pct_of_capital !== undefined)
+    out.push(`one trade risks at most ${r.max_loss_pct_of_capital}% of capital${source(["max_loss_pct_of_capital"])}`);
+  return out;
+}
 type Preview = {
   name: string;
   version: number;
   rules: { exit?: { kind: string; value: number }[]; risk?: { max_lots: number } } | null;
   rules_sha256: string | null;
+  common_risk: Partial<Record<CommonRiskKey, number>>;
+  risk_in_force: Partial<Record<CommonRiskKey, number>> | null;
   verdict_label: string | null;
   needs_verdict_acknowledgement: boolean;
   blockers: string[];
@@ -93,10 +117,9 @@ export default function DeployPage() {
       .catch((e) => setError(e.message));
   }, [strategyId, version, mode, accountId, account?.configured]);
 
-  const profitTarget = useMemo(
-    () => preview?.rules?.exit?.find((e) => e.kind === "profit_target_pct_of_credit")?.value ?? null,
-    [preview],
-  );
+  const targetRule = useMemo(() => preview?.rules?.exit?.find((e) => e.kind.startsWith("profit_target_pct_of_")), [preview]);
+  const profitTarget = targetRule?.value ?? null;
+  const targetBasis = targetRule?.kind === "profit_target_pct_of_debit" ? "of premium paid" : "of credit";
   const riskLimits = useMemo(() => toRiskLimits(form), [form]);
 
   async function run<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
@@ -200,8 +223,14 @@ export default function DeployPage() {
             <p>
               <span className="font-medium">{preview.name}</span> v{preview.version} · latest verdict{" "}
               <span className="font-medium">{preview.verdict_label ?? "none"}</span> · profit target{" "}
-              {profitTarget !== null ? `${profitTarget}% of credit` : "—"} · strategy max lots {preview.rules?.risk?.max_lots ?? "—"}
+              {profitTarget !== null ? `${profitTarget}% ${targetBasis}` : "—"} · strategy max lots {preview.rules?.risk?.max_lots ?? "—"}
             </p>
+            {riskInForce(preview).length > 0 && (
+              <p className="text-zinc-700">
+                <span className="font-medium">Risk rules in force:</span> {riskInForce(preview).join("; ")}. Common rules
+                come from <code>.env</code> and apply to every strategy; the stricter value wins.
+              </p>
+            )}
             {preview.blockers.length > 0 && (
               <ul className="list-disc pl-5 text-rose-800">
                 {preview.blockers.map((b) => (

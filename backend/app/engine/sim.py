@@ -57,7 +57,7 @@ from app.trading.decisions import (
     resize_proposal,
 )
 
-ENGINE_VERSION = "4"
+ENGINE_VERSION = "5"
 SCRATCH_PCT_OF_TARGET = 0.01
 BACKTEST_SHARE = 0.7
 WINDOW_END_RULE = "exit.window_end: closed at the last day of the test window"
@@ -248,7 +248,14 @@ def build_scenarios(strategy: StrategyDocument, settings: Settings) -> list[Scen
                 return r["instrument"]["short_distance"] > 0
 
             variants.append(_variant(base, f"short_distance {distance + delta:g}", shift))
-    for kind, factors, cap in (("stop_loss_pct_of_credit", (0.5, 1.5), None), ("profit_target_pct_of_credit", (0.6, 1.4), 100)):
+    family = "debit" if rules.instrument.is_debit else "credit"
+    # A bought position loses at most its debit; a sold one gains at most its credit.
+    stop_cap, target_cap = (100, None) if rules.instrument.is_debit else (None, 100)
+    exit_variants = (
+        (f"stop_loss_pct_of_{family}", (0.5, 1.5), stop_cap),
+        (f"profit_target_pct_of_{family}", (0.6, 1.4), target_cap),
+    )
+    for kind, factors, cap in exit_variants:
         current = rules.exit_value(kind)
         for factor in factors:
             value = round(current * factor, 2)
@@ -262,7 +269,8 @@ def build_scenarios(strategy: StrategyDocument, settings: Settings) -> list[Scen
                         return True
                 return False
 
-            variants.append(_variant(base, f"{kind.removesuffix('_pct_of_credit')} {value:g}%", set_exit))
+            name = kind.removesuffix("_pct_of_credit").removesuffix("_pct_of_debit")
+            variants.append(_variant(base, f"{name} {value:g}%", set_exit))
 
     seen: set[str] = set()
     scenarios: list[Scenario] = []

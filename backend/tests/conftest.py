@@ -72,7 +72,7 @@ def _code_default_settings(monkeypatch):
         ("DEFAULT_CAPITAL_INR", "500000"), ("DEFAULT_MAX_LOTS", "2"),
         ("PORTFOLIO_MAX_OPEN_POSITIONS", "3"), ("PORTFOLIO_MAX_DAILY_LOSS_INR", "10000"),
         ("MAX_ENTRIES_PER_DAY", "0"), ("MAX_CONSECUTIVE_LOSSES", "0"), ("LOSS_COOLDOWN_DAYS", "0"),
-        ("MAX_LOSS_PCT_OF_CAPITAL", "0"),
+        ("MAX_LOSS_PCT_OF_CAPITAL", "0"), ("LOT_SIZES", "NIFTY:75,BANKNIFTY:35"),
     ):  # fmt: skip
         monkeypatch.setenv(name, value)
     get_settings.cache_clear()

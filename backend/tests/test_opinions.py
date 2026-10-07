@@ -8,10 +8,11 @@ from app.agents.trade_crew import lessons as lessons_module
 from app.agents.trade_crew import opinion as opinion_module
 from app.agents.trade_crew.graph import run_tick
 from app.agents.trade_crew.lessons import LessonOutput
-from app.agents.trade_crew.opinion import SYSTEM_PROMPT, OpinionOutput, normalize
+from app.agents.trade_crew.opinion import SYSTEM_PROMPT, OpinionOutput, normalize, render_checklist
 from app.config import get_settings
 from app.live.store import LiveStore
 from app.market.context import UNTRUSTED_NOTE
+from app.strategies.schema import parse_strategy_markdown
 from tests.test_trade_crew import ENTRY, NO_SIGNAL, Clock, deployment_id, intents, make_ctx, orders  # noqa: F401
 
 
@@ -92,6 +93,18 @@ def test_shadow_opinion_is_recorded_and_never_changes_the_decision(live_session,
     assert call["system"] == SYSTEM_PROMPT
     assert UNTRUSTED_NOTE in call["user"] and "PROPOSED POSITION" in call["user"]
     assert "risk.min_risk_reward" in call["user"]
+    assert call["user"].startswith("STRATEGY CHECKLIST:\nThesis: Sell an iron condor on NIFTY")
+    assert "Entry:\n- IV rank at least 40 with 7 to 21 days to expiry" in call["user"]
+
+
+def test_checklist_drops_citations_and_empty_sections():
+    doc = parse_strategy_markdown(
+        "---\nname: x\n---\n# Thesis\nBuy breakouts. <!-- t=12s -->\n\n## Entry\n"
+        "- Spot above yesterday's high <!-- t=40s -->\n- First 15 minutes skipped\n\n## Exit\n\n## Risk\n- ₹1,500 max loss\n"
+    )
+    assert render_checklist(doc) == (
+        "Thesis: Buy breakouts.\nEntry:\n- Spot above yesterday's high\n- First 15 minutes skipped\nRisk:\n- ₹1,500 max loss"
+    )
 
 
 def test_llm_failure_is_recorded_and_the_rules_decide(live_session, make_ctx, deployment_id, llm):

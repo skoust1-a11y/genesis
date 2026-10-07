@@ -204,6 +204,18 @@ def approve_md(client):
     return approve
 
 
+def test_approval_preview_shows_the_risk_rules_in_force(monkeypatch, approve_md):
+    monkeypatch.setenv("MAX_ENTRIES_PER_DAY", "1")
+    monkeypatch.setenv("MAX_CONSECUTIVE_LOSSES", "3")
+    monkeypatch.setenv("LOSS_COOLDOWN_DAYS", "2")
+    get_settings.cache_clear()
+    preview = approve_md(markdown(max_entries_per_day=3, max_consecutive_losses=2, cooldown_days=1))["preview"]
+    assert preview["common_risk"] == {"max_entries_per_day": 1, "max_consecutive_losses": 3, "cooldown_days": 2}
+    in_force = preview["risk_in_force"]
+    assert (in_force["max_entries_per_day"], in_force["max_consecutive_losses"], in_force["cooldown_days"]) == (1, 2, 2)
+    assert preview["rules"]["risk"]["max_entries_per_day"] == 3  # the strategy's own rules are unchanged
+
+
 def test_crew_cooldown_after_a_loss(client, live_session, make_ctx, approve_md, paper_account):
     strategy = approve_md(markdown(max_consecutive_losses=1, cooldown_days=1))
     deployment_id = approve_and_start(client, strategy, paper_account)
