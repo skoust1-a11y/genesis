@@ -2,8 +2,92 @@
 # and by the losing-streak cooldown's trading-day count.
 # Copy each year's dates from NSE's "Holidays" circular (nseindia.com > Resources > Exchange communication).
 # Weekends are always closed and need no entry. A date missing here is treated as a trading day.
-source: NSE/FAOP/71777 (12 Dec 2025), plus the 15 Jan 2026 Maharashtra municipal election holiday
+source: >-
+  2020-2025: weekdays missing from NSE's NIFTY 50 index history (special Muhurat sessions trade, so
+  their Diwali dates are absent); 2026: NSE/FAOP/71777 (12 Dec 2025), plus the 15 Jan 2026 Maharashtra
+  municipal election holiday
 holidays:
+  - {date: 2020-02-21, name: Mahashivratri}
+  - {date: 2020-03-10, name: Holi}
+  - {date: 2020-04-02, name: Shri Ram Navami}
+  - {date: 2020-04-06, name: Shri Mahavir Jayanti}
+  - {date: 2020-04-10, name: Good Friday}
+  - {date: 2020-04-14, name: Dr. Baba Saheb Ambedkar Jayanti}
+  - {date: 2020-05-01, name: Maharashtra Day}
+  - {date: 2020-05-25, name: Id-ul-Fitr (Ramzan Id)}
+  - {date: 2020-10-02, name: Mahatma Gandhi Jayanti}
+  - {date: 2020-11-16, name: Diwali-Balipratipada}
+  - {date: 2020-11-30, name: Gurunanak Jayanti}
+  - {date: 2020-12-25, name: Christmas}
+  - {date: 2021-01-26, name: Republic Day}
+  - {date: 2021-03-11, name: Mahashivratri}
+  - {date: 2021-03-29, name: Holi}
+  - {date: 2021-04-02, name: Good Friday}
+  - {date: 2021-04-14, name: Dr. Baba Saheb Ambedkar Jayanti}
+  - {date: 2021-04-21, name: Shri Ram Navami}
+  - {date: 2021-05-13, name: Id-ul-Fitr (Ramzan Id)}
+  - {date: 2021-07-21, name: Bakri Id}
+  - {date: 2021-08-19, name: Muharram}
+  - {date: 2021-09-10, name: Ganesh Chaturthi}
+  - {date: 2021-10-15, name: Dussehra}
+  - {date: 2021-11-05, name: Diwali-Balipratipada}
+  - {date: 2021-11-19, name: Gurunanak Jayanti}
+  - {date: 2022-01-26, name: Republic Day}
+  - {date: 2022-03-01, name: Mahashivratri}
+  - {date: 2022-03-18, name: Holi}
+  - {date: 2022-04-14, name: Dr. Baba Saheb Ambedkar Jayanti / Shri Mahavir Jayanti}
+  - {date: 2022-04-15, name: Good Friday}
+  - {date: 2022-05-03, name: Id-ul-Fitr (Ramzan Id)}
+  - {date: 2022-08-09, name: Muharram}
+  - {date: 2022-08-15, name: Independence Day}
+  - {date: 2022-08-31, name: Ganesh Chaturthi}
+  - {date: 2022-10-05, name: Dussehra}
+  - {date: 2022-10-26, name: Diwali-Balipratipada}
+  - {date: 2022-11-08, name: Gurunanak Jayanti}
+  - {date: 2023-01-26, name: Republic Day}
+  - {date: 2023-03-07, name: Holi}
+  - {date: 2023-03-30, name: Shri Ram Navami}
+  - {date: 2023-04-04, name: Shri Mahavir Jayanti}
+  - {date: 2023-04-07, name: Good Friday}
+  - {date: 2023-04-14, name: Dr. Baba Saheb Ambedkar Jayanti}
+  - {date: 2023-05-01, name: Maharashtra Day}
+  - {date: 2023-06-29, name: Bakri Id}
+  - {date: 2023-08-15, name: Independence Day}
+  - {date: 2023-09-19, name: Ganesh Chaturthi}
+  - {date: 2023-10-02, name: Mahatma Gandhi Jayanti}
+  - {date: 2023-10-24, name: Dussehra}
+  - {date: 2023-11-14, name: Diwali-Balipratipada}
+  - {date: 2023-11-27, name: Gurunanak Jayanti}
+  - {date: 2023-12-25, name: Christmas}
+  - {date: 2024-01-22, name: Special holiday (Ram Mandir Pran Pratishtha)}
+  - {date: 2024-01-26, name: Republic Day}
+  - {date: 2024-03-08, name: Mahashivratri}
+  - {date: 2024-03-25, name: Holi}
+  - {date: 2024-03-29, name: Good Friday}
+  - {date: 2024-04-11, name: Id-ul-Fitr (Ramzan Id)}
+  - {date: 2024-04-17, name: Shri Ram Navami}
+  - {date: 2024-05-01, name: Maharashtra Day}
+  - {date: 2024-05-20, name: General Parliamentary Elections (Mumbai)}
+  - {date: 2024-06-17, name: Bakri Id}
+  - {date: 2024-07-17, name: Muharram}
+  - {date: 2024-08-15, name: Independence Day}
+  - {date: 2024-10-02, name: Mahatma Gandhi Jayanti}
+  - {date: 2024-11-15, name: Gurunanak Jayanti}
+  - {date: 2024-11-20, name: Maharashtra Legislative Assembly Election}
+  - {date: 2024-12-25, name: Christmas}
+  - {date: 2025-02-26, name: Mahashivratri}
+  - {date: 2025-03-14, name: Holi}
+  - {date: 2025-03-31, name: Id-ul-Fitr (Ramzan Id)}
+  - {date: 2025-04-10, name: Shri Mahavir Jayanti}
+  - {date: 2025-04-14, name: Dr. Baba Saheb Ambedkar Jayanti}
+  - {date: 2025-04-18, name: Good Friday}
+  - {date: 2025-05-01, name: Maharashtra Day}
+  - {date: 2025-08-15, name: Independence Day}
+  - {date: 2025-08-27, name: Ganesh Chaturthi}
+  - {date: 2025-10-02, name: Mahatma Gandhi Jayanti / Dussehra}
+  - {date: 2025-10-22, name: Diwali-Balipratipada}
+  - {date: 2025-11-05, name: Gurunanak Jayanti}
+  - {date: 2025-12-25, name: Christmas}
   - {date: 2026-01-15, name: Municipal Corporation Election - Maharashtra}
   - {date: 2026-01-26, name: Republic Day}
   - {date: 2026-03-03, name: Holi}

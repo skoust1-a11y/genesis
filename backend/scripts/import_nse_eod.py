@@ -3,7 +3,7 @@
 Files can be dropped into a raw directory and are classified by name:
 - F&O bhavcopy (legacy `fo02JAN2024bhav.csv[.zip]` or UDiFF `BhavCopy_NSE_FO_..._F_0000.csv[.zip]`):
   any name containing "bhav"
-- India VIX history: any name containing "vix" (used for NIFTY's IV rank)
+- India VIX history: any name containing "vix" (the IV rank of every imported underlying)
 - Index closes: `index_<UNDERLYING>*.csv`, for example `index_NIFTY_2024.csv`
 
 Files already imported (same SHA-256) are skipped, so the script is safe to re-run.
@@ -119,7 +119,7 @@ def download_history(raw_dir: Path, underlyings: list[str], start: date, end: da
     return saved
 
 
-def import_dir(raw_dir: Path, underlyings: list[str]) -> dict[str, int]:
+def import_dir(raw_dir: Path, underlyings: list[str], force: bool = False) -> dict[str, int]:
     counts = {"bhavcopy": 0, "index": 0, "vix": 0, "skipped": 0}
     store = open_market_store()
     try:
@@ -131,11 +131,12 @@ def import_dir(raw_dir: Path, underlyings: list[str]) -> dict[str, int]:
         for path in ordered:
             kind, underlying = classify(path)
             if kind == "bhavcopy":
-                n = store.import_bhavcopy(path, underlyings)
+                n = store.import_bhavcopy(path, underlyings, force=force)
             elif kind == "index":
                 n = store.import_index_closes(path, underlying)
             else:
-                n = store.import_vix(path, underlying)
+                # India VIX is the only volatility index NSE publishes; every underlying's IV rank uses it.
+                n = sum(store.import_vix(path, u, force=force or i > 0) for i, u in enumerate(underlyings))
             counts[kind if n else "skipped"] += n if n else 1
             print(f"{path.name}: {kind} {n} rows" if n else f"{path.name}: already imported")
         for u in underlyings:
@@ -159,6 +160,10 @@ def main() -> None:
         help="also download index and India VIX daily history from this date (start a year before the "
         "bhavcopies so IV rank has a full lookback)",
     )  # fmt: skip
+    parser.add_argument(
+        "--force", action="store_true",
+        help="re-read files imported before, for example to add an underlying (rows are upserted)",
+    )  # fmt: skip
     args = parser.parse_args()
     underlyings = [u.strip().upper() for u in args.underlyings.split(",") if u.strip()]
     if args.history_from:
@@ -167,7 +172,7 @@ def main() -> None:
     if args.download_from:
         saved = download_bhavcopies(args.raw_dir, args.download_from, args.download_to or date.today())
         print(f"downloaded or found {len(saved)} bhavcopies in {args.raw_dir}")
-    print(import_dir(args.raw_dir, underlyings))
+    print(import_dir(args.raw_dir, underlyings, force=args.force))
 
 
 if __name__ == "__main__":

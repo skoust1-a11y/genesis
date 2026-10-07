@@ -1,0 +1,20 @@
+# Index option lot sizes by the first trading day they applied to newly traded contracts.
+# Used only for legacy bhavcopy rows (before July 2024) whose lot size cannot be inferred from
+# turnover (contracts that did not trade that day, with no traded contract of the same expiry).
+# UDiFF files carry the lot size per row. Contracts listed before a change can keep the old lot
+# until they expire, which is why the per-row inference is tried first.
+# Each change matches the lot sizes in the bhavcopies themselves (inferred from turnover before
+# July 2024, the lot column after): new expiries list at the new lot up to two months before the
+# date here, and expiries listed earlier keep the old lot until they expire.
+changes:
+  - {underlying: NIFTY, from: 2019-01-01, lot_size: 75}
+  - {underlying: NIFTY, from: 2021-06-25, lot_size: 50}
+  - {underlying: NIFTY, from: 2024-04-26, lot_size: 25}
+  - {underlying: NIFTY, from: 2024-11-20, lot_size: 75}
+  - {underlying: NIFTY, from: 2026-01-01, lot_size: 65}
+  - {underlying: BANKNIFTY, from: 2019-01-01, lot_size: 20}
+  - {underlying: BANKNIFTY, from: 2020-05-29, lot_size: 25}
+  - {underlying: BANKNIFTY, from: 2023-06-30, lot_size: 15}
+  - {underlying: BANKNIFTY, from: 2024-11-20, lot_size: 30}
+  - {underlying: BANKNIFTY, from: 2025-04-25, lot_size: 35}
+  - {underlying: BANKNIFTY, from: 2026-01-01, lot_size: 30}

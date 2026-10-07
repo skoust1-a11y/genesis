@@ -16,7 +16,16 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings, get_settings
 from app.db.session import engine_for
 from app.market.models import ImportFile, IndexBar, MarketBase, MarketEvent, NewsItem, OptionEod
-from app.market.nse import iv_rank_series, parse_daily_bars, parse_daily_closes, parse_fo_bhavcopy, read_text
+from app.market.nse import (
+    LotChange,
+    iv_rank_series,
+    load_lot_sizes,
+    lot_size_on,
+    parse_daily_bars,
+    parse_daily_closes,
+    parse_fo_bhavcopy,
+    read_text,
+)
 
 BATCH = 2000  # rows per multi-row INSERT; keeps bound parameters under SQLite's limit
 
@@ -76,6 +85,8 @@ class MarketStore:
         return self.session.get(ImportFile, sha) is not None
 
     def _record_file(self, path: Path, sha: str, kind: str, rows: int, dates: list[str]) -> None:
+        if self._already_imported(sha):
+            return
         self.session.add(
             ImportFile(
                 sha256=sha, name=path.name, kind=kind, rows=rows,
@@ -95,12 +106,21 @@ class MarketStore:
                 stmt = stmt.on_conflict_do_nothing()
             self.session.execute(stmt)
 
-    def import_bhavcopy(self, path: Path, underlyings: Iterable[str] | None = None) -> int:
-        """Index option rows from one bhavcopy. Returns rows imported; 0 if the file was seen before."""
+    def _lot_changes(self) -> list[LotChange]:
+        if "lot_changes" not in self._cache:
+            self._cache["lot_changes"] = load_lot_sizes(Path(get_settings().data_dir) / "lot_sizes" / "nse.yaml")
+        return self._cache["lot_changes"]
+
+    def import_bhavcopy(self, path: Path, underlyings: Iterable[str] | None = None, *, force: bool = False) -> int:
+        """Index option rows from one bhavcopy. Returns rows imported; 0 if the file was seen before,
+        unless `force` (to add underlyings a first import left out; rows are upserted)."""
         sha = _sha256(path)
-        if self._already_imported(sha):
+        if self._already_imported(sha) and not force:
             return 0
         rows = parse_fo_bhavcopy(read_text(path), underlyings)
+        for r in rows:
+            if r.lot_size is None:
+                r.lot_size = lot_size_on(self._lot_changes(), r.underlying, r.date)
         option_rows = [r.__dict__ for r in rows]
         self._upsert(
             OptionEod, option_rows,
@@ -145,10 +165,12 @@ class MarketStore:
         self.session.commit()
         return len(rows)
 
-    def import_vix(self, path: Path, underlying: str = "NIFTY", settings: Settings | None = None) -> int:
+    def import_vix(
+        self, path: Path, underlying: str = "NIFTY", settings: Settings | None = None, *, force: bool = False
+    ) -> int:
         """India VIX closes as the volatility series behind `underlying`'s IV rank."""
         sha = _sha256(path)
-        if self._already_imported(sha):
+        if self._already_imported(sha) and not force:
             return 0
         closes = parse_daily_closes(read_text(path))
         rows = [{"underlying": underlying.upper(), "date": d, "vix": c} for d, c in closes]

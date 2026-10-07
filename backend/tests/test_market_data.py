@@ -14,7 +14,10 @@ from app.market.historical import HistoricalFeed, option_price
 from app.market.models import IndexBar, OptionEod
 from app.market.nse import (
     bhavcopy_layout,
+    infer_legacy_lot,
     iv_rank_series,
+    load_lot_sizes,
+    lot_size_on,
     parse_daily_bars,
     parse_daily_closes,
     parse_fo_bhavcopy,
@@ -50,6 +53,49 @@ def test_legacy_bhavcopy_keeps_index_options_only():
     assert {r.date for r in rows} == {"2024-01-05"}
     assert rows[0].close == 135.5 and rows[0].volume == 40000 and rows[0].lot_size is None
     assert {r.underlying for r in parse_fo_bhavcopy(text)} == {"NIFTY", "BANKNIFTY"}
+
+
+def test_legacy_lot_size_is_inferred_from_turnover():
+    assert infer_legacy_lot("19714", "162918.49", "16000", "522.05") == 50  # NIFTY 16000 CE, 1 June 2022
+    assert infer_legacy_lot("0", "0", "16000", "522.05") is None
+    assert infer_legacy_lot("100", "130", "16000", "100") is None  # 8.06 per contract: not near a multiple of 5
+
+    header = "INSTRUMENT,SYMBOL,EXPIRY_DT,STRIKE_PR,OPTION_TYP,OPEN,HIGH,LOW,CLOSE,SETTLE_PR,CONTRACTS,VAL_INLAKH,"
+    header += "OPEN_INT,CHG_IN_OI,TIMESTAMP\n"
+    rows = parse_fo_bhavcopy(
+        header
+        + "OPTIDX,NIFTY,02-Jun-2022,16000,CE,1,1,1,522.05,522.05,19714,162918.49,1,0,01-JUN-2022\n"
+        + "OPTIDX,NIFTY,02-Jun-2022,16100,CE,1,1,1,450,450,19000,156000,1,0,01-JUN-2022\n"
+        + "OPTIDX,NIFTY,02-Jun-2022,16200,CE,1,1,1,400,400,10,91.3,1,0,01-JUN-2022\n"
+        + "OPTIDX,NIFTY,02-Jun-2022,18000,CE,1,1,1,0.05,0.05,0,0,1,0,01-JUN-2022\n"
+        + "OPTIDX,NIFTY,30-Jun-2022,18000,CE,1,1,1,2,2,0,0,1,0,01-JUN-2022\n"
+    )
+    assert infer_legacy_lot("10", "91.3", "16200", "400") == 55
+    # the expiry's lot overrides an outlier and fills an untraded contract; another expiry stays unknown
+    assert [r.lot_size for r in rows] == [50, 50, 50, 50, None]
+
+
+def test_lot_size_table_fills_what_turnover_cannot(market_db_url, tmp_path, monkeypatch):
+    (tmp_path / "lot_sizes").mkdir()
+    (tmp_path / "lot_sizes" / "nse.yaml").write_text(
+        "changes:\n  - {underlying: NIFTY, from: 2021-06-25, lot_size: 50}\n"
+        "  - {underlying: NIFTY, from: 2024-04-26, lot_size: 25}\n"
+    )
+    changes = load_lot_sizes(tmp_path / "lot_sizes" / "nse.yaml")
+    assert [lot_size_on(changes, "NIFTY", d) for d in ("2021-01-01", "2024-01-05", "2024-04-26")] == [None, 50, 25]
+
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    get_settings.cache_clear()
+    store = open_market_store(get_settings())
+    try:
+        assert store.import_bhavcopy(LEGACY, ["NIFTY"]) == 3
+        lots = {r.lot_size for r in store.session.query(OptionEod).filter_by(underlying="NIFTY")}
+        assert lots == {50}  # the fixture has no turnover, so the table's lot for 5 January 2024 applies
+        assert store.import_bhavcopy(LEGACY, ["BANKNIFTY"]) == 0  # seen before
+        assert store.import_bhavcopy(LEGACY, ["BANKNIFTY"], force=True) == 1
+        assert store.session.query(OptionEod).filter_by(underlying="BANKNIFTY").count() == 1
+    finally:
+        store.close()
 
 
 def test_udiff_bhavcopy_reads_lot_size_and_underlying_price():
@@ -153,6 +199,8 @@ def test_import_script_classifies_and_orders_files(market_db_url, tmp_path):
     assert classify(raw / "notes.txt") is None
     assert import_dir(raw, ["NIFTY"]) == {"bhavcopy": 6, "index": 3, "vix": 26, "skipped": 0}
     assert import_dir(raw, ["NIFTY"])["skipped"] == 4
+    added = import_dir(raw, ["NIFTY", "BANKNIFTY"], force=True)  # VIX goes to every underlying
+    assert added["vix"] == 52 and added["bhavcopy"] > 6
 
 
 def test_quote_falls_back_to_settlement_and_marks_it_stale():

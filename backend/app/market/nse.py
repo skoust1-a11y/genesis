@@ -3,6 +3,7 @@
 Supported inputs:
 - F&O bhavcopy, both the legacy layout (`INSTRUMENT,SYMBOL,EXPIRY_DT,...`, until July 2024) and the
   UDiFF layout (`TradDt,...,TckrSymb,XpryDt,StrkPric,OptnTp,...`). Plain CSV or the zip NSE serves.
+  Legacy rows carry no lot size; it is inferred from turnover, then from `data/lot_sizes/nse.yaml`.
 - Daily index closes and India VIX history as exported from the NSE website (any CSV with a
   date column and a close column).
 """
@@ -12,7 +13,7 @@ from __future__ import annotations
 import csv
 import io
 import zipfile
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -124,7 +125,9 @@ def parse_fo_bhavcopy(text: str, underlyings: Iterable[str] | None = None) -> li
                 "settle": row.get("SETTLE_PR"),
                 "volume": row.get("CONTRACTS"),
                 "oi": row.get("OPEN_INT"),
-                "lot": None,
+                "lot": infer_legacy_lot(
+                    row.get("CONTRACTS"), row.get("VAL_INLAKH"), row.get("STRIKE_PR"), row.get("CLOSE")
+                ),
                 "spot": None,
             }
         if wanted is not None and symbol not in wanted:
@@ -144,11 +147,68 @@ def parse_fo_bhavcopy(text: str, underlyings: Iterable[str] | None = None) -> li
                 settle=_num(fields["settle"]),
                 volume=_int(fields["volume"]) or 0,
                 open_interest=_int(fields["oi"]),
-                lot_size=_int(fields["lot"]),
+                lot_size=fields["lot"] if isinstance(fields["lot"], int) else _int(fields["lot"]),
                 underlying_price=_num(fields["spot"]),
             )
         )
+    if layout == "legacy":
+        _common_expiry_lots(out)
     return out
+
+
+def infer_legacy_lot(contracts: str | None, value_lakh: str | None, strike: str | None, price: str | None) -> int | None:
+    """Lot size of a legacy-bhavcopy option row, which has no lot column. Option turnover there is
+    notional: contracts x lot x (strike + premium). Using the close for the average premium is off by
+    well under one unit, and every NSE index lot size is a multiple of 5."""
+    n, value, k = _num(contracts), _num(value_lakh), _num(strike)
+    if not n or not value or not k:
+        return None
+    raw = value * 100_000 / (n * (k + (_num(price) or 0)))
+    lot = round(raw / 5) * 5
+    return lot if lot > 0 and abs(raw - lot) < 1.5 else None
+
+
+def _common_expiry_lots(rows: list[OptionRow]) -> None:
+    """Every contract of an expiry takes the lot size most of its traded contracts imply that day.
+
+    One expiry has one lot size, so this fills untraded contracts and overrides the odd rounding outlier.
+    """
+    seen: dict[tuple[str, str], Counter[int]] = {}
+    for r in rows:
+        if r.lot_size:
+            seen.setdefault((r.underlying, r.expiry), Counter())[r.lot_size] += 1
+    for r in rows:
+        if (r.underlying, r.expiry) in seen:
+            r.lot_size = seen[(r.underlying, r.expiry)].most_common(1)[0][0]
+
+
+@dataclass
+class LotChange:
+    underlying: str
+    from_date: str  # first trading day the lot size applies to newly traded contracts
+    lot_size: int
+
+
+def load_lot_sizes(path: Path) -> list[LotChange]:
+    import yaml
+
+    if not path.exists():
+        return []
+    raw = yaml.safe_load(path.read_text()) or {}
+    changes = [
+        LotChange(str(c["underlying"]).upper(), parse_date(str(c["from"])), int(c["lot_size"]))
+        for c in raw.get("changes", [])
+    ]
+    return sorted(changes, key=lambda c: (c.underlying, c.from_date))
+
+
+def lot_size_on(changes: list[LotChange], underlying: str, day: str) -> int | None:
+    """The lot size in force on `day` from the dated table; None before its first entry."""
+    current = None
+    for c in changes:
+        if c.underlying == underlying.upper() and c.from_date <= day:
+            current = c.lot_size
+    return current
 
 
 def _find_column(header: Iterable[str], *, exact: tuple[str, ...], contains: str) -> str | None:
