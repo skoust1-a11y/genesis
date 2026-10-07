@@ -5,6 +5,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from app.agents.review_crew.hard_stop import hard_stop_proposal, hard_stop_sweep
 from app.agents.review_crew.improver import add_llm_rationale, propose_improvements
 from app.agents.review_crew.reviewer import review_sim_runs
 from app.config import get_settings
@@ -27,6 +28,7 @@ class ReviewState(TypedDict, total=False):
     trade_reviews: list
     improvements: list
     data_source: str
+    hard_stop_sweep: dict
 
 
 def _audit_node(state: ReviewState) -> ReviewState:
@@ -100,12 +102,30 @@ def _run_sims_node(state: ReviewState) -> ReviewState:
     return {"scenario_results": results, "cost_summary": cost_summary, "sim_runs": sim_runs, "data_source": data_source}
 
 
+def _hard_stop_node(state: ReviewState) -> ReviewState:
+    """The strategy at each stop in HARD_STOP_SWEEP_PCTS, over the windows the scenarios use."""
+    settings = get_settings()
+    rules = state["strategy"].rules
+    if not state["scenarios"] or rules is None or not settings.hard_stop_sweep:
+        return {}
+    profile = resolve_cost_profile(settings, state["strategy"])
+    source = open_market_source(rules.instrument.underlying, settings, event_lookup(settings))
+    try:
+        backtest_dates, forward_dates = split_dates(source.dates())
+        sweep = hard_stop_sweep(rules, source, backtest_dates, forward_dates, profile, settings)
+    finally:
+        source.close()
+    return {"hard_stop_sweep": sweep}
+
+
 def _trade_review_node(state: ReviewState) -> ReviewState:
     return {"trade_reviews": review_sim_runs(state["sim_runs"])}
 
 
 def _improve_node(state: ReviewState) -> ReviewState:
     proposals = propose_improvements(state["sim_runs"])
+    stop = hard_stop_proposal(state.get("hard_stop_sweep"), state["strategy"].rules) if state["strategy"].rules else None
+    proposals += [stop] if stop else []
     add_llm_rationale(proposals, state["strategy"].markdown, get_settings())
     return {"improvements": proposals}
 
@@ -161,13 +181,15 @@ def build_review_graph():
     graph.add_node("audit", _audit_node)
     graph.add_node("scenarios", _scenario_node)
     graph.add_node("simulate", _run_sims_node)
+    graph.add_node("hard_stop", _hard_stop_node)
     graph.add_node("trade_review", _trade_review_node)
     graph.add_node("verdict", _verdict_node)
     graph.add_node("improve", _improve_node)
     graph.add_edge(START, "audit")
     graph.add_edge("audit", "scenarios")
     graph.add_edge("scenarios", "simulate")
-    graph.add_edge("simulate", "trade_review")
+    graph.add_edge("simulate", "hard_stop")
+    graph.add_edge("hard_stop", "trade_review")
     graph.add_edge("trade_review", "verdict")
     graph.add_edge("verdict", "improve")
     graph.add_edge("improve", END)

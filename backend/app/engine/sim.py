@@ -34,6 +34,7 @@ from app.engine.costs import CostBreakdown, CostProfile, exercise_costs, leg_cos
 from app.live import drawdown
 from app.market.feed import MarketFeed, MarketSnapshot, intrinsic
 from app.strategies.rules import (
+    MAX_STOP_PCT_OF_CAPITAL,
     AccountState,
     Check,
     RiskLimits,
@@ -52,12 +53,13 @@ from app.trading.decisions import (
     entry_rule_text,
     exit_checks,
     fired_exit,
+    frozen_exits,
     mark_position,
     proposal_lots,
     resize_proposal,
 )
 
-ENGINE_VERSION = "5"
+ENGINE_VERSION = "6"
 SCRATCH_PCT_OF_TARGET = 0.01
 BACKTEST_SHARE = 0.7
 WINDOW_END_RULE = "exit.window_end: closed at the last day of the test window"
@@ -255,6 +257,11 @@ def build_scenarios(strategy: StrategyDocument, settings: Settings) -> list[Scen
         (f"stop_loss_pct_of_{family}", (0.5, 1.5), stop_cap),
         (f"profit_target_pct_of_{family}", (0.6, 1.4), target_cap),
     )
+    if rules.uses_capital_stop:
+        exit_variants = (
+            ("stop_loss_pct_of_capital", (0.5, 1.5), MAX_STOP_PCT_OF_CAPITAL),
+            ("profit_target_r_multiple", (0.6, 1.4), None),
+        )
     for kind, factors, cap in exit_variants:
         current = rules.exit_value(kind)
         for factor in factors:
@@ -269,8 +276,12 @@ def build_scenarios(strategy: StrategyDocument, settings: Settings) -> list[Scen
                         return True
                 return False
 
+            labels = {
+                "stop_loss_pct_of_capital": f"stop_loss {value:g}% of capital",
+                "profit_target_r_multiple": f"profit_target {value:g}R",
+            }
             name = kind.removesuffix("_pct_of_credit").removesuffix("_pct_of_debit")
-            variants.append(_variant(base, f"{name} {value:g}%", set_exit))
+            variants.append(_variant(base, labels.get(kind, f"{name} {value:g}%"), set_exit))
 
     seen: set[str] = set()
     scenarios: list[Scenario] = []
@@ -550,7 +561,8 @@ def simulate(
                 skipped["missing_quotes_open_position"] = skipped.get("missing_quotes_open_position", 0) + 1
                 continue
             position.last_quotes = mark.quotes
-            fired = fired_exit(exit_checks(rules, mark))
+            e = position.proposal["economics"]
+            fired = fired_exit(exit_checks(rules, mark, frozen_exits(e.target_pnl, e.stop_loss_pnl) if e else None))
             close_lots = None
             if policy is not None:
                 position.peak_pct = trade_policy.update_peak(position.peak_pct, mark)
@@ -606,7 +618,7 @@ def simulate(
                 skipped["drawdown.paused"] = skipped.get("drawdown.paused", 0) + 1
             elif all(c.passed for c in entry):
                 try:
-                    proposal = build_entry_proposal(rules, market, settings, lots)
+                    proposal = build_entry_proposal(rules, market, settings, lots, capital)
                 except MissingMarketConfig:
                     skipped["missing_lot_size_or_strike_step"] = skipped.get("missing_lot_size_or_strike_step", 0) + 1
                     proposal = None

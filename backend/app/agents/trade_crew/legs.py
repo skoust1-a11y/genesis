@@ -71,8 +71,12 @@ def _width(legs: list[Leg]) -> float:
     )  # fmt: skip
 
 
-def entry_economics(rules: StrategyRules, legs: list[Leg], prices: list[float], quantity: int) -> Economics:
+def entry_economics(
+    rules: StrategyRules, legs: list[Leg], prices: list[float], quantity: int, capital_inr: float | None = None
+) -> Economics:
     credit = sum(signed(leg.side) * price for leg, price in zip(legs, prices, strict=True)) * quantity
+    if rules.uses_capital_stop:
+        return _capital_stop_economics(rules, legs, credit, quantity, capital_inr)
     if rules.instrument.is_debit:
         debit = -credit
         target = debit * rules.profit_target_pct / 100
@@ -85,6 +89,27 @@ def entry_economics(rules: StrategyRules, legs: list[Leg], prices: list[float], 
     stop = credit * rules.stop_loss_pct / 100
     max_loss = stop
     if rules.instrument.structure in DEFINED_RISK:
+        max_loss = min(stop, _width(legs) * quantity - credit)
+    risk_reward = target / max_loss if max_loss > 0 else 0.0
+    return Economics(credit, target, -stop, max_loss, risk_reward)
+
+
+def _capital_stop_economics(
+    rules: StrategyRules, legs: list[Leg], credit: float, quantity: int, capital_inr: float | None
+) -> Economics:
+    """Stop = capital x % for the whole trade, target = R x stop, each capped by what the structure allows."""
+    if not capital_inr:
+        raise ValueError("a stop as % of capital needs the capital in force")
+    stop = capital_inr * rules.stop_loss_pct_of_capital / 100
+    if rules.instrument.is_debit:
+        stop = min(stop, -credit)  # a bought position loses at most its debit
+    target = rules.profit_target_r_multiple * stop
+    if rules.instrument.is_debit and rules.instrument.wing_width is not None:
+        target = min(target, _width(legs) * quantity + credit)  # a spread earns at most its width
+    elif not rules.instrument.is_debit:
+        target = min(target, credit)  # a sold position earns at most its credit
+    max_loss = stop
+    if not rules.instrument.is_debit and rules.instrument.structure in DEFINED_RISK:
         max_loss = min(stop, _width(legs) * quantity - credit)
     risk_reward = target / max_loss if max_loss > 0 else 0.0
     return Economics(credit, target, -stop, max_loss, risk_reward)

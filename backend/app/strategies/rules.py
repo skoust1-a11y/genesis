@@ -29,7 +29,9 @@ NEEDS_SHORT_DISTANCE = ("iron_condor", "short_strangle")
 NEEDS_WING_WIDTH = ("iron_condor", "bull_call_spread", "bear_put_spread")
 CREDIT_EXITS = ("profit_target_pct_of_credit", "stop_loss_pct_of_credit")
 DEBIT_EXITS = ("profit_target_pct_of_debit", "stop_loss_pct_of_debit")
-EXIT_KINDS = (*CREDIT_EXITS, *DEBIT_EXITS, "dte_at_or_below")
+CAPITAL_EXITS = ("stop_loss_pct_of_capital", "profit_target_r_multiple")
+EXIT_KINDS = (*CREDIT_EXITS, *DEBIT_EXITS, *CAPITAL_EXITS, "dte_at_or_below")
+MAX_STOP_PCT_OF_CAPITAL = 20
 EVENT_KINDS = ("rbi_policy", "budget", "fomc", "election", "results", "board_meeting", "other")
 BLACKOUT_MAX_DAYS_BEFORE = 14  # the event calendar lookup always covers at least this far ahead
 BLACKOUT_MAX_DAYS_AFTER = 7  # and this far back
@@ -73,7 +75,8 @@ class EntryCondition(_Strict):
 class ExitRule(_Strict):
     kind: Literal[
         "profit_target_pct_of_credit", "stop_loss_pct_of_credit",
-        "profit_target_pct_of_debit", "stop_loss_pct_of_debit", "dte_at_or_below",
+        "profit_target_pct_of_debit", "stop_loss_pct_of_debit",
+        "stop_loss_pct_of_capital", "profit_target_r_multiple", "dte_at_or_below",
     ]  # fmt: skip
     value: float = Field(ge=0)
 
@@ -115,6 +118,16 @@ class StrategyRules(_Strict):
     @model_validator(mode="after")
     def _target_and_stop(self) -> StrategyRules:
         kinds = {e.kind for e in self.exit}
+        if kinds & set(CAPITAL_EXITS):
+            if missing := set(CAPITAL_EXITS) - kinds:
+                raise ValueError(f"exit needs {', '.join(sorted(missing))}: the capital stop and R target go together")
+            if mixed := kinds & set(CREDIT_EXITS + DEBIT_EXITS):
+                raise ValueError(f"{', '.join(sorted(mixed))} cannot be combined with a stop as % of capital")
+            if not 0 < self.stop_loss_pct_of_capital <= MAX_STOP_PCT_OF_CAPITAL:
+                raise ValueError(f"stop_loss_pct_of_capital must be above 0 and at most {MAX_STOP_PCT_OF_CAPITAL}")
+            if self.profit_target_r_multiple <= 0:
+                raise ValueError("profit_target_r_multiple must be above 0")
+            return self
         debit = self.instrument.is_debit
         wanted, other = (DEBIT_EXITS, CREDIT_EXITS) if debit else (CREDIT_EXITS, DEBIT_EXITS)
         missing = set(wanted) - kinds
@@ -130,13 +143,36 @@ class StrategyRules(_Strict):
         return next((e.value for e in self.exit if e.kind == kind), None)
 
     @property
-    def profit_target_pct(self) -> float:
-        """Profit target as % of the premium received (credit structures) or paid (debit structures)."""
+    def uses_capital_stop(self) -> bool:
+        """Stop as % of capital and target as a multiple of it, instead of % of the premium."""
+        return self.stop_loss_pct_of_capital is not None
+
+    @property
+    def stop_loss_pct_of_capital(self) -> float | None:
+        return self.exit_value("stop_loss_pct_of_capital")
+
+    @property
+    def profit_target_r_multiple(self) -> float | None:
+        return self.exit_value("profit_target_r_multiple")
+
+    @property
+    def profit_target_pct(self) -> float | None:
+        """Profit target as % of the premium received (credit structures) or paid (debit structures);
+        None with a stop as % of capital."""
         return self.exit_value(f"profit_target_pct_of_{'debit' if self.instrument.is_debit else 'credit'}")
 
     @property
-    def stop_loss_pct(self) -> float:
+    def stop_loss_pct(self) -> float | None:
         return self.exit_value(f"stop_loss_pct_of_{'debit' if self.instrument.is_debit else 'credit'}")
+
+
+def risk_reward_ratio(rules: StrategyRules) -> float | None:
+    """Target over stop: the R multiple, or the premium target % over the premium stop % (90/30 = 3)."""
+    if rules.profit_target_r_multiple is not None:
+        return rules.profit_target_r_multiple
+    if rules.profit_target_pct is None or not rules.stop_loss_pct:
+        return None
+    return rules.profit_target_pct / rules.stop_loss_pct
 
 
 def _format_error(err: dict) -> str:
@@ -208,16 +244,24 @@ class PositionState:
     pnl: float  # unrealized P&L at current quotes, in INR
 
 
-def check_exit(rules: StrategyRules, position: PositionState, snapshot: Any) -> list[Check]:
+def check_exit(
+    rules: StrategyRules, position: PositionState, snapshot: Any, frozen: tuple[float, float] | None = None
+) -> list[Check]:
     """One check per exit rule; `passed` means the exit is triggered. Targets and stops are percentages
-    of the premium received or paid."""
+    of the premium received or paid, or, for a stop as % of capital, the rupee (target, stop) fixed at
+    entry and passed as `frozen`. Without `frozen` those two checks cannot fire."""
     premium = abs(position.credit)
+    target_inr, stop_inr = frozen if frozen else (None, None)
     checks = []
     for e in rules.exit:
         if e.kind in ("profit_target_pct_of_credit", "profit_target_pct_of_debit"):
             checks.append(_compare("exit.profit_target", "pnl", ">=", premium * e.value / 100, position.pnl))
         elif e.kind in ("stop_loss_pct_of_credit", "stop_loss_pct_of_debit"):
             checks.append(_compare("exit.stop_loss", "pnl", "<=", -premium * e.value / 100, position.pnl))
+        elif e.kind == "profit_target_r_multiple":
+            checks.append(_compare("exit.profit_target", "pnl", ">=", target_inr, position.pnl))
+        elif e.kind == "stop_loss_pct_of_capital":
+            checks.append(_compare("exit.stop_loss", "pnl", "<=", stop_inr, position.pnl))
         else:
             checks.append(_compare("exit.dte", "dte", "<=", e.value, getattr(snapshot, "dte", None)))
     return checks

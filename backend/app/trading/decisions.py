@@ -47,8 +47,11 @@ def lot_size_for(rules: StrategyRules, market: MarketSnapshot, settings: Setting
     return rules.instrument.lot_size or market.lot_size or settings.lot_size(rules.instrument.underlying)
 
 
-def build_entry_proposal(rules: StrategyRules, market: MarketSnapshot, settings: Settings, lots: int) -> dict[str, Any]:
-    """Legs, quotes and economics for opening `lots` lots now. Raises MissingMarketConfig without a lot size or strike step."""
+def build_entry_proposal(
+    rules: StrategyRules, market: MarketSnapshot, settings: Settings, lots: int, capital_inr: float | None = None
+) -> dict[str, Any]:
+    """Legs, quotes and economics for opening `lots` lots now. Raises MissingMarketConfig without a lot size or
+    strike step. `capital_inr` sets the rupee stop of a stop as % of capital (default: `DEFAULT_CAPITAL_INR`)."""
     instrument = rules.instrument
     lot_size = lot_size_for(rules, market, settings)
     step = settings.strike_step(instrument.underlying)
@@ -57,12 +60,14 @@ def build_entry_proposal(rules: StrategyRules, market: MarketSnapshot, settings:
     legs = build_legs(instrument, market.spot, step)
     quotes = [market.quote(leg.strike, leg.option_type) for leg in legs]
     illiquid = [(leg.strike, leg.option_type, market.expiry) in market.stale for leg in legs]
-    return _proposal(rules, market.expiry, legs, quotes, lots, lot_size, illiquid)
+    capital = capital_inr or settings.default_capital_inr
+    return _proposal(rules, market.expiry, legs, quotes, lots, lot_size, illiquid, capital)
 
 
 def _proposal(
-    rules: StrategyRules, expiry: str, legs, quotes, lots: int, lot_size: int, illiquid: list[bool]
-) -> dict[str, Any]:
+    rules: StrategyRules, expiry: str, legs, quotes, lots: int, lot_size: int, illiquid: list[bool],
+    capital_inr: float | None,
+) -> dict[str, Any]:  # fmt: skip
     quantity = lots * lot_size
     leg_dicts = [
         {
@@ -75,8 +80,13 @@ def _proposal(
         }
         for leg, q, thin in zip(legs, quotes, illiquid, strict=True)
     ]
-    economics = entry_economics(rules, legs, quotes, quantity) if quantity and None not in quotes else None
-    return {"lots": lots, "lot_size": lot_size, "quantity": quantity, "legs": leg_dicts, "economics": economics}
+    economics = (
+        entry_economics(rules, legs, quotes, quantity, capital_inr) if quantity and None not in quotes else None
+    )
+    return {
+        "lots": lots, "lot_size": lot_size, "quantity": quantity, "legs": leg_dicts, "economics": economics,
+        "capital_inr": capital_inr,
+    }  # fmt: skip
 
 
 def resize_proposal(rules: StrategyRules, proposal: dict[str, Any], lots: int) -> dict[str, Any]:
@@ -85,7 +95,7 @@ def resize_proposal(rules: StrategyRules, proposal: dict[str, Any], lots: int) -
     quotes = [leg["quote"] for leg in proposal["legs"]]
     expiry = proposal["legs"][0]["expiry"] if proposal["legs"] else ""
     illiquid = [leg.get("illiquid", False) for leg in proposal["legs"]]
-    return _proposal(rules, expiry, legs, quotes, lots, proposal["lot_size"], illiquid)
+    return _proposal(rules, expiry, legs, quotes, lots, proposal["lot_size"], illiquid, proposal.get("capital_inr"))
 
 
 def entry_risk_checks(
@@ -134,11 +144,20 @@ def mark_position(legs: list[dict[str, Any]], market: MarketSnapshot) -> Positio
     return PositionMark(quotes, credit, pnl, dte)
 
 
-def exit_checks(rules: StrategyRules, mark: PositionMark) -> list[Check]:
+def exit_checks(
+    rules: StrategyRules, mark: PositionMark, frozen: tuple[float, float] | None = None
+) -> list[Check]:
     """Expiry, then the strategy's exit rules. Expired legs settle at intrinsic value, so expiry
-    takes precedence over a stop or target that fires on the same day."""
+    takes precedence over a stop or target that fires on the same day. `frozen` is the position's
+    (target_pnl, stop_loss_pnl) in INR, stored at entry and scaled to the lots still open; a stop
+    as % of capital exits on these, so it stays fixed whatever the capital does later."""
     expiry = Check("exit.expiry", "dte", "<=", 0, mark.dte, mark.dte <= 0)
-    return [expiry, *check_exit(rules, PositionState(credit=mark.credit, pnl=mark.pnl), SimpleNamespace(dte=mark.dte))]
+    position = PositionState(credit=mark.credit, pnl=mark.pnl)
+    return [expiry, *check_exit(rules, position, SimpleNamespace(dte=mark.dte), frozen)]
+
+
+def frozen_exits(target_pnl: float | None, stop_loss_pnl: float | None) -> tuple[float, float] | None:
+    return None if target_pnl is None or stop_loss_pnl is None else (float(target_pnl), float(stop_loss_pnl))
 
 
 def fired_exit(checks: list[Check]) -> Check | None:

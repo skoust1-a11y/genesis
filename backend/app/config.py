@@ -25,6 +25,8 @@ class Settings(BaseSettings):
     max_scenario_combos: int = Field(default=24, alias="MAX_SCENARIO_COMBOS")
     verdict_min_backtest_trades: int = Field(default=3, alias="VERDICT_MIN_BACKTEST_TRADES")
     verdict_min_forward_trades: int = Field(default=2, alias="VERDICT_MIN_FORWARD_TRADES")
+    # Hard stops, as % of capital, the review report backtests; empty turns the sweep off.
+    hard_stop_sweep_pcts: str = Field(default="2,3,4,5", alias="HARD_STOP_SWEEP_PCTS")
     iv_rank_lookback_days: int = Field(default=252, alias="IV_RANK_LOOKBACK_DAYS")
     iv_rank_min_history: int = Field(default=20, alias="IV_RANK_MIN_HISTORY")
 
@@ -172,6 +174,10 @@ class Settings(BaseSettings):
     def freeze_quantity(self, underlying: str) -> int | None:
         value = self._per_underlying(self.freeze_quantities).get(underlying.upper())
         return int(value) if value else None
+
+    @property
+    def hard_stop_sweep(self) -> list[float]:
+        return sorted({float(v) for v in self.hard_stop_sweep_pcts.split(",") if v.strip()})
 
     @property
     def allowed_live_structures(self) -> set[str]:

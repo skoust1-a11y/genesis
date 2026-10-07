@@ -4,6 +4,29 @@ import { useMemo, useState } from "react";
 
 import { API } from "@/lib/api";
 
+type StopWindow = { trades: number; win_rate: number; net_pnl: number };
+
+type HardStopRow = {
+  stop_pct: number;
+  stop_inr: number;
+  target_inr: number;
+  backtest: StopWindow;
+  forward: StopWindow;
+  avg_loss: number | null;
+  worst_loss: number | null;
+  max_drawdown: number;
+  sizing_blocked: number;
+  eligible: boolean;
+};
+
+type HardStopSweep = {
+  capital_inr: number;
+  risk_reward: number | null;
+  rows: HardStopRow[];
+  recommended_pct: number | null;
+  reason: string;
+};
+
 type ReportPayload = {
   strategy_id: string;
   markdown?: string;
@@ -16,8 +39,70 @@ type ReportPayload = {
       forward?: { net_pnl?: number; gross_pnl?: number; total_costs?: number; trades?: number };
     }>;
     cost_summary?: Record<string, unknown>;
+    hard_stop_sweep?: HardStopSweep;
   };
 };
+
+const inr = (v: number | null | undefined) => (v == null ? "—" : `₹${Math.round(v).toLocaleString("en-IN")}`);
+const pct = (v: number) => `${Math.round(v * 100)}%`;
+
+function HardStopTable({ sweep }: { sweep: HardStopSweep }) {
+  return (
+    <div className="space-y-2">
+      <h3 className="font-medium">Hard stop-loss (% of capital)</h3>
+      <p className="text-xs text-zinc-500">
+        On {inr(sweep.capital_inr)} capital, target{" "}
+        {sweep.risk_reward != null ? `${sweep.risk_reward.toFixed(2)} × the stop (the strategy's ratio)` : "—"}. Daily
+        closes: a gap day can lose more than the stop, as the worst-loss column shows.
+      </p>
+      {sweep.rows.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="min-w-full text-sm">
+            <thead>
+              <tr className="border-b text-left">
+                <th className="py-2 pr-4">Stop</th>
+                <th className="py-2 pr-4">₹ stop / ₹ target</th>
+                <th className="py-2 pr-4">Backtest trades</th>
+                <th className="py-2 pr-4">Win rate</th>
+                <th className="py-2 pr-4">Net</th>
+                <th className="py-2 pr-4">Forward trades</th>
+                <th className="py-2 pr-4">Win rate</th>
+                <th className="py-2 pr-4">Net</th>
+                <th className="py-2 pr-4">Worst loss</th>
+                <th className="py-2 pr-4">Largest drawdown</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sweep.rows.map((row) => (
+                <tr
+                  key={row.stop_pct}
+                  className={`border-b ${row.stop_pct === sweep.recommended_pct ? "bg-emerald-50 font-medium" : ""}`}
+                >
+                  <td className="py-2 pr-4">{row.stop_pct}%</td>
+                  <td className="py-2 pr-4">
+                    {inr(row.stop_inr)} / {inr(row.target_inr)}
+                  </td>
+                  <td className="py-2 pr-4">{row.backtest.trades}</td>
+                  <td className="py-2 pr-4">{pct(row.backtest.win_rate)}</td>
+                  <td className="py-2 pr-4">{inr(row.backtest.net_pnl)}</td>
+                  <td className="py-2 pr-4">{row.forward.trades}</td>
+                  <td className="py-2 pr-4">{pct(row.forward.win_rate)}</td>
+                  <td className="py-2 pr-4">{inr(row.forward.net_pnl)}</td>
+                  <td className="py-2 pr-4">{inr(row.worst_loss)}</td>
+                  <td className="py-2 pr-4">{inr(row.max_drawdown)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+      <p className={`text-sm ${sweep.recommended_pct != null ? "text-emerald-900" : "text-zinc-600"}`}>
+        {sweep.recommended_pct != null ? `Recommended: ${sweep.recommended_pct}%. ` : "No stop recommended. "}
+        {sweep.reason}
+      </p>
+    </div>
+  );
+}
 
 export default function Home() {
   const [sourceType, setSourceType] = useState("youtube");
@@ -227,6 +312,7 @@ export default function Home() {
                 </tbody>
               </table>
             </div>
+            {report.report?.hard_stop_sweep && <HardStopTable sweep={report.report.hard_stop_sweep} />}
           </section>
         )}
       </div>

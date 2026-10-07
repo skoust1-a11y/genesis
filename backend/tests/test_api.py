@@ -40,6 +40,7 @@ def test_review_response_shape_is_unchanged(client, demo):
     assert {"report_id", "strategy_id", "strategy_name", "report"} <= set(body)
     assert set(body["report"]) == {
         "strategy", "audit", "scenarios", "scenario_results", "cost_summary", "verdict", "narrative", "data_source",
+        "hard_stop_sweep",
     }  # fmt: skip
 
 

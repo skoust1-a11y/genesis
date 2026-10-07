@@ -69,6 +69,7 @@ from app.trading.decisions import (
     entry_rule_text,
     exit_checks,
     fired_exit,
+    frozen_exits,
     lot_size_for,
     mark_position,
     proposal_lots,
@@ -470,6 +471,9 @@ def _place_protective_stops(ctx: CrewContext, state: TickState, intent: TradeInt
     if not shorts:
         return None
     stop_pct = rules.stop_loss_pct or 100
+    credit = sum(signed(leg["side"]) * float(leg["price"]) * leg["quantity"] for leg in legs)
+    if rules.uses_capital_stop and intent.stop_loss_pnl is not None and credit > 0:
+        stop_pct = round(-float(intent.stop_loss_pnl) / credit * 100, 2)  # the rupee stop fixed at entry
     distance = Decimal(str(settings.protective_stop_multiplier * stop_pct / 100))
     buffer = Decimal(str(settings.protective_stop_limit_buffer_pct / 100))
     stops = []
@@ -719,7 +723,7 @@ def _exits(state: TickState) -> TickState:
             exits.append({"open_intent_id": intent.id, "error": "missing quotes for an open leg; exit not checked"})
             still_open.append(_position_row(intent, legs, None, peak))
             continue
-        checks = exit_checks(rules, mark)
+        checks = exit_checks(rules, mark, _frozen(intent, _open_share(state, store, intent, legs)))
         fired, close_lots = fired_exit(checks), None
         if fired is None and policy is not None:
             booking = _booking_exit(state, policy, intent, legs, mark, peak)
@@ -745,6 +749,17 @@ def _exits(state: TickState) -> TickState:
     _snapshot_positions(ctx, state, still_open)
     phantoms = [p for op, intent in store.open_phantoms(ctx.deployment_id) if (p := _track_phantom(state, op, intent))]
     return {"exits": exits, "phantoms": phantoms, "open_positions": len(store.open_intents(ctx.deployment_id))}
+
+
+def _frozen(intent: TradeIntent, share: float) -> tuple[float, float] | None:
+    """The intent's rupee target and stop from entry, scaled to the share of the position still open."""
+    frozen = frozen_exits(intent.target_pnl, intent.stop_loss_pnl)
+    return (frozen[0] * share, frozen[1] * share) if frozen else None
+
+
+def _open_share(state: TickState, store: LiveStore, intent: TradeIntent, legs: list[dict]) -> float:
+    opened = _lots(state, intent, _filled_legs(store, intent))
+    return _lots(state, intent, legs) / opened if opened else 1.0
 
 
 def _lot_size(state: TickState, intent: TradeIntent) -> int | None:
@@ -819,7 +834,9 @@ def _track_phantom(state: TickState, opinion: TradeOpinion, intent: TradeIntent)
     mark = mark_position(legs, market)
     if mark is None:
         return None
-    fired = fired_exit(exit_checks(state["rules"], mark))
+    removed = opinion.rules_lots - opinion.final_lots
+    sent = opinion.rules_lots if opinion.final_lots == 0 else opinion.final_lots
+    fired = fired_exit(exit_checks(state["rules"], mark, _frozen(intent, removed / sent if sent else 1.0)))
     if fired is None:
         return None
     now, profile = ctx.clock(), state["profile"]
@@ -946,8 +963,9 @@ def _entry(state: TickState) -> TickState:
         return {"stop": True, "outcome": "no_signal", "entry_checks": checks}
 
     max_lots = proposal_lots(rules, deployment.risk_limits.get("max_lots"))
+    in_force = capital_in_force(LiveStore(ctx.live), ctx.settings, deployment)
     try:
-        proposal = build_entry_proposal(rules, market, ctx.settings, max_lots)
+        proposal = build_entry_proposal(rules, market, ctx.settings, max_lots, in_force)
     except MissingMarketConfig as exc:
         halt(ctx, str(exc))
         return {"stop": True, "outcome": "halted", "detail": "missing lot size or strike step"}
