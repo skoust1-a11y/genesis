@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent for the Trade Crew supervisor (macOS).
+  Replace /path/to/genesis/backend and the uv path (`which uv`), then:
+    cp deploy/com.genesis.supervisor.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.genesis.supervisor.plist
+  Keep the Mac awake during market hours (System Settings > Battery, or `caffeinate`).
+  Crew logs: DATA_DIR/logs/crew-<deployment id>.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.genesis.supervisor</string>
+  <key>WorkingDirectory</key>
+  <string>/path/to/genesis/backend</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>python</string>
+    <string>-m</string>
+    <string>app.live</string>
+    <string>supervise</string>
+    <string>--feed</string>
+    <string>broker</string>
+    <string>--interval</string>
+    <string>60</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardOutPath</key>
+  <string>/path/to/genesis/backend/data/logs/supervisor.log</string>
+  <key>StandardErrorPath</key>
+  <string>/path/to/genesis/backend/data/logs/supervisor.log</string>
+</dict>
+</plist>

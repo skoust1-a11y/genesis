@@ -7,6 +7,7 @@ LLM involvement, so the same inputs always produce the same decision.
 from __future__ import annotations
 
 import operator
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -61,6 +62,16 @@ class RiskRules(_Strict):
     max_daily_loss_pct: float = Field(gt=0)
     max_open_positions: int = Field(default=1, ge=1)
     min_risk_reward: float | None = Field(default=None, gt=0)
+    max_entries_per_day: int | None = Field(default=None, ge=1)
+    max_consecutive_losses: int | None = Field(default=None, ge=1)
+    cooldown_days: int | None = Field(default=None, ge=1, le=30)  # trading days without entries after the streak
+    max_loss_pct_of_capital: float | None = Field(default=None, gt=0, le=100)  # 100 = never risk more than the account
+
+    @model_validator(mode="after")
+    def _streak_and_cooldown(self) -> RiskRules:
+        if (self.max_consecutive_losses is None) != (self.cooldown_days is None):
+            raise ValueError("max_consecutive_losses and cooldown_days go together")
+        return self
 
 
 class EntryBlackout(_Strict):
@@ -189,6 +200,8 @@ class AccountState:
     pnl_today: float
     portfolio_open_positions: int
     portfolio_pnl_today: float
+    entries_today: int = 0
+    cooldown_days_left: int = 0  # from `losing_streak_cooldown`
 
 
 @dataclass
@@ -198,9 +211,48 @@ class Proposal:
     max_loss: float
 
 
+def losing_streak_cooldown(
+    risk: RiskRules, closed: Iterable[tuple[str, float]], trading_days_since: Callable[[str], int]
+) -> int:
+    """Trading days of cooldown left, today included; 0 when entries are allowed.
+
+    `closed` is (exit date, net P&L) per closed trade, in closing order. `max_consecutive_losses`
+    losses in a row start a cooldown on the day of the last one: no entries that day or for the next
+    `cooldown_days` trading days. `trading_days_since(day)` counts trading days after `day` up to today.
+    A streak that started a cooldown is used up, so counting starts again after it.
+    """
+    if risk.max_consecutive_losses is None or risk.cooldown_days is None:
+        return 0
+    streak, start = 0, None
+    for day, net in closed:
+        streak = streak + 1 if net < 0 else 0
+        if streak >= risk.max_consecutive_losses:
+            start, streak = day, 0
+    if start is None:
+        return 0
+    return max(0, risk.cooldown_days + 1 - trading_days_since(start))
+
+
 def _strictest(*values: float | None) -> float | None:
     present = [v for v in values if v is not None]
     return min(present) if present else None
+
+
+def with_common_risk(rules: StrategyRules, common: dict[str, float]) -> StrategyRules:
+    """`rules` with the account-wide risk rules (`Settings.common_risk`) applied. For each key the stricter
+    of the two wins: fewer entries, a shorter losing streak, a longer cooldown, a smaller loss cap."""
+    if not common:
+        return rules
+    r = rules.risk
+    update: dict[str, Any] = {}
+    if "max_entries_per_day" in common:
+        update["max_entries_per_day"] = int(_strictest(r.max_entries_per_day, common["max_entries_per_day"]))
+    if "max_loss_pct_of_capital" in common:
+        update["max_loss_pct_of_capital"] = _strictest(r.max_loss_pct_of_capital, common["max_loss_pct_of_capital"])
+    if "max_consecutive_losses" in common:
+        update["max_consecutive_losses"] = int(_strictest(r.max_consecutive_losses, common["max_consecutive_losses"]))
+        update["cooldown_days"] = int(max(r.cooldown_days or 0, common["cooldown_days"]))
+    return rules.model_copy(update={"risk": r.model_copy(update=update)})
 
 
 def check_risk(rules: StrategyRules, limits: RiskLimits, account: AccountState, proposal: Proposal) -> list[Check]:
@@ -217,6 +269,17 @@ def check_risk(rules: StrategyRules, limits: RiskLimits, account: AccountState, 
     ]
     if r.min_risk_reward is not None:
         checks.append(_compare("risk.min_risk_reward", "risk_reward", ">=", r.min_risk_reward, proposal.risk_reward))
+    if r.max_entries_per_day is not None:
+        checks.append(
+            _compare("risk.max_entries_per_day", "entries_today", "<", r.max_entries_per_day, account.entries_today)
+        )
+    if r.max_consecutive_losses is not None:
+        checks.append(
+            _compare("risk.losing_streak_cooldown", "cooldown_days_left", "==", 0, account.cooldown_days_left)
+        )
+    if r.max_loss_pct_of_capital is not None:
+        cap = limits.capital_inr * r.max_loss_pct_of_capital / 100 if limits.capital_inr else None
+        checks.append(_compare("risk.max_loss_pct_of_capital", "max_loss_inr", "<=", cap, round(proposal.max_loss, 2)))
     if limits.portfolio_max_open_positions is not None:
         checks.append(
             _compare(

@@ -176,9 +176,10 @@ def add_llm_rationale(proposals: list[dict], strategy_markdown: str, settings) -
         return
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
-        from langchain_openai import ChatOpenAI
 
-        llm = ChatOpenAI(model=settings.openai_model, api_key=settings.openai_api_key, temperature=0)
+        from app.llm import chat_model
+
+        llm = chat_model(settings)
         items = [{"title": p["title"], "rationale": p["rationale"]} for p in proposals]
         resp = llm.invoke(
             [
@@ -200,5 +201,5 @@ def add_llm_rationale(proposals: list[dict], strategy_markdown: str, settings) -
         return
     for proposal, note in zip(proposals, notes):
         if isinstance(note, str) and note.strip():
-            proposal["rationale"] += f"\n\nLLM note ({settings.openai_model}): {note.strip()}"
-            proposal["evidence"]["llm_model"] = settings.openai_model
+            proposal["rationale"] += f"\n\nLLM note ({settings.llm_model}): {note.strip()}"
+            proposal["evidence"]["llm_model"] = settings.llm_model

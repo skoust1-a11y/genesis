@@ -9,7 +9,8 @@ policy can only make a deployment more careful than its strategy rules:
   own exits (expiry, stop loss, profit target, DTE) are checked first and always apply;
 - time exits close a position some days before expiry (optionally from a time of day, IST) or
   before a scheduled event;
-- the daily profit target stops new entries, or closes everything, once the day's P&L reaches it.
+- the daily profit target stops new entries, or closes everything, once the day's P&L reaches it;
+- VIX sizing trades fewer lots when India VIX is high.
 
 Pure functions shared by the Trade Crew and the simulator.
 """
@@ -122,12 +123,33 @@ class Compounding(_Strict):
     ceiling_inr: float | None = Field(default=None, gt=0)
 
 
+class VixBand(_Strict):
+    at_or_above: float = Field(gt=0)
+    size_factor: float = Field(gt=0, lt=1)
+
+
+class VixSizing(_Strict):
+    """Fewer lots when India VIX is high: the highest band at or below today's VIX scales lots by its factor."""
+
+    bands: list[VixBand] = Field(min_length=1, max_length=5)
+
+    @model_validator(mode="after")
+    def _ordered(self) -> VixSizing:
+        for lower, upper in zip(self.bands, self.bands[1:]):
+            if upper.at_or_above <= lower.at_or_above:
+                raise ValueError("bands at_or_above values must increase")
+            if upper.size_factor >= lower.size_factor:
+                raise ValueError("bands size_factor values must decrease as VIX rises")
+        return self
+
+
 class TradePolicy(_Strict):
     sizing: Sizing | None = None
     booking: Booking | None = None
     time_exit: TimeExit | None = None
     daily_target: DailyTarget | None = None
     compounding: Compounding | None = None
+    vix_sizing: VixSizing | None = None
 
     @model_validator(mode="after")
     def _compounding_needs_risk_sizing(self) -> TradePolicy:
@@ -204,6 +226,15 @@ def size_lots(
     lots = min(max_lots, affordable)
     ok = lots >= sizing.min_lots
     return (lots if ok else 0), Check(SIZING_CHECK, "affordable_lots", ">=", sizing.min_lots, affordable, ok)
+
+
+def vix_size_factor(vix_sizing: VixSizing | None, vix: float | None) -> float:
+    """Lot multiplier for today's VIX. With no VIX reading, the most careful band applies."""
+    if vix_sizing is None:
+        return 1.0
+    if vix is None:
+        return vix_sizing.bands[-1].size_factor
+    return min((b.size_factor for b in vix_sizing.bands if vix >= b.at_or_above), default=1.0)
 
 
 # Exits

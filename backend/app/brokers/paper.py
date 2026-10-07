@@ -17,6 +17,7 @@ from app.engine.costs import CostProfile, cost_breakdown
 class PaperBroker:
     name = "paper"
     mode = "paper"
+    reconciles = False
 
     def __init__(self, profile: CostProfile, clock: Callable[[], datetime] = utcnow) -> None:
         self.profile = profile
@@ -59,6 +60,15 @@ class PaperBroker:
 
     def cancel_order(self, broker_order_id: str) -> OrderAck:
         return OrderAck("", broker_order_id, False, "paper orders fill immediately")
+
+    def get_order(self, broker_order_id: str) -> OrderUpdate | None:
+        return next((u for u in reversed(self._updates) if u.broker_order_id == broker_order_id), None)
+
+    def margin_required(self, orders: list[OrderRequest]) -> Decimal | None:
+        return None
+
+    def available_margin(self) -> Decimal | None:
+        return None
 
     def order_updates(self, since: datetime | None = None) -> list[OrderUpdate]:
         return [u for u in self._updates if since is None or u.event_at > since]

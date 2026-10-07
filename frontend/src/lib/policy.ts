@@ -14,6 +14,8 @@ export type LevelForm = {
 
 export type PartialForm = { at_pct_of_credit: string; close_pct: string };
 
+export type VixBandForm = { at_or_above: string; size_factor: string };
+
 export type PolicyForm = {
   capital_inr: string;
   max_lots: string;
@@ -27,6 +29,9 @@ export type PolicyForm = {
   compounding: boolean;
   profit_share_pct: string;
   ceiling_inr: string;
+
+  vix_sizing: boolean;
+  vix_bands: VixBandForm[];
 
   partials: PartialForm[];
   lock_in: boolean;
@@ -53,17 +58,22 @@ export type PolicyForm = {
 };
 
 export const DEFAULT_FORM: PolicyForm = {
-  capital_inr: "500000",
+  capital_inr: "50000",
   max_lots: "",
   max_daily_loss_pct: "",
-  sizing_mode: "fixed",
+  sizing_mode: "risk_inr",
   fixed_lots: "",
-  risk_pct: "1",
-  risk_inr: "5000",
+  risk_pct: "3",
+  risk_inr: "1500",
   min_lots: "1",
   compounding: false,
   profit_share_pct: "50",
   ceiling_inr: "",
+  vix_sizing: false,
+  vix_bands: [
+    { at_or_above: "18", size_factor: "0.5" },
+    { at_or_above: "25", size_factor: "0.25" },
+  ],
   partials: [],
   lock_in: false,
   lock_after_pct: "30",
@@ -77,7 +87,7 @@ export const DEFAULT_FORM: PolicyForm = {
   before_events: [],
   event_days_before: "1",
   daily_target: false,
-  daily_profit_inr: "5000",
+  daily_profit_inr: "1500",
   daily_on_hit: "stop_new_entries",
   drawdown: true,
   drawdown_basis: "mtm",
@@ -133,6 +143,11 @@ export function toRiskLimits(f: PolicyForm): Record<string, unknown> {
     });
   }
   if (f.daily_target) policy.daily_target = { profit_inr: num(f.daily_profit_inr), on_hit: f.daily_on_hit };
+  if (f.vix_sizing && f.vix_bands.length) {
+    policy.vix_sizing = {
+      bands: f.vix_bands.map((b) => ({ at_or_above: num(b.at_or_above), size_factor: num(b.size_factor) })),
+    };
+  }
 
   const limits: Record<string, unknown> = compact({
     capital_inr: num(f.capital_inr),

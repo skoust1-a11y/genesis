@@ -1,16 +1,18 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    llm_provider: str = Field(default="openai", alias="LLM_PROVIDER")
+    llm_provider: Literal["openai", "anthropic"] = Field(default="openai", alias="LLM_PROVIDER")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
+    anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
+    anthropic_model: str = Field(default="claude-sonnet-5-5", alias="ANTHROPIC_MODEL")
 
     data_dir: str = Field(default="data", alias="DATA_DIR")
     database_url: str = Field(default="sqlite:///data/genesis.db", alias="DATABASE_URL")
@@ -70,17 +72,87 @@ class Settings(BaseSettings):
     portfolio_max_daily_loss_inr: float = Field(default=10_000, alias="PORTFOLIO_MAX_DAILY_LOSS_INR")
     # Drawdown from peak equity at which every deployment pauses, whatever its own ladder says. 0 disables it.
     max_drawdown_pct: float = Field(default=20, ge=0, le=100, alias="MAX_DRAWDOWN_PCT")
+    # Common risk rules for every strategy, in backtests and live; a strategy's own value wins only when stricter.
+    # 0 disables each one. The losing streak and its cooldown go together.
+    max_entries_per_day: int = Field(default=0, ge=0, alias="MAX_ENTRIES_PER_DAY")
+    max_consecutive_losses: int = Field(default=0, ge=0, alias="MAX_CONSECUTIVE_LOSSES")
+    loss_cooldown_days: int = Field(default=0, ge=0, le=30, alias="LOSS_COOLDOWN_DAYS")
+    max_loss_pct_of_capital: float = Field(default=0, ge=0, le=100, alias="MAX_LOSS_PCT_OF_CAPITAL")
     lot_sizes: str = Field(default="NIFTY:75,BANKNIFTY:35", alias="LOT_SIZES")
     strike_steps: str = Field(default="NIFTY:50,BANKNIFTY:100", alias="STRIKE_STEPS")
     max_snapshot_age_seconds: int = Field(default=120, alias="MAX_SNAPSHOT_AGE_SECONDS")
     trade_crew_explain: bool = Field(default=False, alias="TRADE_CREW_EXPLAIN")
 
+    # Brokers and live orders
+    live_trading_enabled: bool = Field(default=False, alias="LIVE_TRADING_ENABLED")
+    sandbox_allow_live: bool = Field(default=False, alias="SANDBOX_ALLOW_LIVE")
+    sandbox_state_dir: str | None = Field(default=None, alias="SANDBOX_STATE_DIR")  # default: DATA_DIR/sandbox
+    live_min_paper_days: int = Field(default=0, ge=0, alias="LIVE_MIN_PAPER_DAYS")
+    live_allowed_structures: str = Field(default="iron_condor", alias="LIVE_ALLOWED_STRUCTURES")
+    broker_credentials_key: str | None = Field(default=None, alias="BROKER_CREDENTIALS_KEY")
+    max_spread_pct: float = Field(default=5, gt=0, alias="MAX_SPREAD_PCT")
+    order_fill_timeout_s: float = Field(default=30, gt=0, alias="ORDER_FILL_TIMEOUT_S")
+    order_poll_interval_s: float = Field(default=1, gt=0, alias="ORDER_POLL_INTERVAL_S")
+    order_reprice_steps: int = Field(default=2, ge=0, alias="ORDER_REPRICE_STEPS")
+    order_exit_retries: int = Field(default=2, ge=0, alias="ORDER_EXIT_RETRIES")
+    max_slippage_bps: float = Field(default=100, ge=0, alias="MAX_SLIPPAGE_BPS")
+    # 0 disables the per-order value cap.
+    max_order_value_inr: float = Field(default=0, ge=0, alias="MAX_ORDER_VALUE_INR")
+    max_orders_per_minute: int = Field(default=120, ge=1, alias="MAX_ORDERS_PER_MINUTE")
+    freeze_quantities: str = Field(default="NIFTY:1800,BANKNIFTY:900", alias="FREEZE_QUANTITIES")
+    market_open: str = Field(default="09:15", alias="MARKET_OPEN")
+    market_close: str = Field(default="15:30", alias="MARKET_CLOSE")
+    # off | live | always: broker-side stop-limit backstops on short legs after an entry.
+    protective_stops: Literal["off", "live", "always"] = Field(default="live", alias="PROTECTIVE_STOPS")
+    protective_stop_multiplier: float = Field(default=1.5, gt=0, alias="PROTECTIVE_STOP_MULTIPLIER")
+    protective_stop_limit_buffer_pct: float = Field(default=5, ge=0, alias="PROTECTIVE_STOP_LIMIT_BUFFER_PCT")
+    margin_buffer: float = Field(default=1.2, ge=1, alias="MARGIN_BUFFER")
+    heartbeat_max_age_s: int = Field(default=180, gt=0, alias="HEARTBEAT_MAX_AGE_S")
+
+    # Alerts (each channel is used only when configured)
+    alert_telegram_bot_token: str | None = Field(default=None, alias="ALERT_TELEGRAM_BOT_TOKEN")
+    alert_telegram_chat_id: str | None = Field(default=None, alias="ALERT_TELEGRAM_CHAT_ID")
+    alert_smtp_host: str | None = Field(default=None, alias="ALERT_SMTP_HOST")
+    alert_smtp_port: int = Field(default=587, alias="ALERT_SMTP_PORT")
+    alert_smtp_user: str | None = Field(default=None, alias="ALERT_SMTP_USER")
+    alert_smtp_password: str | None = Field(default=None, alias="ALERT_SMTP_PASSWORD")
+    alert_smtp_from: str | None = Field(default=None, alias="ALERT_SMTP_FROM")
+    alert_smtp_to: str | None = Field(default=None, alias="ALERT_SMTP_TO")
+
+    # API auth: comma-separated `name:sha256(token)` pairs. Empty leaves research and paper flows open.
+    api_tokens: str = Field(default="", alias="API_TOKENS")
+
     backend_port: int = Field(default=8841, alias="BACKEND_PORT")
     cors_origins: str = Field(default="http://127.0.0.1:8842", alias="CORS_ORIGINS")
 
+    @model_validator(mode="after")
+    def _streak_and_cooldown(self) -> "Settings":
+        if bool(self.max_consecutive_losses) != bool(self.loss_cooldown_days):
+            raise ValueError("MAX_CONSECUTIVE_LOSSES and LOSS_COOLDOWN_DAYS go together: set both, or both to 0")
+        return self
+
+    @property
+    def common_risk(self) -> dict[str, float]:
+        """The common risk rules that are switched on, as `risk:` keys."""
+        values = {
+            "max_entries_per_day": self.max_entries_per_day,
+            "max_consecutive_losses": self.max_consecutive_losses,
+            "cooldown_days": self.loss_cooldown_days,
+            "max_loss_pct_of_capital": self.max_loss_pct_of_capital,
+        }
+        return {k: v for k, v in values.items() if v}
+
+    @property
+    def llm_api_key(self) -> str | None:
+        return self.anthropic_api_key if self.llm_provider == "anthropic" else self.openai_api_key
+
+    @property
+    def llm_model(self) -> str:
+        return self.anthropic_model if self.llm_provider == "anthropic" else self.openai_model
+
     @property
     def llm_enabled(self) -> bool:
-        return bool(self.openai_api_key)
+        return bool(self.llm_api_key)
 
     @staticmethod
     def _per_underlying(raw: str) -> dict[str, float]:
@@ -94,9 +166,23 @@ class Settings(BaseSettings):
     def strike_step(self, underlying: str) -> float | None:
         return self._per_underlying(self.strike_steps).get(underlying.upper())
 
+    def freeze_quantity(self, underlying: str) -> int | None:
+        value = self._per_underlying(self.freeze_quantities).get(underlying.upper())
+        return int(value) if value else None
+
+    @property
+    def allowed_live_structures(self) -> set[str]:
+        return {s.strip() for s in self.live_allowed_structures.split(",") if s.strip()}
+
+    @property
+    def token_hashes(self) -> dict[str, str]:
+        """sha256 hex -> actor name, from API_TOKENS."""
+        pairs = (item.split(":", 1) for item in self.api_tokens.split(",") if ":" in item)
+        return {h.strip().lower(): name.strip() for name, h in pairs if name.strip() and h.strip()}
+
     @property
     def opinion_model(self) -> str:
-        return self.llm_opinion_model or self.openai_model
+        return self.llm_opinion_model or self.llm_model
 
     @staticmethod
     def schedule(raw: str) -> list[tuple[str, float]]:

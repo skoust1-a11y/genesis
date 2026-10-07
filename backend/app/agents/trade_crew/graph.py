@@ -1,10 +1,13 @@
 """The Trade Crew: one per deployment, deciding only through the strategy's rule checks.
 
-Each tick: verify the frozen snapshot, gate on `started`, observe the market, check open
-positions against the exit rules and then the trade policy's booking and time exits (see
-`app.trading.policy`) and snapshot the ones still open, apply the drawdown ladder (see
-`app.live.drawdown`) and the daily profit target, then evaluate entry, sizing and risk. An
-optional LLM writes the reason text after a decision is made; it is never an input to one.
+Each tick: verify the frozen snapshot, gate on `started`, idle outside market hours (broker
+feed only), observe the market, reconcile the broker's positions with the live database (and
+handle a protective stop the broker filled), check open positions against the exit rules and
+then the trade policy's booking and time exits (see `app.trading.policy`) and snapshot the ones
+still open, apply the drawdown ladder (see `app.live.drawdown`) and the daily profit target,
+then evaluate entry, sizing, risk and margin. Orders go through `app.trading.orders` (hedge
+first, wait for fills, re-price, unwind a failed entry). An optional LLM writes the reason text
+after a decision is made; it is never an input to one.
 
 With LLM_TRADE_OPINION set, an LLM also gives an opinion (take, reduce or skip) on entries the
 rules approved. In shadow mode it is only recorded. In veto mode (enabled per deployment, see
@@ -15,8 +18,10 @@ rule fires. Exits are never sent to the LLM.
 
 from __future__ import annotations
 
+import os
+import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, TypedDict
@@ -25,29 +30,35 @@ from langgraph.graph import END, START, StateGraph
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import alerts
 from app.agents.trade_crew.legs import signed
 from app.agents.trade_crew.lessons import trade_facts, write_lesson
 from app.agents.trade_crew.opinion import OpinionResult, get_opinion
 from app.audit import audit_context, current_actor
-from app.brokers.base import BrokerAdapter, OrderRequest
+from app.brokers.base import TERMINAL_ORDER_STATUSES, BrokerAdapter, OrderRequest
+from app.brokers.sandbox import to_tick
 from app.config import Settings
 from app.db.hashing import money, sha256_hex
 from app.db.models import BrokerCharge, DeployedStrategy, Deployment, Order, TradeIntent, TradeOpinion
 from app.db.types import utcnow
-from app.engine.costs import CostProfile, cost_breakdown, leg_costs, resolve_cost_profile
+from app.engine.costs import CostProfile, leg_costs, resolve_cost_profile
 from app.engine.sim import outcome_label
 from app.live import drawdown, veto
 from app.live.equity import EquityState, capital_in_force, day_pnl, equity_state
 from app.live.store import TERMINAL_STATUSES, LiveStore
 from app.market.context import ContextProvider
-from app.market.feed import MarketFeed, MarketSnapshot, snapshot_age_seconds
+from app.market.feed import IST, MarketFeed, MarketSnapshot, snapshot_age_seconds
+from app.market.hours import market_status, trading_days_between
+from app.trading.orders import EXCHANGE, PRODUCT, OrderManager, RateLimiter, split_quantity
 from app.strategies.rules import (
     AccountState,
     Check,
     RiskLimits,
     StrategyRules,
     check_entry,
+    losing_streak_cooldown,
     rules_sha256,
+    with_common_risk,
 )
 from app.strategies.schema import parse_strategy_markdown
 from app.trading import policy as trade_policy
@@ -65,8 +76,7 @@ from app.trading.decisions import (
     resize_proposal,
 )
 
-EXCHANGE = "NFO"
-PRODUCT = "NRML"
+__all__ = ["EXCHANGE", "PRODUCT", "CrewContext", "halt", "run_tick"]
 
 
 @dataclass
@@ -78,6 +88,14 @@ class CrewContext:
     settings: Settings
     clock: Callable[[], datetime] = utcnow
     explain: bool = False
+    feed_kind: str = "replay"  # replay | broker
+    enforce_market_hours: bool = False
+    sleep: Callable[[float], None] = time.sleep
+    limiter: RateLimiter | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.limiter is None:
+            self.limiter = RateLimiter(self.settings.max_orders_per_minute, self.sleep)
 
 
 class TickState(TypedDict, total=False):
@@ -100,6 +118,7 @@ class TickState(TypedDict, total=False):
     max_lots: int
     sizing_check: Check | None
     unscaled_lots: int
+    vix_factor: float
     proposal: dict
     risk_checks: list[Check]
     approval: str
@@ -125,10 +144,68 @@ def verify_snapshot(snapshot: DeployedStrategy) -> list[str]:
 
 
 def halt(ctx: CrewContext, reason: str) -> None:
+    """Halt the deployment and cancel its working orders. Protective stops stay at the broker: with the
+    crew halted they are what still guards open positions."""
     store = LiveStore(ctx.live)
     if store.deployment_status(ctx.deployment_id) not in TERMINAL_STATUSES:
         store.add_deployment_event(ctx.deployment_id, "halted", reason)
     ctx.live.commit()
+    try:
+        cancel_working_orders(ctx, include_stops=False)
+    except Exception as exc:  # the halt is recorded; a failed cancel must not hide it
+        reason = f"{reason} (cancelling working orders failed: {type(exc).__name__}: {exc})"
+    alerts.notify(ctx.settings, "halted", ctx.deployment_id, reason)
+
+
+def order_manager(ctx: CrewContext, deployment: Deployment, profile: CostProfile, lot_size: int | None = None):
+    underlying = None
+    try:
+        snapshot = LiveStore(ctx.live).deployed_strategy(deployment.deployed_strategy_id)
+        underlying = StrategyRules.model_validate(snapshot.rules).instrument.underlying
+    except Exception:
+        pass
+
+    def freeze(leg: dict) -> int | None:
+        instrument = getattr(ctx.feed, "instrument", None)
+        if instrument and underlying:
+            found = instrument(underlying, leg["strike"], leg["option_type"], leg["expiry"])
+            if found and found.freeze_quantity:
+                return found.freeze_quantity
+        return ctx.settings.freeze_quantity(underlying) if underlying else None
+
+    return OrderManager(
+        ctx.live, ctx.adapter, ctx.settings, profile,
+        broker_account_id=deployment.broker_account_id, sebi_algo_id=deployment.sebi_algo_id,
+        clock=ctx.clock, sleep=ctx.sleep, limiter=ctx.limiter, freeze_quantity=freeze, lot_size=lot_size,
+    )  # fmt: skip
+
+
+def _manager(ctx: CrewContext, state: TickState) -> OrderManager:
+    lot = state.get("proposal", {}).get("lot_size") if state.get("proposal") else None
+    if lot is None and state.get("market") is not None:
+        lot = lot_size_for(state["rules"], state["market"], ctx.settings)
+    return order_manager(ctx, state["deployment"], state["profile"], lot)
+
+
+def _is_stop_intent(intent: TradeIntent) -> bool:
+    return intent.action == "protect"
+
+
+def cancel_working_orders(ctx: CrewContext, include_stops: bool) -> list[str]:
+    """Cancel every non-terminal order of the deployment (protective stops only with `include_stops`)."""
+    store = LiveStore(ctx.live)
+    deployment = store.deployment(ctx.deployment_id)
+    snapshot = store.deployed_strategy(deployment.deployed_strategy_id)
+    profile = resolve_cost_profile(ctx.settings, parse_strategy_markdown(snapshot.markdown))
+    manager = order_manager(ctx, deployment, profile)
+    cancelled = []
+    for order in store.working_orders(ctx.deployment_id):
+        intent = ctx.live.get(TradeIntent, order.trade_intent_id)
+        if intent is not None and _is_stop_intent(intent) and not include_stops:
+            continue
+        manager.cancel(order)
+        cancelled.append(order.id)
+    return cancelled
 
 
 def _still_started(ctx: CrewContext) -> bool:
@@ -145,9 +222,10 @@ _describe = describe_check
 def _llm_explain(settings: Settings, facts: dict[str, Any]) -> str | None:
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
-        from langchain_openai import ChatOpenAI
 
-        llm = ChatOpenAI(model=settings.openai_model, api_key=settings.openai_api_key, temperature=0)
+        from app.llm import chat_model
+
+        llm = chat_model(settings)
         resp = llm.invoke(
             [
                 SystemMessage(
@@ -167,89 +245,42 @@ def _reason(ctx: CrewContext, default: str, facts: dict[str, Any]) -> tuple[str,
         return default, None
     ctx.live.rollback()  # release the SQLite write lock while the LLM runs
     text = _llm_explain(ctx.settings, facts)
-    return (f"{default}\n\n{text}", ctx.settings.openai_model) if text else (default, None)
+    return (f"{default}\n\n{text}", ctx.settings.llm_model) if text else (default, None)
 
 
 # Orders
 
 
 def _send_orders(
-    ctx: CrewContext, state: TickState, intent: TradeIntent, legs: list[dict]
+    ctx: CrewContext, state: TickState, intent: TradeIntent, legs: list[dict], retries: int = 0
 ) -> tuple[list[Order], str | None]:
-    """Send one LIMIT order per leg at its quote. Stops at the first rejection."""
-    store, deployment, profile = LiveStore(ctx.live), state["deployment"], state["profile"]
-    orders = []
-    for i, leg in enumerate(legs):
-        now = ctx.clock()
-        request = OrderRequest(
-            client_order_id=f"tc-{intent.id}-{i:02d}",
-            exchange=EXCHANGE,
-            tradingsymbol=leg["tradingsymbol"],
-            side=leg["side"],
-            quantity=leg["quantity"],
-            order_type="LIMIT",
-            product=PRODUCT,
-            limit_price=money(leg["quote"]),
-            sebi_algo_id=deployment.sebi_algo_id,
-        )
-        ack = ctx.adapter.place_order(request)
-        order = store.place_order(
-            trade_intent_id=intent.id,
-            client_order_id=request.client_order_id,
-            broker_order_id=ack.broker_order_id or None,
-            sebi_algo_id=request.sebi_algo_id,
-            exchange=EXCHANGE,
-            tradingsymbol=request.tradingsymbol,
-            expiry=leg["expiry"],
-            strike=money(leg["strike"]),
-            option_type=leg["option_type"],
-            side=request.side,
-            quantity=request.quantity,
-            order_type=request.order_type,
-            product=PRODUCT,
-            limit_price=request.limit_price,
-            placed_at=now,
-        )
-        if not ack.accepted:
-            store.add_order_event(order_id=order.id, status="REJECTED", message=ack.message, raw=ack.raw, event_at=now)
-            ctx.live.commit()
-            return orders, f"order for {request.tradingsymbol} rejected: {ack.message}"
-        for u in ctx.adapter.order_updates():
-            if u.broker_order_id == ack.broker_order_id:
-                store.add_order_event(
-                    order_id=order.id, status=u.status, filled_qty=u.filled_qty, pending_qty=u.pending_qty,
-                    avg_price=u.avg_price, message=u.message, raw=u.raw, event_at=u.event_at,
-                )  # fmt: skip
-        for f in ctx.adapter.fills():
-            if f.broker_order_id == ack.broker_order_id:
-                est = asdict(
-                    cost_breakdown(
-                        float(leg["quote"]) * f.quantity, orders=1, profile=profile,
-                        side=request.side, trade_date=now.date().isoformat(),
-                    )
-                )  # fmt: skip
-                store.record_fill(
-                    order_id=order.id, broker_trade_id=f.broker_trade_id, quantity=f.quantity, price=f.price,
-                    est_cost_breakdown={k: money(v) for k, v in est.items()}, filled_at=f.filled_at,
-                )  # fmt: skip
-        for c in ctx.adapter.charges(now.date()):
-            if c.broker_order_id == ack.broker_order_id:
-                store.record_broker_charge(
-                    broker_account_id=deployment.broker_account_id, trade_date=c.trade_date.isoformat(),
-                    order_id=order.id, source=c.source, breakdown=c.breakdown, total=c.total, raw=c.raw,
-                )  # fmt: skip
-        ctx.live.commit()
-        orders.append(order)
-    return orders, None
+    """Send every leg (hedges first) and wait for the fills. Stops at the first leg that cannot be filled."""
+    return _manager(ctx, state).execute(intent, legs, retries=retries)
+
+
+def _leg_key(leg: dict) -> tuple:
+    return (leg["side"], float(leg["strike"]), leg["option_type"], leg["expiry"])
 
 
 def _filled_legs(store: LiveStore, intent: TradeIntent) -> list[dict]:
-    legs = []
+    """One row per leg with its total filled quantity and average price, across split and re-priced orders,
+    in the order of the intent's legs."""
+    grouped: dict[tuple, dict] = {}
     for order in store.orders_for_intent(intent.id):
         fills = store.fills_for_order(order.id)
         qty = sum(f.quantity for f in fills)
-        if not qty:
+        if not qty or order.strike is None:
             continue
+        key = (order.side, float(order.strike), order.option_type, order.expiry)
+        row = grouped.setdefault(key, {"quantity": 0, "cost": Decimal(0), "order": order})
+        row["quantity"] += qty
+        row["cost"] += sum(f.price * f.quantity for f in fills)
+    quotes = {_leg_key(leg): leg.get("quote") for leg in intent.legs or [] if leg.get("strike") is not None}
+    rank = {key: i for i, key in enumerate(quotes)}
+    legs = []
+    for key in sorted(grouped, key=lambda k: rank.get(k, len(rank))):
+        row, order = grouped[key], grouped[key]["order"]
+        quote = quotes.get(key)
         legs.append(
             {
                 "side": order.side,
@@ -257,9 +288,9 @@ def _filled_legs(store: LiveStore, intent: TradeIntent) -> list[dict]:
                 "strike": float(order.strike),
                 "expiry": order.expiry,
                 "tradingsymbol": order.tradingsymbol,
-                "quantity": qty,
-                "price": float(sum(f.price * f.quantity for f in fills) / qty),
-                "quote": float(order.limit_price),
+                "quantity": row["quantity"],
+                "price": float(row["cost"] / row["quantity"]),
+                "quote": float(quote) if quote is not None else float(order.limit_price),
             }
         )
     return legs
@@ -341,11 +372,195 @@ def _observe(state: TickState) -> TickState:
     return {"market": market}
 
 
-def _close_position(
-    ctx: CrewContext, state: TickState, intent: TradeIntent, legs: list[dict], fired: Check, checks, partial=False
-):
-    """Close `legs` (all or, with `partial`, some of the position's open quantity). The trade carries
-    the closed share of the opening costs and target."""
+def _hours(state: TickState) -> TickState:
+    """Outside the NSE session the crew does nothing (broker feed only; replayed bars carry their own dates)."""
+    ctx = state["ctx"]
+    if not ctx.enforce_market_hours:
+        return {}
+    is_open, detail = market_status(ctx.clock(), ctx.settings)
+    return {} if is_open else {"stop": True, "outcome": "market_closed", "detail": detail}
+
+
+# Reconciliation and protective stops
+
+
+def expected_positions(store: LiveStore, broker_account_id: str) -> dict[str, int]:
+    """Net quantity per tradingsymbol the live database says the account holds: open legs of every
+    deployment on the account, plus fills of protective stops whose position is still open."""
+    net: dict[str, int] = {}
+    for d in store.deployments_for_account(broker_account_id):
+        for intent in store.open_intents(d.id):
+            for leg in _open_legs(store, intent):
+                net[leg["tradingsymbol"]] = net.get(leg["tradingsymbol"], 0) + leg["quantity"] * -signed(leg["side"])
+            for protect in store.protect_intents(intent.id):
+                for leg in _filled_legs(store, protect):
+                    qty = leg["quantity"] * -signed(leg["side"])
+                    net[leg["tradingsymbol"]] = net.get(leg["tradingsymbol"], 0) + qty
+    return {k: v for k, v in net.items() if v}
+
+
+def position_diff(store: LiveStore, adapter: BrokerAdapter, broker_account_id: str) -> dict[str, tuple[int, int]]:
+    """tradingsymbol -> (expected, at broker) for every symbol where they differ."""
+    expected = expected_positions(store, broker_account_id)
+    actual = {p["tradingsymbol"]: int(p["quantity"]) for p in adapter.positions() if int(p["quantity"])}
+    return {s: (expected.get(s, 0), actual.get(s, 0)) for s in expected.keys() | actual.keys()
+            if expected.get(s, 0) != actual.get(s, 0)}  # fmt: skip
+
+
+def _describe_diff(diff: dict[str, tuple[int, int]]) -> str:
+    return ", ".join(f"{s}: expected {e}, broker {a}" for s, (e, a) in sorted(diff.items()))
+
+
+def sync_protective_stops(ctx: CrewContext, deployment: Deployment, profile: CostProfile) -> list[TradeIntent]:
+    """Record the latest status and fills of every protective stop; returns open intents whose stop fired."""
+    store = LiveStore(ctx.live)
+    manager = order_manager(ctx, deployment, profile)
+    fired = []
+    for intent in store.open_intents(deployment.id):
+        hit = False
+        for protect in store.protect_intents(intent.id):
+            for order in store.orders_for_intent(protect.id):
+                if store.order_status(order.id) not in TERMINAL_ORDER_STATUSES:
+                    manager.sync(order)
+                hit = hit or bool(store.fills_for_order(order.id))
+        if hit:
+            fired.append(intent)
+    ctx.live.commit()
+    return fired
+
+
+def reconcile_positions(ctx: CrewContext, deployment: Deployment, profile: CostProfile) -> str | None:
+    """Sync protective stops, then compare the broker's positions with the live database. Returns the
+    mismatch, if any. Adapters whose positions do not persist (paper) are not reconciled."""
+    if not getattr(ctx.adapter, "reconciles", False):
+        return None
+    sync_protective_stops(ctx, deployment, profile)
+    diff = position_diff(LiveStore(ctx.live), ctx.adapter, deployment.broker_account_id)
+    return _describe_diff(diff) if diff else None
+
+
+def _reconcile(state: TickState) -> TickState:
+    ctx = state["ctx"]
+    if not getattr(ctx.adapter, "reconciles", False):
+        return {}
+    fired = sync_protective_stops(ctx, state["deployment"], state["profile"])
+    diff = position_diff(LiveStore(ctx.live), ctx.adapter, state["deployment"].broker_account_id)
+    if diff:
+        detail = f"reconciliation mismatch: {_describe_diff(diff)}"
+        halt(ctx, detail)
+        alerts.notify(ctx.settings, "reconcile_mismatch", ctx.deployment_id, _describe_diff(diff))
+        return {"stop": True, "outcome": "halted", "detail": detail}
+    if fired:
+        return _broker_stop(state, fired)
+    return {}
+
+
+def _stops_enabled(ctx: CrewContext) -> bool:
+    mode = ctx.settings.protective_stops
+    return mode == "always" or (mode == "live" and ctx.adapter.mode == "live")
+
+
+def _place_protective_stops(ctx: CrewContext, state: TickState, intent: TradeIntent, legs: list[dict]) -> str | None:
+    """A stop-limit BUY at the broker on every short leg: a backstop set `PROTECTIVE_STOP_MULTIPLIER` times
+    the strategy's stop distance above the entry premium, so the crew's own exit normally fires first."""
+    if not _stops_enabled(ctx):
+        return None
+    shorts = [leg for leg in legs if leg["side"] == "SELL"]
+    if not shorts:
+        return None
+    settings, rules = ctx.settings, state["rules"]
+    stop_pct = rules.exit_value("stop_loss_pct_of_credit") or 100
+    distance = Decimal(str(settings.protective_stop_multiplier * stop_pct / 100))
+    buffer = Decimal(str(settings.protective_stop_limit_buffer_pct / 100))
+    stops = []
+    for leg in shorts:
+        trigger = to_tick(Decimal(str(leg["price"])) * (1 + distance), up=True)
+        stops.append(leg | {"side": "BUY", "trigger": trigger, "limit": to_tick(trigger * (1 + buffer), up=True)})
+    store = LiveStore(ctx.live)
+    protect = store.create_trade_intent(
+        deployment_id=ctx.deployment_id,
+        action="protect",
+        legs=[{k: (float(v) if isinstance(v, Decimal) else v) for k, v in s.items() if k != "price"} for s in stops],
+        reason_text=f"Broker-side protective stops at {settings.protective_stop_multiplier:g}x the strategy stop "
+        f"({stop_pct:g}% of credit) on {len(stops)} short leg(s).",
+        market_snapshot=state["market"].summary(),
+        thesis_ref=f"deployed_strategy:{state['snapshot'].id}",
+        risk_checks={"protects": intent.id, "multiplier": settings.protective_stop_multiplier,
+                     "stop_loss_pct_of_credit": stop_pct},  # fmt: skip
+        decided_by=current_actor(),
+        approval="auto",
+        decided_at=ctx.clock(),
+    )
+    ctx.live.commit()
+    manager = _manager(ctx, state)
+    for s in stops:
+        for qty in split_quantity(s["quantity"], manager.freeze_quantity(s), manager.lot_size):
+            _, error = manager.place_stop(protect, s, qty, s["trigger"], s["limit"])
+            if error:
+                return error
+    return None
+
+
+def _cancel_stops(ctx: CrewContext, state: TickState, intent: TradeIntent) -> str | None:
+    """Cancel the position's protective stops before the crew closes it. An error if one already filled."""
+    store = LiveStore(ctx.live)
+    manager = _manager(ctx, state)
+    for protect in store.protect_intents(intent.id):
+        for order in store.orders_for_intent(protect.id):
+            manager.cancel(order)
+            if store.fills_for_order(order.id):
+                return f"protective stop {order.tradingsymbol} filled while the position was being closed"
+    return None
+
+
+def _broker_stop(state: TickState, fired: list[TradeIntent]) -> TickState:
+    """A protective stop filled at the broker: close what is left of each position, book the trade as
+    `broker_stop` and pause the deployment, since the crew's own stop did not act first."""
+    ctx = state["ctx"]
+    store = LiveStore(ctx.live)
+    manager = _manager(ctx, state)
+    exits = []
+    trigger = Check("exit.broker_stop", "protective_stop_fills", ">", 0, 1, True)
+    for intent in fired:
+        legs = _open_legs(store, intent)
+        stop_orders, stopped = [], {}
+        for protect in store.protect_intents(intent.id):
+            for order in store.orders_for_intent(protect.id):
+                manager.cancel(order)
+                if store.fills_for_order(order.id):
+                    stop_orders.append(order)
+            for leg in _filled_legs(store, protect):
+                key = (leg["strike"], leg["option_type"], leg["expiry"])
+                stopped[key] = stopped.get(key, 0) + leg["quantity"]
+        stop_legs = [leg for p in store.protect_intents(intent.id) for leg in _filled_legs(store, p)]
+        remaining = []
+        for leg in legs:
+            qty = leg["quantity"] - stopped.get((leg["strike"], leg["option_type"], leg["expiry"]), 0)
+            if qty > 0:
+                remaining.append(leg | {"quantity": qty})
+        close_intent, close_orders = None, []
+        if remaining:
+            close_intent, close_orders, error = _send_close(ctx, state, remaining, trigger, [trigger],
+                                                            require_started=False)  # fmt: skip
+            if error:
+                return {"stop": True, "outcome": "halted", "detail": error, "exits": exits}
+        exit_legs = stop_legs + (_filled_legs(store, close_intent) if close_intent else [])
+        close_intent_id = close_intent.id if close_intent else store.protect_intents(intent.id)[0].id
+        trade = _book_trade(ctx, state, intent, legs, close_intent_id, exit_legs, stop_orders + close_orders,
+                            trigger, partial=False)  # fmt: skip
+        exits.append({"open_intent_id": intent.id, "live_trade_id": trade.id, "exit_reason": trade.exit_reason})
+    reason = f"protective stop filled at the broker on {len(fired)} position(s)"
+    if store.deployment_status(ctx.deployment_id) == "started":
+        store.add_deployment_event(ctx.deployment_id, "paused", reason)
+        ctx.live.commit()
+    alerts.notify(ctx.settings, "protective_stop", ctx.deployment_id, reason)
+    return {"stop": True, "outcome": "paused", "detail": reason, "exits": exits}
+
+
+def _send_close(
+    ctx: CrewContext, state: TickState, legs: list[dict], fired: Check, checks, require_started: bool = True
+) -> tuple[TradeIntent | None, list[Order], str | None]:
+    """Write a close intent for `legs` and send it (buy-backs first, retried). Halts on failure."""
     store, market = LiveStore(ctx.live), state["market"]
     close_legs = [
         leg | {
@@ -356,8 +571,8 @@ def _close_position(
     ]  # fmt: skip
     default = f"Exit: {_describe(fired)}."
     reason, model = _reason(ctx, default, {"action": "close", "trigger": _describe(fired)})
-    if not _still_started(ctx):
-        return None, "deployment stopped before the exit was sent"
+    if require_started and not _still_started(ctx):
+        return None, [], "deployment stopped before the exit was sent"
     now = ctx.clock()
     close_intent = store.create_trade_intent(
         deployment_id=ctx.deployment_id,
@@ -373,12 +588,57 @@ def _close_position(
         decided_at=now,
     )
     ctx.live.commit()
-    close_orders, error = _send_orders(ctx, state, close_intent, close_legs)
+    close_orders, error = _send_orders(ctx, state, close_intent, close_legs, retries=ctx.settings.order_exit_retries)
     if error:
         halt(ctx, f"exit failed, position still open: {error}")
-        return None, error
+        return close_intent, close_orders, error
+    return close_intent, close_orders, None
 
-    exit_legs = _filled_legs(store, close_intent)
+
+def _close_position(
+    ctx: CrewContext,
+    state: TickState,
+    intent: TradeIntent,
+    legs: list[dict],
+    fired: Check,
+    checks,
+    partial=False,
+    require_started: bool = True,
+):
+    """Close `legs` (all or, with `partial`, some of the position's open quantity). The trade carries
+    the closed share of the opening costs and target. Protective stops are cancelled first and, after
+    a partial close, placed again for what is left."""
+    store = LiveStore(ctx.live)
+    if store.protect_intents(intent.id):
+        error = _cancel_stops(ctx, state, intent)
+        if error:
+            halt(ctx, f"{error}; reconcile the position by hand")
+            return None, error
+    close_intent, close_orders, error = _send_close(ctx, state, legs, fired, checks, require_started)
+    if error:
+        return None, error
+    trade = _book_trade(ctx, state, intent, legs, close_intent.id, _filled_legs(store, close_intent), close_orders,
+                        fired, partial)  # fmt: skip
+    if partial and _stops_enabled(ctx):
+        error = _place_protective_stops(ctx, state, intent, _open_legs(store, intent))
+        if error:
+            halt(ctx, f"protective stops could not be placed again after a partial close: {error}")
+    _write_lesson(ctx, state, intent, trade)
+    return trade, None
+
+
+def _book_trade(
+    ctx: CrewContext,
+    state: TickState,
+    intent: TradeIntent,
+    legs: list[dict],
+    close_intent_id: str,
+    exit_legs: list[dict],
+    close_orders: list[Order],
+    fired: Check,
+    partial: bool,
+):
+    store = LiveStore(ctx.live)
     gross = sum(signed(leg["side"]) * leg["price"] * leg["quantity"] for leg in legs + exit_legs)
     expected = sum(signed(leg["side"]) * leg["quote"] * leg["quantity"] for leg in legs + exit_legs)
     opened = sum(leg["quantity"] for leg in _filled_legs(store, intent))
@@ -392,11 +652,16 @@ def _close_position(
     net = money(gross) - (actual_costs if actual_costs is not None else est_costs)
     closed_at = ctx.clock()
     target = money((intent.target_pnl or Decimal("0")) * share)
-    exit_prices = {(leg["strike"], leg["option_type"]): leg["price"] for leg in exit_legs}
+    totals: dict[tuple, list[float]] = {}
+    for leg in exit_legs:
+        t = totals.setdefault((leg["strike"], leg["option_type"]), [0.0, 0])
+        t[0] += leg["price"] * leg["quantity"]
+        t[1] += leg["quantity"]
+    exit_prices = {k: cost / qty for k, (cost, qty) in totals.items()}
     trade = store.close_live_trade(
         deployment_id=ctx.deployment_id,
         open_intent_id=intent.id,
-        close_intent_id=close_intent.id,
+        close_intent_id=close_intent_id,
         legs=[
             {k: v for k, v in leg.items() if k not in ("price", "quote")}
             | {"entry_price": leg["price"], "exit_price": exit_prices[(leg["strike"], leg["option_type"])]}
@@ -417,8 +682,7 @@ def _close_position(
         partial=partial,
     )
     ctx.live.commit()
-    _write_lesson(ctx, state, intent, trade)
-    return trade, None
+    return trade
 
 
 def _write_lesson(ctx: CrewContext, state: TickState, intent: TradeIntent, trade) -> None:
@@ -630,6 +894,7 @@ def _drawdown_pause(state: TickState, decision: drawdown.LadderDecision) -> Tick
     if store.deployment_status(ctx.deployment_id) == "started":
         store.add_deployment_event(ctx.deployment_id, "paused", reason)
         ctx.live.commit()
+        alerts.notify(ctx.settings, "paused", ctx.deployment_id, reason)
     return {"stop": True, "outcome": "paused", "detail": reason, "exits": exits, "ladder": decision}
 
 
@@ -697,8 +962,9 @@ def _entry(state: TickState) -> TickState:
         lots, sizing_check = trade_policy.size_lots(policy.sizing, max_lots, capital, per_lot)
     unscaled = lots
     ladder = state.get("ladder")
-    if ladder and lots:
-        lots = drawdown.scaled_lots(lots, ladder.size_factor)
+    vix_factor = trade_policy.vix_size_factor(policy.vix_sizing, market.vix) if policy is not None else 1.0
+    if lots:
+        lots = drawdown.scaled_lots(lots, (ladder.size_factor if ladder else 1.0) * vix_factor)
     lots = max(lots, 1)  # a sizing check that failed still records the entry, as blocked
     if lots != proposal["lots"]:
         proposal = resize_proposal(rules, proposal, lots)
@@ -708,6 +974,7 @@ def _entry(state: TickState) -> TickState:
         "max_lots": max_lots,
         "sizing_check": sizing_check,
         "unscaled_lots": unscaled,
+        "vix_factor": vix_factor,
     }
 
 
@@ -718,15 +985,23 @@ def _risk(state: TickState) -> TickState:
 
 
 def _risk_checks(state: TickState, proposal: dict) -> list[Check]:
-    ctx, rules, deployment = state["ctx"], state["rules"], state["deployment"]
+    ctx, deployment = state["ctx"], state["deployment"]
+    rules = with_common_risk(state["rules"], ctx.settings.common_risk)
     store = LiveStore(ctx.live)
-    today = ctx.clock().date()
+    now = ctx.clock()
+    today = now.date()
     portfolio_open = sum(len(store.open_intents(d.id)) for d in store.active_deployments())
     account = AccountState(
         open_positions=state["open_positions"],
         pnl_today=float(sum(t.net for t in store.trades_closed_on(today, ctx.deployment_id))),
         portfolio_open_positions=portfolio_open,
         portfolio_pnl_today=float(sum(t.net for t in store.trades_closed_on(today))),
+        entries_today=sum(
+            1
+            for i in store.intents(ctx.deployment_id)
+            if i.action == "open" and i.approval == "auto" and i.decided_at.date() == today
+        ),
+        cooldown_days_left=_cooldown_days_left(ctx, rules, store, now),
     )
     raw_limits = deployment.risk_limits
     limits = RiskLimits(
@@ -741,7 +1016,44 @@ def _risk_checks(state: TickState, proposal: dict) -> list[Check]:
     if ladder is not None and ladder.check is not None:
         checks.append(ladder.check)
     checks += [c for c in (state.get("sizing_check"), state.get("daily_check")) if c is not None]
+    margin = _margin_check(ctx, proposal)
+    if margin is not None:
+        checks.append(margin)
     return checks
+
+
+def _cooldown_days_left(ctx: CrewContext, rules: StrategyRules, store: LiveStore, now: datetime) -> int:
+    if rules.risk.max_consecutive_losses is None:
+        return 0
+    today = now.astimezone(IST).date().isoformat()
+    closed = [
+        (t.closed_at.astimezone(IST).date().isoformat(), float(t.net))
+        for t in store.closed_trades([ctx.deployment_id]) if not t.partial
+    ]  # fmt: skip
+    return losing_streak_cooldown(rules.risk, closed, lambda day: trading_days_between(day, today, ctx.settings))
+
+
+def _margin_check(ctx: CrewContext, proposal: dict) -> Check | None:
+    """Available margin must cover the basket's margin times MARGIN_BUFFER. None when the adapter does not
+    check margin (paper); a broker that cannot answer fails the check."""
+    if not hasattr(ctx.adapter, "available_margin"):
+        return None
+    try:
+        available = ctx.adapter.available_margin()
+        if available is None:
+            return None
+        requests = [
+            OrderRequest(f"margin-{i}", EXCHANGE, leg["tradingsymbol"], leg["side"], leg["quantity"], "LIMIT", PRODUCT,
+                         money(leg["quote"]) if leg["quote"] is not None else None)  # fmt: skip
+            for i, leg in enumerate(proposal["legs"])
+        ]
+        required = ctx.adapter.margin_required(requests)
+    except Exception:
+        return Check("risk.margin", "available_margin", ">=", None, None, False)
+    if required is None:
+        return Check("risk.margin", "available_margin", ">=", None, float(available), False)
+    threshold = float(required) * ctx.settings.margin_buffer
+    return Check("risk.margin", "available_margin", ">=", threshold, float(available), float(available) >= threshold)
 
 
 def opinion_mode(ctx: CrewContext, deployment: Deployment) -> str:
@@ -837,11 +1149,14 @@ def _explain(state: TickState) -> TickState:
         if state.get("sizing_check") is not None and state["unscaled_lots"] < state["max_lots"]:
             default += f" Position sizing allows {state['unscaled_lots']} of {state['max_lots']} approved lots."
         ladder, rules_lots = state.get("ladder"), state.get("rules_lots", state["proposal"]["lots"])
-        if ladder is not None and rules_lots < state.get("unscaled_lots", rules_lots):
-            default += (
-                f" Drawdown level {ladder.level} ({ladder.drawdown_pct:.2f}% from peak) cut "
-                f"{state['unscaled_lots']} to {rules_lots} lots."
-            )
+        if rules_lots < state.get("unscaled_lots", rules_lots):
+            cuts = []
+            if ladder is not None and ladder.size_factor < 1:
+                cuts.append(f"Drawdown level {ladder.level} ({ladder.drawdown_pct:.2f}% from peak)")
+            if state.get("vix_factor", 1.0) < 1:
+                vix = state["market"].vix
+                cuts.append(f"VIX sizing ({'VIX ' + format(vix, '.2f') if vix is not None else 'no VIX reading'})")
+            default += f" {' and '.join(cuts)} cut {state['unscaled_lots']} to {rules_lots} lots."
         if state.get("rules_lots", state["proposal"]["lots"]) != state["proposal"]["lots"]:
             default += f" The LLM opinion reduced {state['rules_lots']} to {state['proposal']['lots']} lots: {why}."
     facts = {
@@ -891,10 +1206,54 @@ def _execute(state: TickState) -> TickState:
     if failed:
         return {"outcome": "blocked", "detail": ", ".join(failed), "intent_id": intent.id}
     _, error = _send_orders(ctx, state, intent, proposal["legs"])
+    if error is None:
+        stop_error = _place_protective_stops(ctx, state, intent, _filled_legs(store, intent))
+        if stop_error is None:
+            return {"outcome": "entered", "intent_id": intent.id}
+        error = stop_error
+    unwound = _unwind(state, intent)
+    halt(ctx, f"entry failed: {error}" + (f"; {unwound}" if unwound else ""))
+    return {"outcome": "halted", "detail": error, "intent_id": intent.id}
+
+
+def _unwind(state: TickState, intent: TradeIntent) -> str | None:
+    """Close whatever an entry that failed part-way did fill, so no leg is left without its partner."""
+    ctx = state["ctx"]
+    store = LiveStore(ctx.live)
+    legs = _filled_legs(store, intent)
+    if not legs:
+        return None
+    trigger = Check("exit.unwind", "failed_entry", "==", 1, 1, True)
+    trade, error = _close_position(ctx, state, intent, legs, trigger, [trigger], require_started=False)
     if error:
-        halt(ctx, f"entry failed: {error}")
-        return {"outcome": "halted", "detail": error, "intent_id": intent.id}
-    return {"outcome": "entered", "intent_id": intent.id}
+        return f"unwind failed, {len(legs)} filled leg(s) still open: {error}"
+    return f"unwound {len(legs)} filled leg(s) as live trade {trade.id}"
+
+
+def flatten(ctx: CrewContext) -> list[dict]:
+    """Kill switch: close every open position now (market-protected limits, re-priced within MAX_SLIPPAGE_BPS).
+    Raises ValueError if the market cannot be observed or an exit fails."""
+    state: TickState = {"ctx": ctx}
+    state |= _verify(state)
+    if state.get("stop"):
+        raise ValueError(f"cannot flatten: {state.get('detail')}")
+    state |= _observe(state)
+    if state.get("stop"):
+        raise ValueError(f"cannot flatten: {state.get('detail')}")
+    store = LiveStore(ctx.live)
+    trigger = Check("exit.kill_switch", "flatten", "==", 1, 1, True)
+    exits = []
+    for intent in store.open_intents(ctx.deployment_id):
+        legs = _open_legs(store, intent)
+        if not legs:
+            continue
+        if mark_position(legs, state["market"]) is None:
+            raise ValueError(f"cannot flatten: missing quotes for a leg of intent {intent.id}")
+        trade, error = _close_position(ctx, state, intent, legs, trigger, [trigger], require_started=False)
+        if error:
+            raise ValueError(f"flatten failed: {error}")
+        exits.append({"open_intent_id": intent.id, "live_trade_id": trade.id, "exit_reason": trade.exit_reason})
+    return exits
 
 
 def _next(node: str):
@@ -906,7 +1265,9 @@ def build_trade_graph():
     for name, fn in (
         ("verify", _verify),
         ("gate", _gate),
+        ("hours", _hours),
         ("observe", _observe),
+        ("reconcile", _reconcile),
         ("exits", _exits),
         ("drawdown", _drawdown),
         ("daily", _daily),
@@ -919,8 +1280,10 @@ def build_trade_graph():
         graph.add_node(name, fn)
     graph.add_edge(START, "verify")
     graph.add_conditional_edges("verify", _next("gate"))
-    graph.add_conditional_edges("gate", _next("observe"))
-    graph.add_conditional_edges("observe", _next("exits"))
+    graph.add_conditional_edges("gate", _next("hours"))
+    graph.add_conditional_edges("hours", _next("observe"))
+    graph.add_conditional_edges("observe", _next("reconcile"))
+    graph.add_conditional_edges("reconcile", _next("exits"))
     graph.add_conditional_edges("exits", _next("drawdown"))
     graph.add_conditional_edges("drawdown", _next("daily"))
     graph.add_conditional_edges("daily", _next("entry"))
@@ -944,6 +1307,14 @@ def run_tick(ctx: CrewContext) -> dict[str, Any]:
         try:
             out = _GRAPH.invoke({"ctx": ctx})
         finally:
+            ctx.live.rollback()
+        try:
+            LiveStore(ctx.live).record_heartbeat(
+                deployment_id=ctx.deployment_id, at=ctx.clock(), feed=ctx.feed_kind,
+                outcome=out.get("outcome"), pid=os.getpid(),
+            )  # fmt: skip
+            ctx.live.commit()
+        except Exception:
             ctx.live.rollback()
     return {
         "outcome": out.get("outcome"),

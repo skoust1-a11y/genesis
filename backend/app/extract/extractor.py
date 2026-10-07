@@ -4,9 +4,9 @@ import re
 from dataclasses import dataclass
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_openai import ChatOpenAI
 
 from app.config import get_settings
+from app.llm import chat_model
 from app.strategies.rules import ENTRY_FIELDS, EVENT_KINDS, EXIT_KINDS, OPS, STRUCTURES
 
 FIXTURE_MARKDOWN = """---
@@ -91,7 +91,11 @@ def extract_strategy(source: dict, hints: str = "") -> ExtractionResult:
             f"- entry: list of {{field, op, value}} with field in {', '.join(ENTRY_FIELDS)} "
             f"and op in {', '.join(OPS)}\n"
             f"- exit: list of {{kind, value}} with kind in {', '.join(EXIT_KINDS)}\n"
-            "- risk: max_lots, max_daily_loss_pct, optional max_open_positions, optional min_risk_reward\n"
+            "- risk: max_lots, max_daily_loss_pct, optional max_open_positions, optional min_risk_reward, "
+            "optional max_entries_per_day, optional max_consecutive_losses with cooldown_days (trading days "
+            "without new entries after that many losses in a row; both or neither), optional "
+            "max_loss_pct_of_capital (largest loss one trade may risk, as % of capital; 100 means never more "
+            "than the account)\n"
             "- optional entry_blackout: {kinds, days_before, days_after} when the source says to avoid new "
             f"trades around scheduled events; kinds from {', '.join(EVENT_KINDS)}\n"
             "Only include a key when the source states its value. If a rule cannot be expressed with these "
@@ -106,7 +110,7 @@ def extract_strategy(source: dict, hints: str = "") -> ExtractionResult:
             f"TEXT:\n{source.get('text', '')[:80_000]}"
         )
     )
-    llm = ChatOpenAI(model=settings.openai_model, api_key=settings.openai_api_key, temperature=0)
+    llm = chat_model(settings)
     resp = llm.invoke([system, user])
     raw = resp.content if isinstance(resp.content, str) else str(resp.content)
     content = raw.strip()
@@ -115,8 +119,8 @@ def extract_strategy(source: dict, hints: str = "") -> ExtractionResult:
         if m:
             content = m.group(1).strip()
     if not content.startswith("---"):
-        raise ExtractionError("Extractor did not return valid strategy markdown", raw, settings.openai_model)
-    return ExtractionResult(content, "llm", settings.openai_model, raw)
+        raise ExtractionError("Extractor did not return valid strategy markdown", raw, settings.llm_model)
+    return ExtractionResult(content, "llm", settings.llm_model, raw)
 
 
 class ExtractionError(ValueError):

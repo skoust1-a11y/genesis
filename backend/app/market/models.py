@@ -28,6 +28,9 @@ class IndexBar(MarketBase):
     close: Mapped[float | None] = mapped_column(Float, nullable=True)
     vix: Mapped[float | None] = mapped_column(Float, nullable=True)
     iv_rank: Mapped[float | None] = mapped_column(Float, nullable=True)
+    open: Mapped[float | None] = mapped_column(Float, nullable=True)
+    high: Mapped[float | None] = mapped_column(Float, nullable=True)
+    low: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
 class OptionEod(MarketBase):

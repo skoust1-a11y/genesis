@@ -105,6 +105,42 @@ export function PolicyFormFields({ form, onChange, profitTargetPct }: Props) {
       </Section>
 
       <Section
+        title="VIX sizing"
+        note="Fewer lots when India VIX is high: the highest band at or below today's VIX scales lots, never below one lot. With no VIX reading, the last band applies."
+      >
+        <Toggle checked={form.vix_sizing} onChange={(v) => set("vix_sizing", v)} label="Scale lots by India VIX" />
+        {form.vix_sizing && (
+          <div className="space-y-2">
+            {form.vix_bands.map((b, i) => {
+              const update = (patch: Partial<typeof b>) =>
+                set("vix_bands", form.vix_bands.map((q, j) => (j === i ? { ...q, ...patch } : q)));
+              return (
+                <div key={i} className="grid grid-cols-[1fr_1fr_auto] items-end gap-2">
+                  <Field label="VIX at or above">
+                    <input className={input} inputMode="decimal" value={b.at_or_above} onChange={(e) => update({ at_or_above: e.target.value })} />
+                  </Field>
+                  <Field label="Size factor (0–1)">
+                    <input className={input} inputMode="decimal" value={b.size_factor} onChange={(e) => update({ size_factor: e.target.value })} />
+                  </Field>
+                  <button type="button" className="rounded border px-2 py-1.5 text-xs" onClick={() => set("vix_bands", form.vix_bands.filter((_, j) => j !== i))}>
+                    Remove
+                  </button>
+                </div>
+              );
+            })}
+            <button
+              type="button"
+              className="rounded border px-2 py-0.5 text-xs disabled:opacity-50"
+              disabled={form.vix_bands.length >= 5}
+              onClick={() => set("vix_bands", [...form.vix_bands, { at_or_above: "", size_factor: "" }])}
+            >
+              Add band
+            </button>
+          </div>
+        )}
+      </Section>
+
+      <Section
         title="Profit booking"
         note={`Runs only when the strategy's own exits did not fire, so thresholds must sit below ${target} profit target. Percentages are of the credit received.`}
       >

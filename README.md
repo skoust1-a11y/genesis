@@ -6,7 +6,8 @@ Ingest trading strategies from YouTube, Instagram, documents, or Markdown, then 
 
 ```bash
 cp .env.example .env
-# Add OPENAI_API_KEY for live LLM extract (optional — demo fixture works offline)
+# Pick LLM_PROVIDER=openai (OPENAI_API_KEY) or anthropic (ANTHROPIC_API_KEY, Claude) for live LLM extract
+# (optional — demo fixture works offline)
 ```
 
 ### Backend

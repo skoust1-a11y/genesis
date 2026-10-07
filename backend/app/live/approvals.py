@@ -16,6 +16,7 @@ from app.audit import audit_context, current_actor, record_event
 from app.config import get_settings
 from app.db.models import AuditEvent, DeployedStrategy, Deployment, Report, StrategyVersion
 from app.db.types import utcnow
+from app.live import gates
 from app.live.drawdown import parse_policy
 from app.live.store import LiveStore
 from app.strategies.rules import rules_sha256
@@ -46,8 +47,42 @@ def _latest_completed_report(research: Session, version_id: int) -> Report | Non
     )
 
 
-def preview(research: Session, strategy_id: str, version: int) -> dict[str, Any]:
-    """Everything you need to see before approving, including what would block approval."""
+def structure_of(raw_rules: dict[str, Any] | None) -> str | None:
+    instrument = (raw_rules or {}).get("instrument") or {}
+    return instrument.get("structure") if isinstance(instrument, dict) else None
+
+
+def live_preview_blockers(
+    live: Session | None, strategy_version_id: int, raw_rules: dict | None, broker_account_id: str | None
+) -> list[str]:
+    """The live gates as approval blockers: LIVE_TRADING_ENABLED, broker and credentials, structure, paper record."""
+    settings = get_settings()
+    store = LiveStore(live) if live is not None else None
+    account, blockers = None, []
+    if store is not None and broker_account_id:
+        try:
+            account = store.broker_account(broker_account_id)
+        except FileNotFoundError:
+            blockers.append(f"broker account {broker_account_id} does not exist")
+    blockers += gates.live_blockers(store, account, structure_of(raw_rules), settings)
+    if store is not None:
+        record = gates.paper_record_blocker(store, strategy_version_id, settings)
+        if record:
+            blockers.append(record)
+    return blockers
+
+
+def preview(
+    research: Session,
+    strategy_id: str,
+    version: int,
+    *,
+    mode: str | None = None,
+    broker_account_id: str | None = None,
+    live: Session | None = None,
+) -> dict[str, Any]:
+    """Everything you need to see before approving, including what would block approval. With
+    mode=live, the live gates are blockers too."""
     store = StrategyStore(research)
     strategy = store.get_strategy(strategy_id)
     row = store.version(strategy_id, version)
@@ -61,6 +96,8 @@ def preview(research: Session, strategy_id: str, version: int) -> dict[str, Any]
         blockers.append(f"Gaps must be empty ({len(doc.gaps)} open)")
     if report is None:
         blockers.append("no completed report for this version; run a review first")
+    if mode == "live":
+        blockers += live_preview_blockers(live, row.id, raw_rules, broker_account_id)
     return {
         "strategy_id": strategy_id,
         "version": row.version,
@@ -102,7 +139,13 @@ def parse_risk_limits(raw: dict[str, Any] | None, rules: dict[str, Any] | None =
 
 
 def _approval_details(deployment: Deployment, snapshot: DeployedStrategy) -> dict[str, Any]:
-    return {
+    extra = {}
+    if deployment.mode == "live":
+        extra = {
+            "structure": structure_of(snapshot.rules),
+            "live_allowed_structures": sorted(get_settings().allowed_live_structures),
+        }
+    return extra | {
         "deployment_id": deployment.id,
         "deployed_strategy_id": snapshot.id,
         "strategy_version_id": snapshot.strategy_version_id,
@@ -134,7 +177,7 @@ def approve(
         raise ValueError("approval needs a named approver: send the X-Actor header")
     if mode not in MODES:
         raise ValueError(f"mode must be one of {', '.join(MODES)}")
-    p = preview(research, strategy_id, version)
+    p = preview(research, strategy_id, version, mode=mode, broker_account_id=broker_account_id, live=live)
     if p["blockers"]:
         raise ValueError("cannot approve: " + "; ".join(p["blockers"]))
     if confirm_rules_sha256 != p["rules_sha256"]:

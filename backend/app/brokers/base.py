@@ -1,6 +1,8 @@
 """Interface a broker integration (Zerodha, Upstox, Dhan, Angel One, ...) must implement.
 
-No adapter ships yet. An adapter only talks to the broker; persisting intents, orders,
+`PaperBroker` and `SandboxBroker` ship; a real broker is one module that implements
+`BrokerAdapter` (and `QuoteSource`, to drive `BrokerFeed`) plus an entry in
+`app.brokers.registry`. An adapter only talks to the broker; persisting intents, orders,
 order events, fills and charges goes through ``app.live.store.LiveStore`` so every
 step lands in the append-only tables and the audit chain.
 """
@@ -70,6 +72,44 @@ class ChargeReport:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+TERMINAL_ORDER_STATUSES = ("COMPLETE", "REJECTED", "CANCELLED")
+
+
+@dataclass
+class Instrument:
+    tradingsymbol: str
+    underlying: str
+    expiry: str  # ISO date
+    strike: float
+    option_type: str  # "CE" | "PE"
+    lot_size: int
+    tick_size: Decimal = Decimal("0.05")
+    freeze_quantity: int | None = None
+    exchange: str = "NFO"
+
+
+@dataclass
+class Quote:
+    tradingsymbol: str
+    last: Decimal | None
+    bid: Decimal | None
+    ask: Decimal | None
+    timestamp: datetime
+
+
+@runtime_checkable
+class QuoteSource(Protocol):
+    """Market data a broker exposes: the option instrument list, option quotes, the index and India VIX."""
+
+    def instruments(self, underlying: str) -> list[Instrument]: ...
+
+    def quotes(self, tradingsymbols: list[str]) -> dict[str, Quote]: ...
+
+    def underlying_quote(self, underlying: str) -> Quote | None: ...
+
+    def vix_quote(self) -> Quote | None: ...
+
+
 @runtime_checkable
 class BrokerAdapter(Protocol):
     name: str
@@ -86,3 +126,22 @@ class BrokerAdapter(Protocol):
     def positions(self) -> list[dict[str, Any]]: ...
 
     def charges(self, trade_date: date) -> list[ChargeReport]: ...
+
+
+@runtime_checkable
+class LiveBrokerAdapter(BrokerAdapter, Protocol):
+    """What a live adapter must add: order polling, positions worth reconciling and margin.
+    The crew falls back to `order_updates` and skips margin and reconciliation for adapters without it."""
+
+    # False when the adapter's positions do not survive a restart (paper), so reconciling them is meaningless.
+    reconciles: bool
+
+    def get_order(self, broker_order_id: str) -> OrderUpdate | None: ...
+
+    def margin_required(self, orders: list[OrderRequest]) -> Decimal | None:
+        """Margin for the whole basket (multi-leg benefit included); None when the broker cannot say."""
+        ...
+
+    def available_margin(self) -> Decimal | None:
+        """None means margin is not checked (paper)."""
+        ...

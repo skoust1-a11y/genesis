@@ -7,12 +7,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit import current_actor, record_event
+from app.brokers.base import TERMINAL_ORDER_STATUSES
 from app.db.base import LiveBase
 from app.db.hashing import normalize_json
 from app.db.models import (
     BrokerAccount,
     BrokerCharge,
+    BrokerCredential,
     CapitalEvent,
+    CrewHeartbeat,
     DeployedStrategy,
     Deployment,
     DeploymentEvent,
@@ -50,13 +53,20 @@ class LiveStore:
         self.session = session
 
     def _insert(
-        self, model: type[LiveBase], action: str, entity_type: str, fields: dict[str, Any], extra: dict | None = None
+        self,
+        model: type[LiveBase],
+        action: str,
+        entity_type: str,
+        fields: dict[str, Any],
+        extra: dict | None = None,
+        redact: tuple[str, ...] = (),
     ):
         clean = {k: normalize_json(v) if k in JSON_FIELDS else v for k, v in fields.items()}
         obj = model(**clean)
         self.session.add(obj)
         self.session.flush()
-        details = row_to_dict(obj) | ({"extra": normalize_json(extra)} if extra else {})
+        row = {k: v for k, v in row_to_dict(obj).items() if k not in redact}
+        details = row | ({"extra": normalize_json(extra)} if extra else {})
         record_event(self.session, action, entity_type, obj.id, details, model=LiveAuditEvent)
         return obj
 
@@ -161,6 +171,16 @@ class LiveStore:
 
     def record_phantom_trade(self, **fields) -> PhantomTrade:
         return self._insert(PhantomTrade, "phantom_trade.closed", "phantom_trade", fields)
+
+    def add_broker_credential(self, **fields) -> BrokerCredential:
+        """The audit event keeps the field name and fingerprint only, never the ciphertext."""
+        self.broker_account(fields["broker_account_id"])
+        fields.setdefault("created_by", current_actor())
+        action = "broker_credential.revoked" if fields.get("revoked") else "broker_credential.saved"
+        return self._insert(BrokerCredential, action, "broker_credential", fields, redact=("ciphertext",))
+
+    def record_heartbeat(self, **fields) -> CrewHeartbeat:
+        return self._insert(CrewHeartbeat, "crew.heartbeat", "crew_heartbeat", fields)
 
     # Reads
 
@@ -376,6 +396,51 @@ class LiveStore:
         if deployment_id:
             stmt = stmt.where(PhantomTrade.deployment_id == deployment_id)
         return list(self.session.scalars(stmt.order_by(PhantomTrade.closed_at)))
+
+    def broker_credentials(self, broker_account_id: str) -> dict[str, BrokerCredential]:
+        """The latest row per field (revoked rows included) for one account."""
+        rows = self.session.scalars(
+            select(BrokerCredential)
+            .where(BrokerCredential.broker_account_id == broker_account_id)
+            .order_by(BrokerCredential.id)
+        )
+        return {r.field: r for r in rows}
+
+    def latest_heartbeat(self, deployment_id: str) -> CrewHeartbeat | None:
+        return self.session.scalar(
+            select(CrewHeartbeat)
+            .where(CrewHeartbeat.deployment_id == deployment_id)
+            .order_by(CrewHeartbeat.id.desc())
+            .limit(1)
+        )
+
+    def heartbeats(self, deployment_ids: list[str], feed: str | None = None) -> list[CrewHeartbeat]:
+        stmt = select(CrewHeartbeat).where(CrewHeartbeat.deployment_id.in_(deployment_ids))
+        if feed:
+            stmt = stmt.where(CrewHeartbeat.feed == feed)
+        return list(self.session.scalars(stmt.order_by(CrewHeartbeat.id)))
+
+    def deployments_for_account(self, broker_account_id: str) -> list[Deployment]:
+        return [d for d in self.deployments() if d.broker_account_id == broker_account_id]
+
+    def protect_intents(self, open_intent_id: str) -> list[TradeIntent]:
+        """Intents holding the broker-side protective stops placed for one opening intent."""
+        opened = self.session.get(TradeIntent, open_intent_id)
+        if opened is None:
+            return []
+        return [
+            i for i in self.intents(opened.deployment_id)
+            if i.action == "protect" and (i.risk_checks or {}).get("protects") == open_intent_id
+        ]  # fmt: skip
+
+    def working_orders(self, deployment_id: str) -> list[Order]:
+        """Orders sent to the broker whose latest status is not terminal."""
+        out = []
+        for intent in self.intents(deployment_id):
+            for order in self.orders_for_intent(intent.id):
+                if order.broker_order_id and self.order_status(order.id) not in TERMINAL_ORDER_STATUSES:
+                    out.append(order)
+        return out
 
     def open_phantoms(self, deployment_id: str) -> list[tuple[TradeOpinion, TradeIntent]]:
         """Veto opinions that removed lots whose phantom position has not hit an exit yet."""

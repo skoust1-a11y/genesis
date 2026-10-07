@@ -1,0 +1,8 @@
+# NSE equity derivatives trading holidays, read by the Trade Crew's market-hours guard (broker feed only).
+# Copy each year's dates from NSE's "Holidays" circular (nseindia.com > Resources > Exchange communication).
+# Weekends are always closed and need no entry. A date missing here is treated as a trading day.
+#
+# holidays:
+#   - {date: 2026-01-26, name: Republic Day}
+source: manual
+holidays: []

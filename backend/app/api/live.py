@@ -8,13 +8,15 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.common import or_400, or_404
+from app.api.common import ensure_authenticated, or_400, or_404, require_auth
 from app.audit import verify_chain
+from app.brokers import credentials, registry
 from app.config import get_settings
 from app.db.models import LiveAuditEvent
 from app.db.serialize import row_to_dict
 from app.db.session import get_db, get_live_db, live_schema_ready
-from app.live import approvals, drawdown, equity, opinion_eval, policy_backtest, veto
+from app.db.types import utcnow
+from app.live import approvals, drawdown, equity, kill_switch, opinion_eval, policy_backtest, veto
 from app.live.store import LiveStore
 
 router = APIRouter(prefix="/api/live")
@@ -46,6 +48,7 @@ class PolicyBacktestIn(BaseModel):
 
 class TransitionIn(BaseModel):
     reason: str | None = None
+    flatten: bool = False
 
 
 class VetoIn(BaseModel):
@@ -67,35 +70,136 @@ def live_db(session: Session = Depends(get_live_db)) -> Iterator[Session]:
     yield session
 
 
+def _crew_status(store: LiveStore, deployment, status: str) -> dict:
+    """Whether a Trade Crew process is ticking for this deployment, from its latest heartbeat."""
+    beat = store.latest_heartbeat(deployment.id)
+    age = (utcnow() - beat.at).total_seconds() if beat else None
+    running = status == "started" and age is not None and age <= get_settings().heartbeat_max_age_s
+    return {
+        "crew_running": running,
+        "last_heartbeat": row_to_dict(beat) if beat else None,
+        "last_heartbeat_age_s": round(age, 1) if age is not None else None,
+    }
+
+
 def _deployment_dict(store: LiveStore, deployment) -> dict:
+    status = store.deployment_status(deployment.id)
     return {
         **row_to_dict(deployment),
-        "status": store.deployment_status(deployment.id),
+        "status": status,
         "llm_veto": store.veto_enabled(deployment.id),
         "events": [row_to_dict(e) for e in store.deployment_events(deployment.id)],
+        **_crew_status(store, deployment, status),
+    }
+
+
+def _ensure_live_auth(deployment) -> None:
+    if deployment.mode == "live":
+        ensure_authenticated()
+
+
+# Brokers, accounts and credentials
+
+
+@router.get("/brokers")
+def list_brokers():
+    """Registered brokers. `configured` means every required credential resolves from `.env`
+    (per-account values saved in the database are shown on each account)."""
+    settings = get_settings()
+    out = []
+    for spec in registry.specs():
+        fields = credentials.status(None, None, spec, settings)
+        out.append(spec.as_dict(settings) | {
+            "fields": [f.as_dict() for f in fields], "configured": credentials.configured(fields),
+        })  # fmt: skip
+    return {"brokers": out, "feeds": list(registry.FEEDS)}
+
+
+def _account_dict(store: LiveStore, account) -> dict:
+    settings = get_settings()
+    try:
+        spec = registry.get_spec(account.broker)
+    except ValueError as exc:
+        return row_to_dict(account) | {"registered": False, "configured": False, "fields": [], "detail": str(exc)}
+    fields = credentials.status(store, account, spec, settings)
+    return row_to_dict(account) | {
+        "registered": True,
+        "supports_mode": account.mode in spec.modes(settings),
+        "configured": credentials.configured(fields),
+        "fields": [f.as_dict() for f in fields],
     }
 
 
 @router.get("/broker-accounts")
 def list_broker_accounts(db: Session = Depends(live_db)):
-    return {"broker_accounts": [row_to_dict(a) for a in LiveStore(db).broker_accounts()]}
+    store = LiveStore(db)
+    return {"broker_accounts": [_account_dict(store, a) for a in store.broker_accounts()]}
 
 
 @router.post("/broker-accounts")
 def create_broker_account(body: BrokerAccountIn, db: Session = Depends(live_db)):
     if body.mode not in approvals.MODES:
         raise HTTPException(status_code=400, detail=f"mode must be one of {', '.join(approvals.MODES)}")
-    account = LiveStore(db).create_broker_account(**body.model_dump())
+    or_400(registry.check_account, body.broker, body.mode, get_settings())
+    if body.mode == "live":
+        ensure_authenticated()
+    store = LiveStore(db)
+    account = store.create_broker_account(**body.model_dump())
     db.commit()
-    return row_to_dict(account)
+    return _account_dict(store, account)
+
+
+def _account_spec(store: LiveStore, account_id: str):
+    account = or_404(store.broker_account, account_id)
+    return account, or_400(registry.get_spec, account.broker)
+
+
+@router.get("/broker-accounts/{account_id}/credentials", dependencies=[Depends(require_auth)])
+def get_credentials(account_id: str, db: Session = Depends(live_db)):
+    """Field names, where each comes from (db or env), fingerprint and when it was saved. Never values."""
+    store = LiveStore(db)
+    account, spec = _account_spec(store, account_id)
+    fields = credentials.status(store, account, spec, get_settings())
+    return {"broker_account_id": account.id, "broker": spec.name, "configured": credentials.configured(fields),
+            "fields": [f.as_dict() for f in fields]}  # fmt: skip
+
+
+@router.put("/broker-accounts/{account_id}/credentials", dependencies=[Depends(require_auth)])
+def put_credentials(account_id: str, body: dict[str, str], db: Session = Depends(live_db)):
+    """Save (or rotate) credential values, encrypted with BROKER_CREDENTIALS_KEY."""
+    store = LiveStore(db)
+    account, spec = _account_spec(store, account_id)
+    or_400(credentials.save, store, account, spec, get_settings(), body)
+    db.commit()
+    return get_credentials(account_id, db)
+
+
+@router.delete("/broker-accounts/{account_id}/credentials", dependencies=[Depends(require_auth)])
+def delete_credentials(account_id: str, field: list[str] | None = Query(None), db: Session = Depends(live_db)):
+    """Revoke stored values (all, or the `field`s given); lookups then fall back to `.env`."""
+    store = LiveStore(db)
+    account, spec = _account_spec(store, account_id)
+    or_400(credentials.revoke, store, account, spec, field)
+    db.commit()
+    return get_credentials(account_id, db)
 
 
 # Approval gate
 
 
 @router.get("/approvals/preview")
-def preview_approval(strategy_id: str, version: int, research: Session = Depends(get_db)):
-    return or_404(approvals.preview, research, strategy_id, version)
+def preview_approval(
+    strategy_id: str,
+    version: int,
+    mode: str | None = None,
+    broker_account_id: str | None = None,
+    research: Session = Depends(get_db),
+    live: Session = Depends(get_live_db),
+):
+    """With mode=live (and a broker_account_id), the live gates are listed as blockers too."""
+    session = live if mode == "live" and live_schema_ready(live) else None
+    return or_404(approvals.preview, research, strategy_id, version, mode=mode,
+                  broker_account_id=broker_account_id, live=session)  # fmt: skip
 
 
 @router.post("/approvals/backtest")
@@ -106,6 +210,8 @@ def backtest_risk_limits(body: PolicyBacktestIn, research: Session = Depends(get
 
 @router.post("/approvals")
 def approve(body: ApprovalIn, research: Session = Depends(get_db), db: Session = Depends(live_db)):
+    if body.mode == "live" and or_404(LiveStore(db).broker_account, body.broker_account_id).mode == "live":
+        ensure_authenticated()  # a paper account is refused by approve() itself
     deployment, snapshot, warnings = or_400(approvals.approve, research, db, **body.model_dump())
     store = LiveStore(db)
     return {
@@ -119,7 +225,7 @@ def approve(body: ApprovalIn, research: Session = Depends(get_db), db: Session =
 def set_llm_veto(deployment_id: str, body: VetoIn, db: Session = Depends(live_db)):
     """Enable (named approver, evidence required) or disable the LLM veto for one deployment."""
     store = LiveStore(db)
-    or_404(store.deployment, deployment_id)
+    _ensure_live_auth(or_404(store.deployment, deployment_id))
     if body.enable:
         evaluation = or_400(veto.enable, db, get_settings(), deployment_id, body.reason)
     else:
@@ -131,7 +237,7 @@ def set_llm_veto(deployment_id: str, body: VetoIn, db: Session = Depends(live_db
 @router.post("/deployments/{deployment_id}/capital-events")
 def add_capital_event(deployment_id: str, body: CapitalEventIn, db: Session = Depends(live_db)):
     store = LiveStore(db)
-    or_404(store.deployment, deployment_id)
+    _ensure_live_auth(or_404(store.deployment, deployment_id))
     event = or_400(
         equity.add_capital_event, store, get_settings(), deployment_id, body.kind, body.amount_inr, body.note
     )
@@ -141,8 +247,20 @@ def add_capital_event(deployment_id: str, body: CapitalEventIn, db: Session = De
 
 @router.post("/deployments/{deployment_id}/{action}")
 def transition(deployment_id: str, action: str, body: TransitionIn | None = None, db: Session = Depends(live_db)):
-    or_400(approvals.transition, db, deployment_id, action, body.reason if body else None)
-    return _deployment_dict(LiveStore(db), LiveStore(db).deployment(deployment_id))
+    """start | pause | stop. `stop` cancels the deployment's working orders at the broker (kill switch);
+    with `flatten: true` it also closes every open position."""
+    store = LiveStore(db)
+    deployment = or_404(store.deployment, deployment_id)
+    body = body or TransitionIn()
+    if body.flatten and action != "stop":
+        raise HTTPException(status_code=400, detail="flatten is only allowed with stop")
+    if body.flatten or (action == "start" and deployment.mode == "live"):
+        ensure_authenticated()
+    if action != "stop":
+        or_400(approvals.transition, db, deployment_id, action, body.reason)
+        return _deployment_dict(store, store.deployment(deployment_id))
+    result = or_400(kill_switch.stop, db, get_settings(), deployment_id, body.reason, body.flatten)
+    return _deployment_dict(store, store.deployment(deployment_id)) | {"kill_switch": result}
 
 
 @router.get("/deployments")

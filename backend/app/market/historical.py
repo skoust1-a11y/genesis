@@ -120,4 +120,8 @@ class HistoricalFeed:
             lot_size=lots.most_common(1)[0][0] if lots else None,
             stale=stale,
             events=self.events(self.underlying, day) if self.events else None,
+            vix=bar.vix,
+            day_open=bar.open,
+            day_high=bar.high,
+            day_low=bar.low,
         )

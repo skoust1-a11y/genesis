@@ -1,11 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { BrokerAccountPanel } from "@/components/BrokerAccountPanel";
 import { EquityChart } from "@/components/EquityChart";
 import { PolicyFormFields } from "@/components/PolicyFormFields";
-import { api, getActor, inr, pct, setActor } from "@/lib/api";
+import { api, type BrokerAccount, getActor, getToken, inr, pct, setActor, setToken } from "@/lib/api";
 import { DEFAULT_FORM, type PolicyForm, toRiskLimits } from "@/lib/policy";
 
 type Strategy = { id: string; name: string; current_version: number; archived_at: string | null };
@@ -19,7 +20,6 @@ type Preview = {
   blockers: string[];
   warnings: string[];
 };
-type Account = { id: string; broker: string; account_ref_masked: string; mode: string };
 type RunSummary = {
   net_pnl: number;
   return_pct: number;
@@ -54,20 +54,24 @@ export default function DeployPage() {
   const [preview, setPreview] = useState<Preview | null>(null);
   const [form, setForm] = useState<PolicyForm>(DEFAULT_FORM);
   const [backtest, setBacktest] = useState<Backtest | null>(null);
-  const [accounts, setAccounts] = useState<Account[]>([]);
+  const [accounts, setAccounts] = useState<BrokerAccount[]>([]);
   const [accountId, setAccountId] = useState("");
   const [actor, setActorName] = useState("");
+  const [token, setTokenValue] = useState("");
+  const [algoId, setAlgoId] = useState("");
   const [acknowledge, setAcknowledge] = useState(false);
   const [approved, setApproved] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const showError = useCallback((message: string) => setError(message), []);
 
   useEffect(() => {
     setActorName(getActor());
+    setTokenValue(getToken());
     api<{ strategies: Strategy[] }>("/api/strategies")
       .then((d) => setStrategies(d.strategies.filter((s) => !s.archived_at)))
       .catch((e) => setError(e.message));
-    api<{ broker_accounts: Account[] }>("/api/live/broker-accounts")
+    api<{ broker_accounts: BrokerAccount[] }>("/api/live/broker-accounts")
       .then((d) => {
         setAccounts(d.broker_accounts);
         if (d.broker_accounts.length) setAccountId(d.broker_accounts[0].id);
@@ -75,22 +79,25 @@ export default function DeployPage() {
       .catch((e) => setError(e.message));
   }, []);
 
+  const account = accounts.find((a) => a.id === accountId);
+  const mode = account?.mode;
+
   useEffect(() => {
     if (!strategyId || version === null) return;
     setPreview(null);
     setBacktest(null);
     setApproved(null);
-    api<Preview>(`/api/live/approvals/preview?strategy_id=${strategyId}&version=${version}`)
+    const live = mode === "live" ? `&mode=live&broker_account_id=${accountId}` : "";
+    api<Preview>(`/api/live/approvals/preview?strategy_id=${strategyId}&version=${version}${live}`)
       .then(setPreview)
       .catch((e) => setError(e.message));
-  }, [strategyId, version]);
+  }, [strategyId, version, mode, accountId, account?.configured]);
 
   const profitTarget = useMemo(
     () => preview?.rules?.exit?.find((e) => e.kind === "profit_target_pct_of_credit")?.value ?? null,
     [preview],
   );
   const riskLimits = useMemo(() => toRiskLimits(form), [form]);
-  const account = accounts.find((a) => a.id === accountId);
 
   async function run<T>(label: string, fn: () => Promise<T>): Promise<T | undefined> {
     setBusy(label);
@@ -111,18 +118,9 @@ export default function DeployPage() {
     if (out) setBacktest(out);
   }
 
-  async function createPaperAccount() {
-    const created = await run("account", () =>
-      api<Account>("/api/live/broker-accounts", { body: { broker: "paper", account_ref_masked: "PAPER-1", mode: "paper" } }),
-    );
-    if (created) {
-      setAccounts([...accounts, created]);
-      setAccountId(created.id);
-    }
-  }
-
   async function approve() {
     setActor(actor.trim());
+    setToken(token.trim());
     const out = await run("approve", () =>
       api<{ deployment: { id: string } }>("/api/live/approvals", {
         body: {
@@ -132,6 +130,7 @@ export default function DeployPage() {
           broker_account_id: accountId,
           confirm_rules_sha256: preview?.rules_sha256,
           risk_limits: riskLimits,
+          sebi_algo_id: algoId.trim() || null,
           acknowledge_verdict: acknowledge,
         },
       }),
@@ -282,25 +281,36 @@ export default function DeployPage() {
           <h2 className="font-medium">4. Approve</h2>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="space-y-1">
-              <span className="text-xs font-medium text-zinc-700">Your name (recorded as approver)</span>
-              <input className="w-full rounded-md border px-3 py-2" value={actor} onChange={(e) => setActorName(e.target.value)} />
+              <span className="text-xs font-medium text-zinc-700">API token (required for live; its name is the approver)</span>
+              <input
+                className="w-full rounded-md border px-3 py-2"
+                type="password"
+                autoComplete="off"
+                value={token}
+                onChange={(e) => {
+                  setTokenValue(e.target.value);
+                  setToken(e.target.value.trim());
+                }}
+              />
             </label>
             <label className="space-y-1">
-              <span className="text-xs font-medium text-zinc-700">Broker account</span>
-              <div className="flex gap-2">
-                <select className="w-full rounded-md border px-3 py-2" value={accountId} onChange={(e) => setAccountId(e.target.value)}>
-                  {accounts.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      {a.broker} {a.account_ref_masked} ({a.mode})
-                    </option>
-                  ))}
-                </select>
-                <button type="button" className="whitespace-nowrap rounded-md border px-3 py-2 text-sm" onClick={createPaperAccount}>
-                  New paper account
-                </button>
-              </div>
+              <span className="text-xs font-medium text-zinc-700">Your name (approver when no token is configured)</span>
+              <input className="w-full rounded-md border px-3 py-2" value={actor} onChange={(e) => setActorName(e.target.value)} />
             </label>
           </div>
+          <BrokerAccountPanel
+            accounts={accounts}
+            accountId={accountId}
+            onAccounts={setAccounts}
+            onSelect={setAccountId}
+            onError={showError}
+          />
+          {mode === "live" && (
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-zinc-700">SEBI algo id (defaults to the account&apos;s)</span>
+              <input className="w-full rounded-md border px-3 py-2" value={algoId} onChange={(e) => setAlgoId(e.target.value)} />
+            </label>
+          )}
           {preview.needs_verdict_acknowledgement && (
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" checked={acknowledge} onChange={(e) => setAcknowledge(e.target.checked)} />
@@ -309,7 +319,13 @@ export default function DeployPage() {
           )}
           <button
             className="rounded-md bg-zinc-900 px-4 py-2 text-white disabled:opacity-50"
-            disabled={busy !== null || !actor.trim() || !accountId || preview.blockers.length > 0}
+            disabled={
+              busy !== null ||
+              !(actor.trim() || token.trim()) ||
+              !accountId ||
+              preview.blockers.length > 0 ||
+              (mode === "live" && (!token.trim() || !account?.configured))
+            }
             onClick={approve}
           >
             {busy === "approve" ? "Approving…" : `Approve for ${account?.mode ?? "…"} trading`}

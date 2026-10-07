@@ -328,6 +328,35 @@ class PhantomTrade(AppendOnly, LiveBase):
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
 
 
+class BrokerCredential(AppendOnly, LiveBase):
+    """One encrypted credential field for a broker account. The latest row per field wins; a revoked row
+    (no ciphertext) removes it, so lookups fall back to `.env`."""
+
+    __tablename__ = "broker_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    broker_account_id: Mapped[str] = mapped_column(ForeignKey("broker_accounts.id"), index=True)
+    field: Mapped[str] = mapped_column(String(64))
+    ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    fingerprint: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    revoked: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false())
+    created_by: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class CrewHeartbeat(AppendOnly, LiveBase):
+    """One row per Trade Crew tick, so a crew that stopped ticking can be noticed."""
+
+    __tablename__ = "crew_heartbeats"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    deployment_id: Mapped[str] = mapped_column(ForeignKey("deployments.id"), index=True)
+    at: Mapped[datetime] = mapped_column(UTCDateTime())
+    feed: Mapped[str] = mapped_column(String(16))  # replay | broker
+    outcome: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+
 LIVE_APPEND_ONLY_TABLES = [
     "deployed_strategies",
     "broker_accounts",
@@ -346,4 +375,6 @@ LIVE_APPEND_ONLY_TABLES = [
     "phantom_trades",
     "capital_events",
     "drawdown_events",
+    "broker_credentials",
+    "crew_heartbeats",
 ]

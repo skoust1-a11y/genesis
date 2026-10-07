@@ -161,7 +161,7 @@ def test_deployment_transitions(client, approvable, paper_account):
     assert [e["event"] for e in events] == ["approved", "started", "paused", "started", "stopped"]
 
 
-def test_live_account_approval_and_helper(client, approvable):
-    live_account = create_account(client, mode="live", broker="zerodha")
-    deployment_id = approve_and_start(client, approvable, live_account)
-    assert client.get(f"/api/live/deployments/{deployment_id}").json()["mode"] == "live"
+def test_live_account_approval_and_helper(client, approvable, live_env):
+    live_account = create_account(client, mode="live", broker="sandbox", headers=live_env)
+    deployment_id = approve_and_start(client, approvable, live_account, headers=live_env)
+    assert client.get(f"/api/live/deployments/{deployment_id}", headers=live_env).json()["mode"] == "live"

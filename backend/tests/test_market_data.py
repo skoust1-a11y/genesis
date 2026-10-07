@@ -5,14 +5,22 @@ import shutil
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, inspect, text
 
 from app.config import get_settings
 from app.engine.market import market_data_fingerprint
 from app.market.historical import HistoricalFeed, choose_expiry, option_price
 from app.market.models import IndexBar, OptionEod
-from app.market.nse import bhavcopy_layout, iv_rank_series, parse_daily_closes, parse_fo_bhavcopy, read_text
+from app.market.nse import (
+    bhavcopy_layout,
+    iv_rank_series,
+    parse_daily_bars,
+    parse_daily_closes,
+    parse_fo_bhavcopy,
+    read_text,
+)
 from app.market.source import HistoricalSource, SampleSource, open_market_source
-from app.market.store import OptionQuote, open_market_store
+from app.market.store import OptionQuote, _ready_engine, open_market_store
 from scripts.import_nse_eod import classify, import_dir
 
 FIXTURES = Path(__file__).parent / "fixtures" / "nse"
@@ -62,6 +70,39 @@ def test_daily_closes_parse_nse_exports():
     vix = parse_daily_closes(read_text(VIX))
     assert vix[0] == ("2024-06-03", 20.1) and vix[-1] == ("2024-07-08", 14.6) and len(vix) == 26
     assert parse_daily_closes(read_text(INDEX))[-1] == ("2024-07-08", 24320.55)
+
+
+def test_daily_bars_keep_open_high_low():
+    first = parse_daily_bars(read_text(INDEX))[0]
+    assert (first.date, first.open, first.high, first.low, first.close) == ("2024-07-04", 24300, 24401, 24281, 24302.15)
+    closes_only = parse_daily_bars("Date,Close\n04-Jul-2024,24302.15\n")
+    assert (closes_only[0].open, closes_only[0].high, closes_only[0].low) == (None, None, None)
+
+
+def test_index_import_stores_the_day_range_and_a_closes_only_file_keeps_it(store, tmp_path):
+    store.import_index_closes(INDEX, "NIFTY")
+    bar = store.index_bar("NIFTY", "2024-07-04")
+    assert (bar.open, bar.high, bar.low, bar.close) == (24300.0, 24401.0, 24281.0, 24302.15)
+    closes = tmp_path / "closes.csv"
+    closes.write_text("Date,Close\n04-Jul-2024,24310.00\n")
+    store.import_index_closes(closes, "NIFTY")
+    store.session.expire_all()
+    bar = store.index_bar("NIFTY", "2024-07-04")
+    assert (bar.high, bar.close) == (24401.0, 24310.0)
+
+
+def test_existing_market_db_gains_new_columns(tmp_path):
+    url = f"sqlite:///{tmp_path / 'old_market.db'}"
+    old = create_engine(url)
+    with old.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE index_bars (underlying VARCHAR(32) NOT NULL, date VARCHAR(10) NOT NULL, "
+            "close FLOAT, vix FLOAT, iv_rank FLOAT, PRIMARY KEY (underlying, date))"
+        ))  # fmt: skip
+    old.dispose()
+    engine = _ready_engine(url)
+    assert {"open", "high", "low"} <= {c["name"] for c in inspect(engine).get_columns("index_bars")}
+    engine.dispose()
 
 
 def test_iv_rank_never_looks_ahead():

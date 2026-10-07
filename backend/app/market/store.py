@@ -9,14 +9,14 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, NamedTuple
 
-from sqlalchemy import Engine, func, select
+from sqlalchemy import Engine, func, inspect, select, text
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings, get_settings
 from app.db.session import engine_for
 from app.market.models import ImportFile, IndexBar, MarketBase, MarketEvent, NewsItem, OptionEod
-from app.market.nse import iv_rank_series, parse_daily_closes, parse_fo_bhavcopy, read_text
+from app.market.nse import iv_rank_series, parse_daily_bars, parse_daily_closes, parse_fo_bhavcopy, read_text
 
 BATCH = 2000  # rows per multi-row INSERT; keeps bound parameters under SQLite's limit
 
@@ -25,7 +25,21 @@ BATCH = 2000  # rows per multi-row INSERT; keeps bound parameters under SQLite's
 def _ready_engine(url: str) -> Engine:
     engine = engine_for(url, immediate=False)
     MarketBase.metadata.create_all(engine)
+    _add_missing_columns(engine)
     return engine
+
+
+def _add_missing_columns(engine: Engine) -> None:
+    """Nullable columns added to a model after its table was created. The market database has no
+    migrations: it is rebuilt from source files, and new columns fill on the next import."""
+    existing = inspect(engine)
+    with engine.begin() as conn:
+        for table in MarketBase.metadata.sorted_tables:
+            have = {c["name"] for c in existing.get_columns(table.name)}
+            for column in table.columns:
+                if column.name not in have and column.nullable:
+                    kind = column.type.compile(dialect=engine.dialect)
+                    conn.execute(text(f'ALTER TABLE "{table.name}" ADD COLUMN "{column.name}" {kind}'))
 
 
 def get_market_sessionmaker(settings: Settings | None = None) -> sessionmaker[Session]:
@@ -109,13 +123,25 @@ class MarketStore:
         return len(rows)
 
     def import_index_closes(self, path: Path, underlying: str) -> int:
+        """Daily index bars. The close always replaces what is stored; open/high/low only when the file has them."""
         sha = _sha256(path)
         if self._already_imported(sha):
             return 0
-        closes = parse_daily_closes(read_text(path))
-        rows = [{"underlying": underlying.upper(), "date": d, "close": c} for d, c in closes]
-        self._upsert(IndexBar, rows, ("close",))
-        self._record_file(path, sha, f"index:{underlying.upper()}", len(rows), [d for d, _ in closes])
+        bars = parse_daily_bars(read_text(path))
+        rows = [
+            {"underlying": underlying.upper(), "date": b.date, "close": b.close, "open": b.open, "high": b.high,
+             "low": b.low}
+            for b in bars
+        ]  # fmt: skip
+        for i in range(0, len(rows), BATCH):
+            stmt = sqlite_insert(IndexBar).values(rows[i : i + BATCH])
+            keep = {c: func.coalesce(getattr(stmt.excluded, c), getattr(IndexBar, c)) for c in ("open", "high", "low")}
+            self.session.execute(
+                stmt.on_conflict_do_update(
+                    index_elements=["underlying", "date"], set_={"close": stmt.excluded.close, **keep}
+                )
+            )
+        self._record_file(path, sha, f"index:{underlying.upper()}", len(rows), [b.date for b in bars])
         self.session.commit()
         return len(rows)
 

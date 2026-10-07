@@ -98,15 +98,10 @@ def build_prompt(
 def _call_llm(settings: Settings, system: str, user: str) -> OpinionOutput:
     """The only network call. Tests replace it."""
     from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_openai import ChatOpenAI
 
-    llm = ChatOpenAI(
-        model=settings.opinion_model,
-        api_key=settings.openai_api_key,
-        temperature=0,
-        timeout=settings.llm_opinion_timeout_s,
-        max_retries=0,
-    )
+    from app.llm import chat_model
+
+    llm = chat_model(settings, settings.opinion_model, timeout=settings.llm_opinion_timeout_s, max_retries=0)
     out = llm.with_structured_output(OpinionOutput).invoke([SystemMessage(content=system), HumanMessage(content=user)])
     return out if isinstance(out, OpinionOutput) else OpinionOutput.model_validate(out)
 

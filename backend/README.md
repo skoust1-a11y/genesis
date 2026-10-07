@@ -65,7 +65,7 @@ Humans add reviews with `POST /api/trades/{sim|live}/{trade_id}/reviews`; set `s
 
 ### Improvement flow
 
-1. During a review run the crew proposes `strategy_improvements` when a bucket of trades (IV band, DTE band, cost ratio, backtest vs forward) loses while the rest is profitable. Each proposal stores `evidence` (metrics and the exact `trade_keys`) and `proposed_change`. An LLM rationale is appended when `OPENAI_API_KEY` is set.
+1. During a review run the crew proposes `strategy_improvements` when a bucket of trades (IV band, DTE band, cost ratio, backtest vs forward) loses while the rest is profitable. Each proposal stores `evidence` (metrics and the exact `trade_keys`) and `proposed_change`. An LLM rationale is appended when the key for `LLM_PROVIDER` (`OPENAI_API_KEY` or `ANTHROPIC_API_KEY`) is set.
 2. List them: `GET /api/strategies/{id}/improvements` (each has a `status`).
 3. Decide: `POST /api/improvements/{id}/decisions` with `{"decision": "accepted" | "rejected" | "applied", "note": "..."}`. `applied` requires `"markdown"` with the edited strategy, which is saved as a new strategy version and linked via `resulting_version_id`. `rejected` and `applied` are final.
 
@@ -85,7 +85,9 @@ uv run python scripts/fetch_news.py [--nse-announcements]            # headlines
 
 ## Live trading
 
-A strategy trades only after you approve one exact version for paper or live. Each approval freezes a copy of that version and gives it its own Trade Crew. The crew decides only through the strategy's own rules, checked in code. An LLM never opens or closes a trade; with the veto explicitly enabled for a deployment, it can at most skip or shrink an entry the rules approved. Only paper trading works today: there is no real broker adapter yet.
+A strategy trades only after you approve one exact version for paper or live. Each approval freezes a copy of that version and gives it its own Trade Crew. The crew decides only through the strategy's own rules, checked in code. An LLM never opens or closes a trade; with the veto explicitly enabled for a deployment, it can at most skip or shrink an entry the rules approved.
+
+The live plumbing is broker-agnostic. The user picks a broker per account from a registry, and every live safeguard below runs against any broker that implements the adapter interface. Two brokers ship: **Paper**, with instant fills on replayed data, and **Sandbox**, a simulated broker with quotes, asynchronous and partial fills, rejections, margin and stop orders. No real broker (Zerodha, Upstox, Dhan, Angel One, ...) is included yet; adding one is a single module plus a registry entry (see [Adding a broker adapter](#adding-a-broker-adapter)).
 
 ### Strategy rules
 
@@ -104,12 +106,15 @@ rules:
   risk: {max_lots: 2, max_daily_loss_pct: 2, min_risk_reward: 0.4, max_open_positions: 1}
 ```
 
-Supported: entry fields `iv_rank`, `dte`, `spot` with `>=`, `<=`, `>`, `<`, `==`; structures `iron_condor`, `short_strangle`, `short_straddle`; exits `profit_target_pct_of_credit`, `stop_loss_pct_of_credit` (both required) and `dte_at_or_below`. Unknown fields are validation errors, never skipped. The extractor emits this block but never invents thresholds; anything it cannot express goes into Gaps. The demo strategy deliberately lacks `short_distance`, so it cannot be approved.
+Supported: entry fields `iv_rank`, `dte`, `spot` with `>=`, `<=`, `>`, `<`, `==`; structures `iron_condor`, `short_strangle`, `short_straddle`; exits `profit_target_pct_of_credit`, `stop_loss_pct_of_credit` (both required) and `dte_at_or_below`. Optional risk keys: `max_entries_per_day`; `max_consecutive_losses` with `cooldown_days` (after that many losing trades in a row, no entries that day or for the next `cooldown_days` trading days); `max_loss_pct_of_capital` (one trade's maximum loss as a % of capital, so `100` forbids risking more than the account).
+
+The same four rules can be set once for every strategy in `.env`: `MAX_ENTRIES_PER_DAY`, `MAX_CONSECUTIVE_LOSSES` with `LOSS_COOLDOWN_DAYS`, and `MAX_LOSS_PCT_OF_CAPITAL` (0 turns each off). They apply to backtests, reviews and the Trade Crew, existing strategies included, without changing any strategy's rules or hash. When a strategy also sets one, the stricter value wins: fewer entries, a shorter losing streak, a longer cooldown, a smaller loss cap. Reports record the values in `settings_snapshot.common_risk`. Unknown fields are validation errors, never skipped. The extractor emits this block but never invents thresholds; anything it cannot express goes into Gaps. The demo strategy deliberately lacks `short_distance`, so it cannot be approved.
 
 ### Approval
 
 ```
-GET  /api/live/approvals/preview?strategy_id=...&version=1   # rules, rules_sha256, blockers, verdict, warnings
+GET  /api/live/approvals/preview?strategy_id=...&version=1[&mode=live&broker_account_id=...]
+                                 # rules, rules_sha256, blockers (with mode=live: the live gates too), verdict, warnings
 POST /api/live/broker-accounts   {"broker": "paper", "account_ref_masked": "PAPER-1", "mode": "paper"}
 POST /api/live/approvals         {"strategy_id", "version", "mode": "paper"|"live", "broker_account_id",
                                   "confirm_rules_sha256",
@@ -119,6 +124,13 @@ POST /api/live/approvals/backtest {"strategy_id", "version", "risk_limits"}   # 
 ```
 
 Approval is refused unless the rules parse, Gaps is empty, `confirm_rules_sha256` matches the preview (proving you approved exactly these rules), a completed report exists for the version (a verdict other than `Profitable` needs `acknowledge_verdict: true`), `X-Actor` is set, the account mode matches, and no other deployment of the strategy is active in that mode.
+
+A **live** approval also needs an API token (see [API authentication](#api-authentication)) and passes the live gates, which the preview lists as blockers:
+
+- `LIVE_TRADING_ENABLED=true`.
+- The account's broker is registered with `live` in its modes, and every required credential resolves (database or `.env`).
+- The strategy's structure is in `LIVE_ALLOWED_STRUCTURES` (default `iron_condor`: defined risk only). Allowing `short_strangle` or `short_straddle` means changing that setting; the allowed list in force is written to the approval's audit event.
+- With `LIVE_MIN_PAPER_DAYS=N`, the same strategy version has at least N trading days (IST) of Trade Crew ticks on the **broker feed** in paper deployments that were never halted.
 
 **Backtest warning:** report verdicts come from four fixed parameter sets and a synthetic same-day outcome. They do not test the strategy's own `rules:` block, so a `Profitable` verdict is not evidence that the rules make money.
 
@@ -133,36 +145,160 @@ A newer strategy version never replaces a running deployment: stop it and approv
 ### Start, pause, stop (kill switch)
 
 ```
-POST /api/live/deployments/{id}/start   {"reason": "..."}   # needs X-Actor; from approved or paused
+POST /api/live/deployments/{id}/start   {"reason": "..."}   # needs X-Actor (live: an API token); from approved or paused
 POST /api/live/deployments/{id}/pause                       # from started
-POST /api/live/deployments/{id}/stop                        # kill switch; final
+POST /api/live/deployments/{id}/stop    {"reason", "flatten": false}   # kill switch; final
 ```
 
-The crew trades only while the latest event is `started`. `stopped` and `halted` are final. The crew halts itself if the snapshot's hashes no longer match, an order is rejected, or a tick raises an error.
+The crew trades only while the latest event is `started`. `stopped` and `halted` are final. The crew halts itself if the snapshot's hashes no longer match, an entry or exit fails, positions at the broker differ from the live database, or a tick raises an error.
+
+**Kill switch.** `stop` records the stop first, so the crew sends nothing new, then cancels the deployment's working orders at the broker. Protective stops stay in place, because they still guard any open position. With `"flatten": true` (API token required), it also closes every open position at limit prices re-priced toward the market within `MAX_SLIPPAGE_BPS`, booking each as `exit_reason = kill_switch`, then cancels the remaining stops. Flatten also works on a deployment that is already halted or stopped. If cancelling or flattening fails, the deployment stays stopped, the response's `kill_switch.error` says what failed, and an alert is sent. A halt also cancels working orders, but leaves protective stops in place. The `/deployments` page has a "Stop and flatten" button.
 
 ### Running the Trade Crew
 
 ```bash
-uv run python -m app.agents.trade_crew run --deployment ID [--interval 60] [--max-ticks N] [--explain]
+uv run python -m app.agents.trade_crew run --deployment ID [--feed replay|broker] [--interval 60] [--max-ticks N] [--explain]
+uv run python -m app.live supervise [--feed broker] [--interval 60]   # one crew per started deployment, see below
 ```
 
-Run one process per deployment, separate from the API. Every write is stamped `trade_crew/<deployment_id>`. Paper deployments use `PaperBroker` (fills LIMIT orders at the quote plus `SLIPPAGE_BPS`, charges from the cost model) and `ReplayFeed` (replays `data/sample_nifty_options.csv` one bar per tick with synthetic option quotes). Live deployments and non-paper brokers are refused until a broker adapter exists.
+Run one process per deployment, separate from the API, or let the supervisor do it. Every write is stamped `trade_crew/<deployment_id>`. The adapter comes from the account's broker in the registry (`app/brokers/registry.py`), and the market data comes from the feed:
+
+- **`--feed replay`** (default for paper) replays bars one per tick with synthetic option quotes: imported NSE data, or `data/sample_nifty_options.csv`. It is refused for live deployments.
+- **`--feed broker`** (default for live) builds each snapshot from the broker's own quotes (`QuoteSource`). It covers the nearest expiry's chain plus every held contract and prices each option at the bid/ask mid. A spread wider than `MAX_SPREAD_PCT` of the mid marks the quote stale. Lot size and freeze quantity come from the broker's instrument list. IV rank is today's India VIX quote ranked against the VIX history in the market database. A paper account on a broker with quotes (`sandbox`, or a real broker in paper mode) on this feed is "paper trading on real data": the first stage before live.
+
+`PaperBroker` fills LIMIT orders immediately at the quote plus `SLIPPAGE_BPS`, with charges from the cost model. It has no quotes, so it runs on the replay feed only.
+
+At startup, an adapter that keeps positions (anything but paper) is **reconciled**: its positions must equal the open legs of every deployment on the account in the live database. Otherwise the deployment is halted and the crew refuses to start.
 
 Each tick:
 
 1. **Verify:** recompute the frozen snapshot's `content_sha256` and `rules_sha256`; a mismatch halts the deployment.
 2. **Gate:** do nothing unless the deployment is `started`.
-3. **Observe:** take a market snapshot. One older than `MAX_SNAPSHOT_AGE_SECONDS` stops the tick.
-4. **Exits:** check each open position against the exit rules, then (only if none fired) the policy's booking and time exits. A trigger writes a close intent, sends orders and records a `LiveTrade` with gross, estimated and broker-reported costs, slippage against quotes, net and outcome. A partial booking records a `LiveTrade` with `partial = true` for the lots it closed; the rest stays open. Positions still open are written to `position_snapshots` with their marked P&L and peak profit.
-5. **Drawdown:** measure drawdown from peak equity and apply the deployment's drawdown ladder (see below). Reaching a pause level pauses the deployment and ends the tick.
-6. **Daily target:** if the policy has a daily profit target and today's P&L (realized plus open, since 00:00 UTC) has reached it, block new entries or close everything, as configured.
-7. **Entry:** skipped while the deployment holds its maximum open positions. Otherwise every entry condition must pass. Policy sizing picks the lots, then a `reduce_size` drawdown level scales them down.
-8. **Risk:** lots, risk-reward, open positions and daily loss (against capital in force) for the deployment, `PORTFOLIO_MAX_OPEN_POSITIONS` and `PORTFOLIO_MAX_DAILY_LOSS_INR` across all active deployments, `drawdown.entries_allowed`, `policy.sizing` and `policy.daily_profit_target`.
-9. **Opinion (optional):** see below. Only for entries the rules approved.
-10. **Explain (optional):** with `--explain` or `TRADE_CREW_EXPLAIN=true` and an `OPENAI_API_KEY`, an LLM appends a note to `reason_text` after the decision is made. It is never an input.
-11. **Execute:** if every check passed, a `TradeIntent` with `approval = auto` and one LIMIT order per leg. If a risk check failed, a `TradeIntent` with `approval = blocked` naming the failed rules, and no orders. A veto writes `approval = vetoed` and no orders. No entry signal writes nothing.
+3. **Market hours** (broker feed only): outside 09:15 to 15:30 IST (`MARKET_OPEN`, `MARKET_CLOSE`), on weekends and on holidays listed in `data/holidays/nse.yaml`, the tick ends with `market_closed`. Copy the dates from NSE's annual holiday circular; an unlisted holiday only shows up as stale quotes.
+4. **Observe:** take a market snapshot. One older than `MAX_SNAPSHOT_AGE_SECONDS` stops the tick.
+5. **Reconcile** (adapters that keep positions): record the status and fills of protective stops, then compare broker positions with the live database. Any difference, such as a manual trade in the account, halts the deployment with the diff and sends an alert. A protective stop that filled closes what is left of its position and books a `LiveTrade` with `exit_reason = broker_stop`. The deployment then pauses, since the crew's own stop did not act first.
+6. **Exits:** check each open position against the exit rules, then (only if none fired) the policy's booking and time exits. A trigger writes a close intent, sends orders and records a `LiveTrade` with gross, estimated and broker-reported costs, slippage against quotes, net and outcome. A partial booking records a `LiveTrade` with `partial = true` for the lots it closed; the rest stays open. Positions still open are written to `position_snapshots` with their marked P&L and peak profit.
+7. **Drawdown:** measure drawdown from peak equity and apply the deployment's drawdown ladder (see below). Reaching a pause level pauses the deployment, sends an alert and ends the tick.
+8. **Daily target:** if the policy has a daily profit target and today's P&L (realized plus open, since 00:00 UTC) has reached it, block new entries or close everything, as configured.
+9. **Entry:** skipped while the deployment holds its maximum open positions. Otherwise every entry condition must pass. Policy sizing picks the lots, then a `reduce_size` drawdown level scales them down.
+10. **Risk:** lots, risk-reward, open positions and daily loss (against capital in force) for the deployment, `PORTFOLIO_MAX_OPEN_POSITIONS` and `PORTFOLIO_MAX_DAILY_LOSS_INR` across all active deployments, `drawdown.entries_allowed`, `policy.sizing` and `policy.daily_profit_target`. It also runs **`risk.margin`** when the broker reports margin: the broker's available margin must be at least the basket's margin (hedge benefit included) times `MARGIN_BUFFER` (1.2). A broker that cannot answer fails the check; paper skips it. A shortfall records a `blocked` intent with no orders.
+11. **Opinion (optional):** see below. Only for entries the rules approved.
+12. **Explain (optional):** with `--explain` or `TRADE_CREW_EXPLAIN=true` and an LLM key, an LLM appends a note to `reason_text` after the decision is made. It is never an input.
+13. **Execute:** if every check passed, a `TradeIntent` with `approval = auto`, and its orders go through the order lifecycle below. If a risk check failed, a `TradeIntent` with `approval = blocked` naming the failed rules, and no orders. A veto writes `approval = vetoed` and no orders. No entry signal writes nothing.
+
+After every tick the crew writes a heartbeat (`crew_heartbeats`: time, feed, outcome, pid). `/api/live/deployments` reports `crew_running`, which is false when a started deployment has no heartbeat newer than `HEARTBEAT_MAX_AGE_S`, and `/deployments` shows "crew not running".
 
 Lot sizes and strike steps come from `LOT_SIZES` and `STRIKE_STEPS` (e.g. `NIFTY:75,BANKNIFTY:35`) unless the rules set `lot_size`.
+
+### Order lifecycle
+
+All orders go through `app/trading/orders.py`, for paper and live alike (`PaperBroker`'s instant fills simply pass straight through):
+
+- **Leg order:** hedges first. An entry buys its wings before selling, and an exit buys back the shorts before selling the wings, so no moment leaves a naked short.
+- **Waiting:** each order is polled (`get_order`) every `ORDER_POLL_INTERVAL_S` until it is complete, rejected or cancelled, for at most `ORDER_FILL_TIMEOUT_S`. Every status change and fill is recorded.
+- **Re-pricing:** an order still open at the timeout is cancelled. Its unfilled remainder is re-sent up to `ORDER_REPRICE_STEPS` times, each step moving the limit toward the market, never more than `MAX_SLIPPAGE_BPS` from the quote. A leg still unfilled after that is an error.
+- **Failed entry:** if any leg fails, the legs already filled are unwound with a `close` intent (`exit_reason = unwind`), then the deployment halts and an alert is sent.
+- **Failed exit:** a rejected exit order is retried `ORDER_EXIT_RETRIES` times, then the deployment halts with "position still open" and an alert. It never leaves a half-closed position silently.
+- **Limits:** orders above the instrument's freeze quantity (from the broker, else `FREEZE_QUANTITIES`) are split into whole lots. An order above `MAX_ORDER_VALUE_INR` (0 = off) is refused without being sent. At most `MAX_ORDERS_PER_MINUTE` orders are sent; SEBI's retail-algo rules cap order rates.
+
+### Protective stops at the broker
+
+With `PROTECTIVE_STOPS=live` (default; `always` also on paper, `off` never), every filled entry gets a **stop-limit (`SL`) BUY at the broker on each short leg**. It is a disaster backstop for when the crew is down or the market gaps, not the strategy's own exit:
+
+- **Trigger:** the leg's entry premium times (1 + `PROTECTIVE_STOP_MULTIPLIER` (1.5) × the strategy's `stop_loss_pct_of_credit`). For a 100% stop, that is 2.5× the premium, so the crew's own exit normally fires first.
+- **Limit:** the trigger plus `PROTECTIVE_STOP_LIMIT_BUFFER_PCT` (5%). NSE does not allow `SL-M` on index options.
+- **Records:** stops live under a `protect` intent that names the position (`risk_checks.protects`).
+- **Exits:** before any normal exit, the crew cancels the position's stops. After a partial booking it places them again for the rest.
+- **Fired stop:** a stop that fired is handled by reconciliation (step 5): the trade is booked as `broker_stop`, the deployment pauses and an alert is sent.
+- **Failed placement:** if a stop cannot be placed, the entry is unwound at once and the deployment halts.
+
+### Brokers and credentials
+
+```
+GET    /api/live/brokers                                 # registered brokers: modes, has_quotes, credential fields, configured (.env)
+GET    /api/live/broker-accounts                         # each with registered, configured and per-field source
+POST   /api/live/broker-accounts   {"broker", "mode", "account_ref_masked", "default_algo_id"}   # live: API token
+PUT    /api/live/broker-accounts/{id}/credentials   {"api_key": "...", "access_token": "..."}   # API token
+GET    /api/live/broker-accounts/{id}/credentials        # field, source (db|env), fingerprint, updated_at; never values
+DELETE /api/live/broker-accounts/{id}/credentials[?field=access_token]                         # revoke; API token
+```
+
+Creating an account is refused for a broker that is not registered or does not support the requested mode. Sandbox supports `live` only with `SANDBOX_ALLOW_LIVE=true`, which lets you exercise the live gates end to end with no money at risk.
+
+Each credential field is looked up in the database first, then in the environment:
+
+- **Database:** the latest row for the field in `broker_credentials`. Rows are append-only: saving again rotates the value, and a revoked row removes it. Values are encrypted with Fernet under `BROKER_CREDENTIALS_KEY`. Generate a key with `uv run python -c "from app.brokers.credentials import generate_key; print(generate_key())"`. Without the key, saving returns 400 and stored values are ignored.
+- **Environment:** `BROKER_<BROKER>_<FIELD>`, for example `BROKER_ZERODHA_API_KEY`, from the process environment or `.env`.
+
+API responses and audit events carry only the field name and a 12-character sha256 fingerprint, never the value. Most Indian brokers need a fresh access token every day. Paste it each morning with the `PUT` above (only the changed field) or put it in `.env`; automated login is out of scope. The deploy page (`/deploy`) has a broker picker, a mode selector, the account reference and masked inputs for each field, which show "saved" or "from .env". Live approval stays disabled while the account is not configured.
+
+### API authentication
+
+`API_TOKENS` in `.env` lists `name:sha256(token)` pairs, separated by commas. Only the hashes live there. Create a token with:
+
+```bash
+uv run python -m app.auth new-token alice   # prints the token once, and the API_TOKENS entry
+```
+
+Clients send `Authorization: Bearer <token>`. A valid token makes its name the audit actor, and `X-Actor` is then ignored. An invalid token gets 401. When `API_TOKENS` is set, every mutating request and every `/api/live` read needs a token, and `CORS_ORIGINS='*'` is refused at startup. When `API_TOKENS` is empty, research and paper flows stay open for local development, with `X-Actor` naming the actor.
+
+These actions always need a token, even with `API_TOKENS` empty; without it they return 403 "set API_TOKENS":
+
+- broker credentials (all three methods)
+- creating a live account
+- approving, starting, the LLM veto and capital events on a live deployment
+- `stop` with `flatten`
+
+The frontend stores the token in the browser's `localStorage`; enter it on `/deploy`. Static tokens suit one user or a small team on a private network; they are not a multi-user login. Expose the API publicly only behind TLS.
+
+### Supervisor and alerts
+
+```bash
+uv run python -m app.live supervise --feed broker --interval 60
+```
+
+The supervisor starts one Trade Crew subprocess per `started` deployment. It restarts a crashed crew with exponential backoff, from 5 seconds up to 5 minutes, and the restarted crew reconciles before its first tick. It terminates the crew when the deployment is paused, stopped or halted. A crew that exits cleanly, because its replay feed ran out, is not restarted. Crew output goes to `DATA_DIR/logs/crew-<deployment>.log`. Service templates are in `deploy/`: `com.genesis.supervisor.plist` for launchd (macOS) and `genesis-supervisor.service` for systemd (Linux).
+
+Alerts (`app/alerts.py`) go to Telegram (`ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELEGRAM_CHAT_ID`) and/or email (`ALERT_SMTP_HOST`, `ALERT_SMTP_PORT`, `ALERT_SMTP_USER`, `ALERT_SMTP_PASSWORD`, `ALERT_SMTP_FROM`, `ALERT_SMTP_TO`). They are sent on:
+
+- a halt, a drawdown pause, a reconciliation mismatch or a fired protective stop
+- no tick for `HEARTBEAT_MAX_AGE_S` (sent by the supervisor)
+- three crashes within an hour
+- a kill switch that could not cancel or flatten
+
+Every alert is also logged. A failed delivery is logged and never blocks trading.
+
+### Going live
+
+Live trading needs a registered live-capable broker adapter; none ships yet. With one in place:
+
+1. Import NSE data (`scripts/import_nse_eod.py`) and the holiday list (`data/holidays/nse.yaml`), then re-run the approval backtest on real history.
+2. Paper-trade on the **broker feed** for 4 to 6 weeks: a paper account on the real broker (or Sandbox), run with `--feed broker` under the supervisor. Set `LIVE_MIN_PAPER_DAYS` (for example 20) so live approval enforces this.
+3. Set `API_TOKENS`, `BROKER_CREDENTIALS_KEY` and the alert channels, and check that a test alert arrives (for example, halt a paper deployment).
+4. Go live with **1 lot**, a tight drawdown ladder, `LLM_TRADE_OPINION=off`, `PROTECTIVE_STOPS=live` and a **dedicated broker account** (reconciliation halts on any trade it did not make). Set `LIVE_TRADING_ENABLED=true`, create the live account, save the day's credentials, and approve with your SEBI algo id.
+5. Watch the first sessions on `/deployments`, and practise the kill switch ("Stop and flatten") on paper first.
+6. Scale only after live results match paper: fills, slippage and costs, not just P&L.
+
+### Adding a broker adapter
+
+One module under `app/brokers/` plus a `register(BrokerSpec(...))` in `app/brokers/registry.py`, with `name`, `label`, `modes`, `has_quotes`, `credential_fields` (and which of them are secret or required) and a factory `(credentials, settings, profile, clock, account) -> adapter`. The adapter must implement:
+
+- **`BrokerAdapter`:** `place_order` (LIMIT and stop-limit `SL` orders with a trigger price, tagged with the SEBI algo id), `cancel_order`, `order_updates`, `fills`, `positions` (net quantity per tradingsymbol) and `charges` (from contract notes where possible).
+- **`LiveBrokerAdapter`**, required for live: `reconciles = True`, `get_order` for polling, `margin_required(orders)` (basket margin with hedge benefit) and `available_margin()`.
+- **`QuoteSource`**, for the broker feed: `instruments(underlying)`, with lot size, tick size and freeze quantity; `quotes(symbols)`, with bid, ask and last; `underlying_quote`; and `vix_quote`.
+- **Mapping and statuses:** map tradingsymbols between the broker and this app's format (`NIFTY26JAN1923000CE`), and map the broker's order statuses onto `OPEN`, `TRIGGER_PENDING`, `COMPLETE`, `REJECTED` and `CANCELLED`.
+
+`app/brokers/sandbox.py` is a complete reference implementation, and `tests/test_live_plumbing.py` shows the behaviour the crew expects.
+
+### Known limitations
+
+- Protective stops are per-leg backstops set wider than the strategy's own stop, not a combined stop on the whole spread. A gap can jump past the limit price and leave the stop unfilled. The crew's own exit then closes the position on its next tick, if it is running.
+- SQLite allows one writer at a time, which slows several deployments running at once. Use Postgres for many deployments.
+- The credentials encryption key sits on the same host as the database.
+- Reconciliation halts on any manual trade in the account, so each live deployment needs a dedicated account.
+- The Sandbox broker reflects only our own assumptions about how a real broker behaves.
+- SEBI retail-algo rules beyond the algo id (static IP, exchange approval of the strategy) are not enforced.
+- Daily broker login (OAuth/TOTP) is manual: paste the access token.
 
 ### Equity, capital and drawdown
 
@@ -207,8 +343,10 @@ policy:
     trailing: {after_pct_of_credit: 25, giveback_pct: 40}
   time_exit: {days_before_expiry: 1, at: "15:00", before_events: [rbi_policy, budget], event_days_before: 1}
   daily_target: {profit_inr: 10000, on_hit: stop_new_entries}   # or close_all
+  vix_sizing: {bands: [{at_or_above: 18, size_factor: 0.5}, {at_or_above: 25, size_factor: 0.25}]}
 ```
 
+- **VIX sizing.** The highest band at or below today's India VIX multiplies lots by its `size_factor`, together with any `reduce_size` drawdown level, never below one lot. Bands must rise in VIX and fall in factor (up to 5). With no VIX reading the last band applies. Backtests use the imported VIX close; live runs use the broker's VIX quote.
 - **Sizing.** `fixed` trades `lots` (default `max_lots`). `risk_pct` and `risk_inr` trade as many lots as keep the trade's max loss within the budget, capped at `max_lots`; below `min_lots` the entry is `blocked` with `policy.sizing` failed. `risk_pct` is of capital in force. With `compounding`, `profit_share_pct` of realized net profit is added to that capital, up to `ceiling_inr`; a net loss leaves it at capital in force. A `reduce_size` drawdown level then scales the result.
 - **Booking.** Percentages are of the credit received. Every threshold must sit below the strategy's profit target, or approval is refused. A partial level closes `close_pct` of the lots opened (at least one lot, always leaving one open). `lock_in` closes the rest once profit falls back to `lock_pct_of_credit` after reaching `after_pct_of_credit`. `trailing` closes once profit gives back `giveback_pct` of its peak.
 - **Time exits.** Close the whole position `days_before_expiry` days before expiry (from `at`, IST, if set), or `event_days_before` days before a scheduled event of the listed kinds.
@@ -228,7 +366,33 @@ policy:
 
 ### Reading live data
 
-`/api/live/deployments`, `/api/live/deployments/{id}`, `/api/live/deployments/{id}/intents`, `/api/live/orders/{id}`, `/api/live/live-trades`, `/api/live/opinions`, `/api/live/opinions/evaluation`, `/api/live/phantom-trades`, `/api/live/audit` and `/api/live/audit/verify` (the live database's own hash chain). They return 503 until the live database is migrated. `app/live/store.py` is the only write path and audits every row; `app/brokers/base.py` defines the `BrokerAdapter` protocol a real broker must implement.
+`/api/live/deployments`, `/api/live/deployments/{id}`, `/api/live/deployments/{id}/intents`, `/api/live/orders/{id}`, `/api/live/live-trades`, `/api/live/opinions`, `/api/live/opinions/evaluation`, `/api/live/phantom-trades`, `/api/live/audit` and `/api/live/audit/verify` (the live database's own hash chain). They return 503 until the live database is migrated. `app/live/store.py` is the only write path and audits every row; `app/brokers/base.py` defines the `BrokerAdapter`, `LiveBrokerAdapter` and `QuoteSource` protocols a real broker must implement.
+
+### Live trading settings
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `LIVE_TRADING_ENABLED` | `false` | Master switch for live deployments |
+| `LIVE_ALLOWED_STRUCTURES` | `iron_condor` | Structures allowed live, comma-separated |
+| `LIVE_MIN_PAPER_DAYS` | `0` | Broker-feed paper days required before a live approval |
+| `SANDBOX_ALLOW_LIVE` | `false` | Lets the Sandbox broker have live accounts |
+| `SANDBOX_STATE_DIR` | `DATA_DIR/sandbox` | Sandbox orders and positions, one JSON file per account |
+| `BROKER_CREDENTIALS_KEY` | — | Fernet key for stored credentials |
+| `BROKER_<BROKER>_<FIELD>` | — | Credential fallback, e.g. `BROKER_ZERODHA_ACCESS_TOKEN` |
+| `API_TOKENS` | — | `name:sha256` pairs, comma-separated |
+| `MAX_SPREAD_PCT` | `5` | Wider bid/ask spreads mark a quote stale |
+| `ORDER_FILL_TIMEOUT_S` / `ORDER_POLL_INTERVAL_S` | `30` / `1` | How long to wait for a fill, and how often to poll |
+| `ORDER_REPRICE_STEPS` / `MAX_SLIPPAGE_BPS` | `2` / `100` | Re-prices toward the market, and how far from the quote |
+| `ORDER_EXIT_RETRIES` | `2` | Retries for a rejected exit order before halting |
+| `MAX_ORDER_VALUE_INR` | `0` (off) | Largest single order |
+| `MAX_ORDERS_PER_MINUTE` | `120` | Order rate cap |
+| `FREEZE_QUANTITIES` | `NIFTY:1800,BANKNIFTY:900` | Fallback when the broker gives none |
+| `MARKET_OPEN` / `MARKET_CLOSE` | `09:15` / `15:30` | NSE session, IST |
+| `PROTECTIVE_STOPS` | `live` | `off`, `live` or `always` |
+| `PROTECTIVE_STOP_MULTIPLIER` / `PROTECTIVE_STOP_LIMIT_BUFFER_PCT` | `1.5` / `5` | Stop trigger distance and limit buffer |
+| `MARGIN_BUFFER` | `1.2` | Available margin must exceed required × this |
+| `HEARTBEAT_MAX_AGE_S` | `180` | A started crew without a tick this long is "not running" |
+| `ALERT_TELEGRAM_*`, `ALERT_SMTP_*` | — | Alert channels |
 
 ## Tests
 
@@ -237,3 +401,17 @@ uv run pytest -q
 ```
 
 Tests run against temporary research and live SQLite files migrated with Alembic, so the triggers are exercised. They cover versioning, immutability (ORM and raw SQL), both audit chains, trade reconciliation, reviews and improvements, live-schema constraints, the journal, the API, the import script, migration drift, strategy rules, every approval refusal, and the Trade Crew (entry, profit-target and stop-loss exits, blocked intents, tampered snapshots, the kill switch, stale data, rejected orders, and identical decisions with or without the LLM explanation), position snapshots, capital events, equity and every drawdown ladder action, and the trade policy (validation, sizing and compounding, partial booking, trailing, lock-in, time and event exits, the daily target, the approval freeze, and the policy in the simulator and its backtest endpoint). They also cover the NSE importers, the day-by-day simulator and its parity with the Trade Crew, events and blackouts, news parsing and point-in-time context, and LLM opinions with a fake LLM: shadow mode never changes orders, lessons, the evaluation, the veto clamp, vetoed intents, phantom trades and the auto-revert. No test calls a real LLM.
+
+`tests/test_live_plumbing.py` runs the live plumbing against the Sandbox broker:
+
+- **Orders:** partial fill, then timeout, cancel and re-price; giving up after the re-price steps; freeze-quantity splits; the order-value cap; the rate limiter.
+- **Failures:** a rejected leg unwinds the filled ones; exit retries, then a halt.
+- **Market and margin:** reconciliation mismatches (at startup and per tick), market hours and holidays, a margin shortfall, heartbeats.
+- **Protective stops:** placed, cancelled before an exit, fired as `broker_stop`, unfilled on a gap, and a failed placement.
+- **Kill switch:** cancelling working orders and flattening.
+- **Live gates and approval:** each live-gate refusal, the structure allow-list, `LIVE_MIN_PAPER_DAYS`.
+- **Brokers and credentials:** the broker list and `configured`, rejected brokers and modes, and credential lookup order (database before `.env`, revoked values falling back, nothing secret in responses or audit events, no key means 400).
+- **Auth:** tokens and the actor, 401 and 403, the CLI.
+- **Supervisor and alerts:** restarts with backoff, missed heartbeats, alert delivery that never raises.
+
+No test touches a real broker or network.

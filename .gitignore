@@ -3,6 +3,8 @@ backend/.venv/
 backend/data/strategies/
 backend/data/reports/
 backend/data/*.db*
+backend/data/sandbox/
+backend/data/logs/
 data/*.db*
 backend/.pytest_cache/
 frontend/node_modules/

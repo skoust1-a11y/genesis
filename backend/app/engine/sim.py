@@ -33,7 +33,15 @@ from app.config import Settings
 from app.engine.costs import CostBreakdown, CostProfile, exercise_costs, leg_costs
 from app.live import drawdown
 from app.market.feed import MarketFeed, MarketSnapshot, intrinsic
-from app.strategies.rules import AccountState, Check, RiskLimits, StrategyRules, check_entry
+from app.strategies.rules import (
+    AccountState,
+    Check,
+    RiskLimits,
+    StrategyRules,
+    check_entry,
+    losing_streak_cooldown,
+    with_common_risk,
+)
 from app.strategies.schema import StrategyDocument
 from app.trading import policy as trade_policy
 from app.trading.decisions import (
@@ -49,7 +57,7 @@ from app.trading.decisions import (
     resize_proposal,
 )
 
-ENGINE_VERSION = "3"
+ENGINE_VERSION = "4"
 SCRATCH_PCT_OF_TARGET = 0.01
 BACKTEST_SHARE = 0.7
 WINDOW_END_RULE = "exit.window_end: closed at the last day of the test window"
@@ -339,15 +347,18 @@ def _split(position: _Position, lots: int) -> _Position:
 
 
 def _managed_lots(
-    rules: StrategyRules, proposal: dict, policy, capital: float, realized_net: float, size_factor: float
+    rules: StrategyRules, proposal: dict, policy, capital: float, realized_net: float, size_factor: float,
+    vix: float | None = None,
 ) -> tuple[dict, Check | None]:
-    """Policy sizing then the drawdown ladder's size factor, as in the Trade Crew's entry step."""
+    """Policy sizing then the drawdown ladder's and VIX size factors, as in the Trade Crew's entry step."""
     max_lots, check = proposal["lots"], None
     lots = max_lots
     if policy is not None and policy.sizing is not None:
         e = proposal["economics"]
         capital = trade_policy.sizing_capital(policy, capital, realized_net)
         lots, check = trade_policy.size_lots(policy.sizing, max_lots, capital, e.max_loss / max_lots if e else None)
+    if policy is not None:
+        size_factor *= trade_policy.vix_size_factor(policy.vix_sizing, vix)
     if lots:
         lots = drawdown.scaled_lots(lots, size_factor)
     lots = max(lots, 1)
@@ -371,6 +382,7 @@ def _snapshot_dict(market: MarketSnapshot) -> dict:
         "dte": market.dte,
         "expiry": market.expiry,
         "stale_quotes": len(market.stale),
+        "vix": market.vix,
     }
 
 
@@ -476,6 +488,7 @@ def simulate(
     management: Management | None = None,
 ) -> SimResult:
     """Run `rules` over `days` snapshots from `feed`, optionally under a deployment's `management`."""
+    rules = with_common_risk(rules, settings.common_risk)
     underlying = rules.instrument.underlying
     m = management
     lots = proposal_lots(rules, m.max_lots) if m and m.max_lots else scenario.lots
@@ -499,6 +512,7 @@ def simulate(
     last_market: MarketSnapshot | None = None
     last_index = 0
     first_day: str | None = None
+    day_index: dict[str, int] = {}  # market date -> trading days replayed before it
 
     def close(position: _Position, quotes: list[float], fired: Check) -> TradeResult:
         nonlocal realized
@@ -519,6 +533,7 @@ def simulate(
             continue
         first_day = first_day or market.as_of
         last_market, last_index = market, index
+        day_index.setdefault(market.as_of, len(day_index))
 
         closed_today: list[TradeResult] = []
         for position in list(open_positions):
@@ -589,16 +604,24 @@ def simulate(
                     proposal = None
                 if proposal is not None and m is not None:
                     proposal, sizing = _managed_lots(
-                        rules, proposal, policy, capital, sum(t.net for t in trades), size_factor
+                        rules, proposal, policy, capital, sum(t.net for t in trades), size_factor, market.vix
                     )
                     extra += [sizing] if sizing else []
                 if proposal is not None:
                     pnl_today = sum(t.net for t in trades if t.exit_date == market.as_of)
+                    today = day_index[market.as_of]
                     account = AccountState(
                         open_positions=len(open_positions),
                         pnl_today=pnl_today,
                         portfolio_open_positions=len(open_positions),
                         portfolio_pnl_today=pnl_today,
+                        entries_today=sum(1 for p in open_positions if p.entry_date == market.as_of)
+                        + sum(1 for t in trades if t.date == market.as_of and not t.partial),
+                        cooldown_days_left=losing_streak_cooldown(
+                            rules.risk,
+                            [(t.exit_date, t.net) for t in trades if not t.partial and t.exit_date in day_index],
+                            lambda day, today=today: today - day_index[day],
+                        ),
                     )
                     risk = entry_risk_checks(rules, limits, account, proposal) + extra
                     failed = [c.rule for c in risk if not c.passed]

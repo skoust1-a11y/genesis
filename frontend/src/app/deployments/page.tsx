@@ -13,7 +13,18 @@ type Deployment = {
   created_at: string;
   risk_limits: Record<string, unknown>;
   deployed_strategy?: { name: string; version: number };
+  crew_running: boolean;
+  last_heartbeat: { at: string; feed: string; outcome: string | null } | null;
+  last_heartbeat_age_s: number | null;
 };
+type KillSwitch = { cancelled: string[]; exits: { live_trade_id: string }[]; error: string | null };
+
+function crewLabel(d: Deployment): string {
+  if (d.status !== "started") return "—";
+  if (d.crew_running) return `running (${d.last_heartbeat?.feed} feed)`;
+  if (!d.last_heartbeat) return "crew not running";
+  return `crew not running (last tick ${Math.round((d.last_heartbeat_age_s ?? 0) / 60)} min ago)`;
+}
 type Equity = {
   capital_inr: number;
   realized_inr: number;
@@ -99,11 +110,21 @@ export default function DeploymentsPage() {
     if (selected) loadDetail(selected);
   }, [selected, loadDetail]);
 
+  const [notice, setNotice] = useState<string | null>(null);
+
   async function act(path: string, body: unknown) {
     setActor(actor.trim());
     setError(null);
+    setNotice(null);
     try {
-      await api(path, { body });
+      const out = await api<{ kill_switch?: KillSwitch }>(path, { body });
+      const ks = out.kill_switch;
+      if (ks) {
+        setNotice(
+          `Stopped. Cancelled ${ks.cancelled.length} working order(s), closed ${ks.exits.length} position(s).` +
+            (ks.error ? ` Failed: ${ks.error}` : ""),
+        );
+      }
       loadList();
       if (selected) loadDetail(selected);
     } catch (e) {
@@ -121,6 +142,7 @@ export default function DeploymentsPage() {
       </header>
 
       {error && <div className="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-900">{error}</div>}
+      {notice && <div className="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">{notice}</div>}
 
       <section className="rounded-xl border bg-white p-5 shadow-sm">
         <table className="min-w-full text-sm">
@@ -129,6 +151,7 @@ export default function DeploymentsPage() {
               <th className="py-2 pr-4">Deployment</th>
               <th className="py-2 pr-4">Mode</th>
               <th className="py-2 pr-4">Status</th>
+              <th className="py-2 pr-4">Crew</th>
               <th className="py-2 pr-4">Approved</th>
             </tr>
           </thead>
@@ -144,12 +167,15 @@ export default function DeploymentsPage() {
                 <td className="py-2 pr-4">
                   <span className={`rounded-full px-2 py-0.5 text-xs ${STATUS_CLASS[d.status] ?? ""}`}>{d.status}</span>
                 </td>
+                <td className={`py-2 pr-4 text-xs ${d.status === "started" && !d.crew_running ? "font-medium text-rose-700" : "text-zinc-600"}`}>
+                  {crewLabel(d)}
+                </td>
                 <td className="py-2 pr-4">{new Date(d.created_at).toLocaleString()}</td>
               </tr>
             ))}
             {deployments.length === 0 && (
               <tr>
-                <td className="py-3 text-zinc-500" colSpan={4}>
+                <td className="py-3 text-zinc-500" colSpan={5}>
                   No deployments yet.
                 </td>
               </tr>
@@ -179,7 +205,18 @@ export default function DeploymentsPage() {
                   {action}
                 </button>
               ))}
+              <button
+                className="rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-900 hover:bg-rose-100"
+                onClick={() => {
+                  if (window.confirm("Stop this deployment and close every open position now (needs an API token)?")) {
+                    act(`/api/live/deployments/${detail.id}/stop`, { reason: reason || "kill switch", flatten: true });
+                  }
+                }}
+              >
+                Stop and flatten
+              </button>
             </div>
+            <p className="text-xs text-zinc-500">Crew: {crewLabel(detail)}</p>
             <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-6">
               <Stat label="Capital in force" value={inr(equity.capital_inr)} />
               <Stat label="Equity" value={inr(equity.equity_inr)} />

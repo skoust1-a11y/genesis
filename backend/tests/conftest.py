@@ -22,6 +22,8 @@ from app.strategies.schema import parse_strategy_markdown
 BACKEND = Path(__file__).resolve().parents[1]
 VERSION_FIELDS = ("id", "strategy_id", "version", "markdown", "content_sha256")
 ACTOR = {"X-Actor": "alice"}
+TOKEN = "test-token-alice"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
 
 APPROVABLE_MARKDOWN = """---
 name: approvable-condor
@@ -62,6 +64,22 @@ def alembic_config(url: str, live: bool = False) -> Config:
     return cfg
 
 
+@pytest.fixture(autouse=True)
+def _code_default_settings(monkeypatch):
+    """Code defaults for settings the developer's .env commonly changes."""
+    for name, value in (
+        ("OPENAI_API_KEY", ""), ("ANTHROPIC_API_KEY", ""), ("LLM_PROVIDER", "openai"),
+        ("DEFAULT_CAPITAL_INR", "500000"), ("DEFAULT_MAX_LOTS", "2"),
+        ("PORTFOLIO_MAX_OPEN_POSITIONS", "3"), ("PORTFOLIO_MAX_DAILY_LOSS_INR", "10000"),
+        ("MAX_ENTRIES_PER_DAY", "0"), ("MAX_CONSECUTIVE_LOSSES", "0"), ("LOSS_COOLDOWN_DAYS", "0"),
+        ("MAX_LOSS_PCT_OF_CAPITAL", "0"),
+    ):  # fmt: skip
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
 @pytest.fixture
 def market_db_url(tmp_path, monkeypatch):
     url = f"sqlite:///{tmp_path / 'test_market.db'}"
@@ -86,7 +104,12 @@ def live_db_url(tmp_path, monkeypatch, market_db_url):
 def db_url(tmp_path, monkeypatch, live_db_url):
     url = f"sqlite:///{tmp_path / 'test.db'}"
     monkeypatch.setenv("DATABASE_URL", url)
-    monkeypatch.setenv("OPENAI_API_KEY", "")
+    for name in ("API_TOKENS", "BROKER_CREDENTIALS_KEY"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("LIVE_MIN_PAPER_DAYS", "0")
+    for name in ("LIVE_TRADING_ENABLED", "SANDBOX_ALLOW_LIVE"):
+        monkeypatch.setenv(name, "false")
+    monkeypatch.setenv("SANDBOX_STATE_DIR", str(tmp_path / "sandbox"))
     get_settings.cache_clear()
     command.upgrade(alembic_config(url), "head")
     yield url
@@ -145,12 +168,26 @@ def approvable(client):
     return {"strategy_id": strategy_id, "preview": preview, "report_id": review.json()["report_id"]}
 
 
-def create_account(client, mode: str = "paper", broker: str = "paper") -> dict:
+def create_account(client, mode: str = "paper", broker: str = "paper", headers: dict | None = None) -> dict:
     response = client.post(
-        "/api/live/broker-accounts", json={"broker": broker, "account_ref_masked": "PAPER-1", "mode": mode}
-    )
+        "/api/live/broker-accounts", json={"broker": broker, "account_ref_masked": "PAPER-1", "mode": mode},
+        headers=headers or {},
+    )  # fmt: skip
     assert response.status_code == 200, response.text
     return response.json()
+
+
+@pytest.fixture
+def live_env(db_url, monkeypatch):
+    """API tokens configured, live trading enabled and the sandbox broker allowed in live mode."""
+    from app.auth import hash_token
+
+    monkeypatch.setenv("API_TOKENS", f"alice:{hash_token(TOKEN)}")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("SANDBOX_ALLOW_LIVE", "true")
+    get_settings.cache_clear()
+    yield AUTH
+    get_settings.cache_clear()
 
 
 @pytest.fixture
@@ -169,11 +206,11 @@ def approval_body(approvable: dict, account: dict, **overrides) -> dict:
     } | overrides
 
 
-def approve_and_start(client, approvable: dict, account: dict, **overrides) -> str:
-    response = client.post("/api/live/approvals", json=approval_body(approvable, account, **overrides), headers=ACTOR)
+def approve_and_start(client, approvable: dict, account: dict, headers: dict = ACTOR, **overrides) -> str:
+    response = client.post("/api/live/approvals", json=approval_body(approvable, account, **overrides), headers=headers)
     assert response.status_code == 200, response.text
     deployment_id = response.json()["deployment"]["id"]
-    started = client.post(f"/api/live/deployments/{deployment_id}/start", json={"reason": "test"}, headers=ACTOR)
+    started = client.post(f"/api/live/deployments/{deployment_id}/start", json={"reason": "test"}, headers=headers)
     assert started.status_code == 200, started.text
     return deployment_id
 
@@ -307,6 +344,11 @@ def seed_live(session, version: StrategyVersion | SimpleNamespace) -> dict:
             opened_at=now, closed_at=now + timedelta(days=1), exit_reason="profit_target",
             gross=Decimal("500"), est_costs=Decimal("50"), net=Decimal("450"),
         )  # fmt: skip
+        store.add_broker_credential(
+            broker_account_id=account.id, field="api_key", ciphertext="seeded-ciphertext", fingerprint="0" * 12,
+            revoked=False,
+        )  # fmt: skip
+        store.record_heartbeat(deployment_id=deployment.id, at=now, feed="replay", outcome="idle", pid=1)
     session.commit()
     return {
         "snapshot": snapshot,

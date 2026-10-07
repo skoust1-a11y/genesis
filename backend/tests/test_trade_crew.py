@@ -9,6 +9,7 @@ from sqlalchemy import text
 from app.agents.trade_crew import graph
 from app.agents.trade_crew.graph import run_tick
 from app.agents.trade_crew.runner import build_context, run
+from app.audit import audit_context
 from app.brokers.base import OrderAck, OrderRequest
 from app.brokers.paper import PaperBroker
 from app.config import get_settings
@@ -206,8 +207,9 @@ def test_rejected_leg_halts_the_deployment(live_session, make_ctx, deployment_id
     result = run_tick(make_ctx(deployment_id, [ENTRY], adapter=adapter))
     assert result["outcome"] == "halted"
     assert "margin shortfall" in result["detail"]
-    [intent] = intents(live_session, deployment_id)
+    [intent, unwind] = intents(live_session, deployment_id)
     assert [status for _, status, _ in orders(live_session, intent.id)] == ["COMPLETE", "COMPLETE", "REJECTED"]
+    assert (unwind.action, [leg["side"] for leg in unwind.legs]) == ("close", ["SELL", "SELL"])
     assert LiveStore(live_session).deployment_status(deployment_id) == "halted"
 
 
@@ -276,17 +278,21 @@ def test_replay_feed_advances_one_bar_and_quotes_requested_contracts():
     assert feed.exhausted and feed.snapshot("NIFTY") is None
 
 
-def test_runner_refuses_live_deployments(client, approvable, live_session):
-    live_account = create_account(client, mode="live", broker="zerodha")
-    deployment_id = approve_and_start(client, approvable, live_account)
-    with pytest.raises(ValueError, match="live broker adapter"):
+def test_runner_refuses_live_deployments(client, approvable, live_session, live_env, monkeypatch):
+    live_account = create_account(client, mode="live", broker="sandbox", headers=live_env)
+    deployment_id = approve_and_start(client, approvable, live_account, headers=live_env, sebi_algo_id="ALGO-1")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "false")
+    get_settings.cache_clear()
+    with pytest.raises(ValueError, match="LIVE_TRADING_ENABLED"):
         build_context(live_session, deployment_id, get_settings())
 
 
-def test_runner_refuses_non_paper_broker(client, approvable, live_session):
-    account = create_account(client, mode="paper", broker="zerodha")
-    deployment_id = approve_and_start(client, approvable, account)
-    with pytest.raises(ValueError, match="only paper accounts"):
+def test_runner_refuses_unregistered_broker(client, approvable, live_session):
+    with audit_context("tester"):
+        account = LiveStore(live_session).create_broker_account(broker="zerodha", account_ref_masked="Z1", mode="paper")
+    live_session.commit()
+    deployment_id = approve_and_start(client, approvable, {"id": account.id, "mode": "paper"})
+    with pytest.raises(ValueError, match="no adapter is registered for broker 'zerodha'"):
         build_context(live_session, deployment_id, get_settings())
 
 

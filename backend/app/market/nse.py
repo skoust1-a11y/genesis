@@ -160,25 +160,53 @@ def _find_column(header: Iterable[str], *, exact: tuple[str, ...], contains: str
     return next((c for c in cols if contains in lowered[c]), None)
 
 
-def parse_daily_closes(text: str) -> list[tuple[str, float]]:
-    """(date, close) pairs from an NSE index or India VIX history export, oldest first."""
+@dataclass
+class DailyBar:
+    date: str
+    close: float
+    open: float | None = None
+    high: float | None = None
+    low: float | None = None
+
+
+def parse_daily_bars(text: str) -> list[DailyBar]:
+    """Daily bars from an NSE index or India VIX history export, oldest first. Open, high and low
+    are kept when the file has them; the close is required."""
     rows = _rows(text)
     if not rows:
         return []
-    date_col = _find_column(rows[0], exact=("date", "timestamp"), contains="date")
-    close_col = _find_column(rows[0], exact=("close", "closing", "close price", "closing index value"), contains="clos")
+    header = rows[0]
+    date_col = _find_column(header, exact=("date", "timestamp"), contains="date")
+    close_col = _find_column(header, exact=("close", "closing", "close price", "closing index value"), contains="clos")
     if date_col is None or close_col is None:
         raise ValueError("expected a date column and a close column")
-    out: dict[str, float] = {}
+    open_col = _find_column(
+        header, exact=("open", "open price", "open index value", "opening index value"), contains="open"
+    )
+    high_col = _find_column(header, exact=("high", "high price", "high index value"), contains="high")
+    low_col = _find_column(header, exact=("low", "low price", "low index value"), contains="low")
+    out: dict[str, DailyBar] = {}
     for row in rows:
         close = _num(row.get(close_col))
         if close is None:
             continue
         try:
-            out[parse_date(row.get(date_col, ""))] = close
+            day = parse_date(row.get(date_col, ""))
         except ValueError:
             continue
-    return sorted(out.items())
+        out[day] = DailyBar(
+            date=day,
+            close=close,
+            open=_num(row.get(open_col)) if open_col else None,
+            high=_num(row.get(high_col)) if high_col else None,
+            low=_num(row.get(low_col)) if low_col else None,
+        )
+    return [out[d] for d in sorted(out)]
+
+
+def parse_daily_closes(text: str) -> list[tuple[str, float]]:
+    """(date, close) pairs from an NSE index or India VIX history export, oldest first."""
+    return [(b.date, b.close) for b in parse_daily_bars(text)]
 
 
 def iv_rank_series(values: list[float | None], lookback: int, min_history: int) -> list[float | None]:
