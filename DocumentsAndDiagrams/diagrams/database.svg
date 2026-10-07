@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="640" viewBox="0 0 1100 640">
+  <style>
+    text { font-family: Helvetica, Arial, sans-serif; fill: #1c1917; }
+    .h { font-size: 15px; font-weight: 700; }
+    .b { font-size: 12px; }
+    .box { fill: #fff; stroke: #44403c; stroke-width: 1.2; }
+  </style>
+  <rect width="1100" height="640" fill="#fafaf9"/>
+  <text x="24" y="28" class="h">Research database</text>
+  <text x="400" y="28" class="h">Live database</text>
+  <text x="860" y="28" class="h">Market database</text>
+  <text x="24" y="48" class="b">Alembic head 0005_sim_v3. No foreign keys across the three files.</text>
+  <g font-size="12">
+    <rect class="box" x="24" y="64" width="160" height="28"/><text x="32" y="82">strategies</text>
+    <rect class="box" x="24" y="100" width="160" height="28"/><text x="32" y="118">ingest_runs</text>
+    <rect class="box" x="24" y="136" width="160" height="28"/><text x="32" y="154">strategy_versions</text>
+    <rect class="box" x="24" y="172" width="160" height="28"/><text x="32" y="190">reports</text>
+    <rect class="box" x="24" y="208" width="160" height="28"/><text x="32" y="226">simulation_runs</text>
+    <rect class="box" x="24" y="244" width="160" height="28"/><text x="32" y="262">sim_trades</text>
+    <rect class="box" x="24" y="280" width="160" height="28"/><text x="32" y="298">trade_reviews</text>
+    <rect class="box" x="24" y="316" width="160" height="28"/><text x="32" y="334">strategy_improvements</text>
+    <rect class="box" x="24" y="352" width="160" height="28"/><text x="32" y="370">improvement_decisions</text>
+    <rect class="box" x="24" y="388" width="160" height="28"/><text x="32" y="406">audit_events</text>
+    <rect class="box" x="400" y="64" width="180" height="28"/><text x="408" y="82">deployed_strategies</text>
+    <rect class="box" x="400" y="100" width="180" height="28"/><text x="408" y="118">broker_accounts</text>
+    <rect class="box" x="400" y="136" width="180" height="28"/><text x="408" y="154">deployments</text>
+    <rect class="box" x="400" y="172" width="180" height="28"/><text x="408" y="190">deployment_events</text>
+    <rect class="box" x="400" y="208" width="180" height="28"/><text x="408" y="226">trade_intents</text>
+    <rect class="box" x="400" y="244" width="180" height="28"/><text x="408" y="262">orders / events / fills</text>
+    <rect class="box" x="400" y="280" width="180" height="28"/><text x="408" y="298">live_trades</text>
+    <rect class="box" x="600" y="64" width="200" height="28"/><text x="608" y="82">capital_events</text>
+    <rect class="box" x="600" y="100" width="200" height="28"/><text x="608" y="118">drawdown_events</text>
+    <rect class="box" x="600" y="136" width="200" height="28"/><text x="608" y="154">position_snapshots</text>
+    <rect class="box" x="600" y="172" width="200" height="28"/><text x="608" y="190">live_trade_reviews</text>
+    <rect class="box" x="600" y="208" width="200" height="28"/><text x="608" y="226">trade_opinions</text>
+    <rect class="box" x="600" y="244" width="200" height="28"/><text x="608" y="262">phantom_trades</text>
+    <rect class="box" x="600" y="280" width="200" height="28"/><text x="608" y="298">broker_credentials</text>
+    <rect class="box" x="600" y="316" width="200" height="28"/><text x="608" y="334">crew_heartbeats</text>
+    <rect class="box" x="600" y="352" width="200" height="28"/><text x="608" y="370">live_audit_events</text>
+    <rect class="box" x="860" y="64" width="200" height="28"/><text x="868" y="82">index_bars</text>
+    <rect class="box" x="860" y="100" width="200" height="28"/><text x="868" y="118">option_eod</text>
+    <rect class="box" x="860" y="136" width="200" height="28"/><text x="868" y="154">import_files</text>
+    <rect class="box" x="860" y="172" width="200" height="28"/><text x="868" y="190">market_events</text>
+    <rect class="box" x="860" y="208" width="200" height="28"/><text x="868" y="226">news_items</text>
+  </g>
+  <text x="24" y="460" class="b">strategies can be updated and cannot be deleted. Every other research and live table is append-only.</text>
+  <text x="24" y="484" class="b">Live rows copy strategy id, version id, and hashes. They do not foreign-key into the research database.</text>
+  <text x="24" y="508" class="b">Market tables are rebuilt by the import scripts and are not audited. Reports store a fingerprint instead.</text>
+  <text x="24" y="532" class="b">trade_journal is a view over simulated trades. The journal API merges those rows with live_trades.</text>
+  <text x="24" y="580" class="b">Alembic live head: 0005_broker_credentials. Market tables: create_all, no Alembic revision.</text>
+</svg>

@@ -1,6 +1,10 @@
 # Trading Strategy Lab — backend
 
-FastAPI + SQLAlchemy 2 + Alembic. Every strategy, report, simulated trade, review and improvement proposal is stored in a research database; paper and live trading use a separate live database. Both are append-only, each with its own hash-chained audit log.
+FastAPI + SQLAlchemy 2 + Alembic. Every strategy, report, simulated trade, review and improvement proposal is stored in a research database; paper and live trading use a separate live database. Both are append-only, each with its own hash-chained audit log. NSE reference data is a third database and is not audited.
+
+This file is the operator guide. The component map, column-level schema, and dependency list are in [DocumentsAndDiagrams/](../DocumentsAndDiagrams/Readme.md).
+
+`Settings` in `backend/app/config.py` supplies defaults when a variable is unset. A copied `.env.example` overrides several of them (`DEFAULT_CAPITAL_INR`, `DEFAULT_MAX_LOTS`, the portfolio caps, and the common risk rules). The table is in the architecture analysis.
 
 ## Database
 

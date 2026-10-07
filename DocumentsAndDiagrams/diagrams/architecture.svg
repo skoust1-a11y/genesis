@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="620" viewBox="0 0 1100 620">
+  <style>
+    text { font-family: Helvetica, Arial, sans-serif; fill: #1c1917; }
+    .box { fill: #fff; stroke: #44403c; stroke-width: 1.5; }
+    .title { font-size: 15px; font-weight: 700; }
+    .sub { font-size: 12px; fill: #44403c; }
+    .head { font-size: 18px; font-weight: 700; }
+  </style>
+  <rect width="1100" height="620" fill="#fafaf9"/>
+  <text x="40" y="36" class="head">Trading Strategy Lab: current architecture</text>
+  <rect class="box" x="40" y="70" width="200" height="78" rx="6"/>
+  <text x="56" y="100" class="title">Next.js UI</text>
+  <text x="56" y="122" class="sub">/  /deploy  /deployments</text>
+  <rect class="box" x="320" y="70" width="220" height="78" rx="6"/>
+  <text x="336" y="100" class="title">FastAPI</text>
+  <text x="336" y="122" class="sub">/api  /api/live  /api/audit</text>
+  <rect class="box" x="620" y="60" width="220" height="70" rx="6"/>
+  <text x="636" y="88" class="title">Review Crew</text>
+  <text x="636" y="110" class="sub">LangGraph, in the API process</text>
+  <rect class="box" x="620" y="150" width="220" height="70" rx="6"/>
+  <text x="636" y="178" class="title">Trade Crew</text>
+  <text x="636" y="200" class="sub">Separate process per deployment</text>
+  <rect class="box" x="900" y="150" width="160" height="70" rx="6"/>
+  <text x="916" y="178" class="title">Supervisor</text>
+  <text x="916" y="200" class="sub">Restarts crews</text>
+  <rect class="box" x="40" y="250" width="200" height="70" rx="6"/>
+  <text x="56" y="278" class="title">Research DB</text>
+  <text x="56" y="300" class="sub">Strategies, reports, audit</text>
+  <rect class="box" x="280" y="250" width="200" height="70" rx="6"/>
+  <text x="296" y="278" class="title">Live DB</text>
+  <text x="296" y="300" class="sub">Deployments, orders, secrets</text>
+  <rect class="box" x="520" y="250" width="200" height="70" rx="6"/>
+  <text x="536" y="278" class="title">Market DB</text>
+  <text x="536" y="300" class="sub">NSE EOD, events, news</text>
+  <rect class="box" x="760" y="250" width="300" height="70" rx="6"/>
+  <text x="776" y="278" class="title">Paper or Sandbox broker</text>
+  <text x="776" y="300" class="sub">No exchange adapter in this tree</text>
+  <rect class="box" x="40" y="400" width="300" height="70" rx="6"/>
+  <text x="56" y="428" class="title">OpenAI or Anthropic</text>
+  <text x="56" y="450" class="sub">Extract, rationale, opinion, explain</text>
+  <rect class="box" x="380" y="400" width="300" height="70" rx="6"/>
+  <text x="396" y="428" class="title">Telegram or SMTP</text>
+  <text x="396" y="450" class="sub">Alerts. Unused channels stay off</text>
+  <text x="40" y="520" class="sub">The LLM does not place orders. Langfuse is named in .env.example and is not called.</text>
+  <text x="40" y="544" class="sub">vendor/TradingAgents is a reference tree. The application does not import it.</text>
+  <path d="M240 109 H320" stroke="#44403c" stroke-width="1.5" marker-end="url(#a)"/>
+  <path d="M540 100 H620" stroke="#44403c" stroke-width="1.5"/>
+  <path d="M540 160 H620" stroke="#44403c" stroke-width="1.5"/>
+  <path d="M840 185 H900" stroke="#44403c" stroke-width="1.5"/>
+  <path d="M140 148 V250" stroke="#44403c" stroke-width="1.5"/>
+  <path d="M430 148 V250" stroke="#44403c" stroke-width="1.5"/>
+  <path d="M730 220 V250" stroke="#44403c" stroke-width="1.5"/>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L6,3 L0,6 Z" fill="#44403c"/>
+    </marker>
+  </defs>
+</svg>
