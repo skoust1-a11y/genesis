@@ -1,0 +1,70 @@
+from app.db import guards  # noqa: F401  (registers append-only listeners)
+from app.db.models.core import AuditEvent, IngestRun, Report, Strategy, StrategyVersion, new_id
+from app.db.models.journal import ImprovementDecision, StrategyImprovement, TradeReview
+from app.db.models.live import (
+    LIVE_APPEND_ONLY_TABLES,
+    BrokerAccount,
+    BrokerCharge,
+    CapitalEvent,
+    DeployedStrategy,
+    Deployment,
+    DeploymentEvent,
+    DrawdownEvent,
+    Fill,
+    LiveAuditEvent,
+    LiveTrade,
+    LiveTradeReview,
+    Order,
+    OrderEvent,
+    PhantomTrade,
+    PositionSnapshot,
+    TradeIntent,
+    TradeOpinion,
+)
+from app.db.models.sim import SimTrade, SimulationRun
+
+# Research database only; the live database's list is LIVE_APPEND_ONLY_TABLES.
+APPEND_ONLY_TABLES = [
+    "ingest_runs",
+    "strategy_versions",
+    "reports",
+    "audit_events",
+    "simulation_runs",
+    "sim_trades",
+    "trade_reviews",
+    "strategy_improvements",
+    "improvement_decisions",
+]
+
+__all__ = [
+    "APPEND_ONLY_TABLES",
+    "LIVE_APPEND_ONLY_TABLES",
+    "AuditEvent",
+    "BrokerAccount",
+    "BrokerCharge",
+    "CapitalEvent",
+    "DeployedStrategy",
+    "Deployment",
+    "DeploymentEvent",
+    "DrawdownEvent",
+    "Fill",
+    "ImprovementDecision",
+    "IngestRun",
+    "LiveAuditEvent",
+    "LiveTrade",
+    "LiveTradeReview",
+    "Order",
+    "OrderEvent",
+    "PhantomTrade",
+    "PositionSnapshot",
+    "Report",
+    "SimTrade",
+    "SimulationRun",
+    "Strategy",
+    "StrategyImprovement",
+    "StrategyVersion",
+    "TradeIntent",
+    "TradeOpinion",
+    "TradeReview",
+    "new_id",
+]

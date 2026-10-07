@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8841";
+import { API } from "@/lib/api";
 
 type ReportPayload = {
   strategy_id: string;

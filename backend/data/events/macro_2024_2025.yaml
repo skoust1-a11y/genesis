@@ -1,0 +1,46 @@
+# Scheduled macro events that move NIFTY implied volatility.
+# VERIFY before relying on these: dates were entered by hand from public calendars
+# (RBI MPC schedule, Union Budget, US Federal Reserve FOMC calendar, ECI results).
+# FOMC decisions land around 23:30-00:00 IST, so they move the Indian market the next trading day.
+# Import with: uv run python scripts/import_events.py
+source: manual_macro_calendar
+events:
+  # Union Budget
+  - {date: 2024-02-01, kind: budget, title: Interim Union Budget 2024-25}
+  - {date: 2024-07-23, kind: budget, title: Union Budget 2024-25}
+  - {date: 2025-02-01, kind: budget, title: Union Budget 2025-26}
+
+  # General election results
+  - {date: 2024-06-04, kind: election, title: Lok Sabha election results}
+
+  # RBI Monetary Policy Committee decisions
+  - {date: 2024-02-08, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2024-04-05, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2024-06-07, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2024-08-08, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2024-10-09, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2024-12-06, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2025-02-07, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2025-04-09, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2025-06-06, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2025-08-06, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2025-10-01, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2025-12-05, kind: rbi_policy, title: RBI MPC decision}
+
+  # US FOMC decisions (US date)
+  - {date: 2024-01-31, kind: fomc, title: FOMC decision}
+  - {date: 2024-03-20, kind: fomc, title: FOMC decision}
+  - {date: 2024-05-01, kind: fomc, title: FOMC decision}
+  - {date: 2024-06-12, kind: fomc, title: FOMC decision}
+  - {date: 2024-07-31, kind: fomc, title: FOMC decision}
+  - {date: 2024-09-18, kind: fomc, title: FOMC decision}
+  - {date: 2024-11-07, kind: fomc, title: FOMC decision}
+  - {date: 2024-12-18, kind: fomc, title: FOMC decision}
+  - {date: 2025-01-29, kind: fomc, title: FOMC decision}
+  - {date: 2025-03-19, kind: fomc, title: FOMC decision}
+  - {date: 2025-05-07, kind: fomc, title: FOMC decision}
+  - {date: 2025-06-18, kind: fomc, title: FOMC decision}
+  - {date: 2025-07-30, kind: fomc, title: FOMC decision}
+  - {date: 2025-09-17, kind: fomc, title: FOMC decision}
+  - {date: 2025-10-29, kind: fomc, title: FOMC decision}
+  - {date: 2025-12-10, kind: fomc, title: FOMC decision}

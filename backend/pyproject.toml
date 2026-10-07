@@ -8,6 +8,7 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "alembic>=1.20.0",
     "beautifulsoup4>=4.15.0",
     "fastapi>=0.142.2",
     "httpx>=0.28.1",
@@ -20,6 +21,7 @@ dependencies = [
     "pydantic-settings>=2.15.0",
     "python-dotenv>=1.2.4",
     "pyyaml>=6.0.3",
+    "sqlalchemy>=2.0",
     "uvicorn>=0.54.0",
     "youtube-transcript-api>=1.2.4",
 ]
@@ -30,3 +32,12 @@ trading-strategy-lab-backend = "trading_strategy_lab_backend:main"
 [build-system]
 requires = ["uv_build>=0.12.23,<0.13.0"]
 build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

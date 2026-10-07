@@ -2,6 +2,9 @@
 backend/.venv/
 backend/data/strategies/
 backend/data/reports/
+backend/data/*.db*
+data/*.db*
+backend/.pytest_cache/
 frontend/node_modules/
 frontend/.next/
 **/__pycache__/

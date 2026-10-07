@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 
 import yaml
 
+from app.strategies.rules import StrategyRules, parse_rules
+
 
 @dataclass
 class StrategyDocument:
@@ -19,6 +21,14 @@ class StrategyDocument:
     @property
     def name(self) -> str:
         return str(self.frontmatter.get("name", "unnamed-strategy"))
+
+    @property
+    def rules(self) -> StrategyRules | None:
+        return parse_rules(self.frontmatter)[0]
+
+    @property
+    def rules_errors(self) -> list[str]:
+        return parse_rules(self.frontmatter)[1]
 
     @property
     def markdown(self) -> str:
