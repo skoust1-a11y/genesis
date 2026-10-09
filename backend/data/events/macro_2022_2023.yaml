@@ -1,0 +1,40 @@
+# Scheduled macro events for 2022-2023, same format as macro_2024_2025.yaml.
+# VERIFY before relying on these: entered by hand from the public RBI MPC, Union Budget and FOMC calendars.
+source: manual_macro_calendar
+events:
+  # Union Budget
+  - {date: 2022-02-01, kind: budget, title: Union Budget 2022-23}
+  - {date: 2023-02-01, kind: budget, title: Union Budget 2023-24}
+
+  # RBI Monetary Policy Committee decisions (2022-05-04 was an unscheduled hike)
+  - {date: 2022-02-10, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2022-04-08, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2022-05-04, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2022-06-08, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2022-08-05, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2022-09-30, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2022-12-07, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2023-02-08, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2023-04-06, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2023-06-08, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2023-08-10, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2023-10-06, kind: rbi_policy, title: RBI MPC decision}
+  - {date: 2023-12-08, kind: rbi_policy, title: RBI MPC decision}
+
+  # US FOMC decisions (US date)
+  - {date: 2022-01-26, kind: fomc, title: FOMC decision}
+  - {date: 2022-03-16, kind: fomc, title: FOMC decision}
+  - {date: 2022-05-04, kind: fomc, title: FOMC decision}
+  - {date: 2022-06-15, kind: fomc, title: FOMC decision}
+  - {date: 2022-07-27, kind: fomc, title: FOMC decision}
+  - {date: 2022-09-21, kind: fomc, title: FOMC decision}
+  - {date: 2022-11-02, kind: fomc, title: FOMC decision}
+  - {date: 2022-12-14, kind: fomc, title: FOMC decision}
+  - {date: 2023-02-01, kind: fomc, title: FOMC decision}
+  - {date: 2023-03-22, kind: fomc, title: FOMC decision}
+  - {date: 2023-05-03, kind: fomc, title: FOMC decision}
+  - {date: 2023-06-14, kind: fomc, title: FOMC decision}
+  - {date: 2023-07-26, kind: fomc, title: FOMC decision}
+  - {date: 2023-09-20, kind: fomc, title: FOMC decision}
+  - {date: 2023-11-01, kind: fomc, title: FOMC decision}
+  - {date: 2023-12-13, kind: fomc, title: FOMC decision}
