@@ -138,14 +138,23 @@ def _verdict_node(state: ReviewState) -> ReviewState:
         bt_ok = r["backtest"]["net_pnl"] > 0 and r["backtest"]["trades"] >= settings.verdict_min_backtest_trades
         fw_ok = r["forward"]["net_pnl"] > 0 and r["forward"]["trades"] >= settings.verdict_min_forward_trades
         r["pass_net"] = bt_ok and fw_ok
+        r["edge_before_costs"] = r["backtest"]["gross_pnl"] > 0 and r["forward"]["gross_pnl"] > 0
+        r["too_few_trades"] = (
+            r["backtest"]["trades"] < settings.verdict_min_backtest_trades
+            or r["forward"]["trades"] < settings.verdict_min_forward_trades
+        )
         if r["pass_net"]:
             passing.append(r)
+    no_edge = sum(1 for r in results if not r["edge_before_costs"])
+    thin = sum(1 for r in results if r["too_few_trades"])
     if not state["audit"]["simulatable"]:
         label = "Not executable"
     elif len(passing) == len(results) and results:
         label = "Profitable"
     elif passing:
         label = "Conditional"
+    elif results and thin == len(results):
+        label = "Too few trades"
     else:
         label = "Not profitable"
     best = max(results, key=lambda x: x["backtest"]["net_pnl"] + x["forward"]["net_pnl"], default=None)
@@ -155,6 +164,8 @@ def _verdict_node(state: ReviewState) -> ReviewState:
         "label": label,
         "scenarios_tested": len(results),
         "scenarios_passing": len(passing),
+        "scenarios_without_edge_before_costs": no_edge,
+        "scenarios_with_too_few_trades": thin,
         "data_source": data_source,
         "assumptions": [
             "Imported NSE end-of-day data." if data_source == "nse_eod"
@@ -173,6 +184,10 @@ def _verdict_node(state: ReviewState) -> ReviewState:
             f"Review Crew verdict: {label}. "
             f"{len(passing)}/{len(results)} scenarios passed net checks after costs."
         )
+        if no_edge:
+            narrative += f" {no_edge} lose money before costs: no edge to protect."
+        if thin:
+            narrative += f" {thin} have too few trades to judge."
     return {"verdict": verdict, "narrative": narrative}
 
 

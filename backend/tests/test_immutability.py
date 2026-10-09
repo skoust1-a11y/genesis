@@ -20,6 +20,8 @@ def populated(session, client, demo, live):
     )
     journal.decide(improvement.id, "rejected", note="no")
     session.commit()
+    order = {"underlying": "NIFTY", "instrument": "FUT", "side": "BUY", "lots": 1, "price": 24000}
+    assert client.post("/api/paper/orders", json=order).status_code == 200
     return demo
 
 

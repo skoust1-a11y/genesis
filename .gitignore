@@ -13,3 +13,8 @@ frontend/node_modules/
 frontend/.next/
 **/__pycache__/
 *.pyc
+graphify-out/
+.agents/
+.cursor/
+.serena/
+skills-lock.json

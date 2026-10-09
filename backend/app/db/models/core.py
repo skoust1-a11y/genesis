@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import AppendOnly, Base, NoDelete
@@ -102,3 +102,24 @@ class AuditEvent(AppendOnly, Base):
     details: Mapped[dict[str, Any]] = mapped_column(JSON)
     prev_hash: Mapped[str] = mapped_column(String(64))
     hash: Mapped[str] = mapped_column(String(64))
+
+
+class PaperOrder(AppendOnly, Base):
+    """A manual paper trade placed from the markets screen; positions are these orders netted."""
+
+    __tablename__ = "paper_orders"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    underlying: Mapped[str] = mapped_column(String(32))
+    instrument: Mapped[str] = mapped_column(String(8))  # FUT | CE | PE
+    strike: Mapped[float | None] = mapped_column(Float, nullable=True)
+    expiry: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    side: Mapped[str] = mapped_column(String(4))
+    lots: Mapped[int] = mapped_column(Integer)
+    lot_size: Mapped[int] = mapped_column(Integer)
+    price: Mapped[float] = mapped_column(Float)
+    charges: Mapped[dict[str, Any]] = mapped_column(JSON)
+    strategy_id: Mapped[str | None] = mapped_column(ForeignKey("strategies.id"), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    actor: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)

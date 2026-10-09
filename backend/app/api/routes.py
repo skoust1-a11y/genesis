@@ -25,6 +25,7 @@ from app.ingest.store import IngestRunStore
 from app.ingest.youtube import fetch_youtube_transcript
 from app.provenance import report_inputs
 from app.reports.store import ReportStore
+from app.strategies.clarify import answers_as_hints, clarifying_questions
 from app.strategies.schema import StrategyDocument, parse_strategy_markdown
 from app.strategies.store import StrategyStore
 
@@ -124,14 +125,55 @@ def ingest_and_extract(body: IngestRequest, db: Session = Depends(get_db)):
     except Exception as exc:
         _record_failed_ingest(db, source, body.hints, started, exc)
         raise
+    return _extracted(saved, run)
+
+
+def _extracted(saved, run) -> dict:
     return {
         "strategy_id": saved.strategy_id,
         "name": saved.doc.name,
         "markdown": saved.doc.markdown,
         "gaps": saved.doc.gaps,
+        "questions": clarifying_questions(saved.doc),
         "version": saved.version.version,
         "ingest_run_id": run.id,
     }
+
+
+class ClarifyRequest(BaseModel):
+    strategy_id: str
+    answers: dict[str, str]
+
+
+@router.post("/ingest/clarify")
+def clarify_and_reextract(body: ClarifyRequest, db: Session = Depends(get_db)):
+    """Re-extract the strategy from its original source with the author's answers as hints."""
+    strategies = StrategyStore(db)
+    version = or_404(strategies.latest_version, body.strategy_id)
+    if not version.ingest_run_id:
+        raise HTTPException(status_code=400, detail="This version was not ingested from a source; edit it directly")
+    if not get_settings().llm_enabled:
+        raise HTTPException(status_code=400, detail="Answering questions needs an LLM key; edit the markdown directly")
+    prior = IngestRunStore(db).get(version.ingest_run_id)
+    new_hints = answers_as_hints(clarifying_questions(parse_strategy_markdown(version.markdown)), body.answers)
+    if not new_hints:
+        raise HTTPException(status_code=400, detail="No answers given")
+    hints = "\n\n".join(h for h in (prior.hints, new_hints) if h)
+    source = {"source_type": prior.source_type, "source_url": prior.source_url, "text": prior.source_text}
+    started = utcnow()
+    try:
+        extraction = extract_strategy(source, hints=hints)
+        parse_strategy_markdown(extraction.markdown)
+        run = IngestRunStore(db).record(
+            source=source, hints=hints, started_at=started, status="completed",
+            extractor=extraction.extractor, model=extraction.model, raw_output=extraction.raw_output,
+        )  # fmt: skip
+        saved = strategies.save(extraction.markdown, strategy_id=body.strategy_id, ingest_run_id=run.id)
+        db.commit()
+    except ValueError as exc:
+        _record_failed_ingest(db, source, hints, started, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _extracted(saved, run)
 
 
 @router.get("/ingest-runs/{ingest_run_id}")
@@ -255,6 +297,7 @@ def get_strategy(strategy_id: str, db: Session = Depends(get_db)):
         "strategy_id": strategy_id,
         "markdown": doc.markdown,
         "gaps": doc.gaps,
+        "questions": clarifying_questions(doc),
         "version": version.version,
         "archived_at": strategy.archived_at,
     }
