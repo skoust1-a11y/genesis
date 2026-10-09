@@ -8,7 +8,7 @@ Factual specification of Trading Strategy Lab as implemented in this repository.
 
 **Not queried:** no live database was opened. Schema claims are in [CURRENT_DATABASE_ARCHITECTURE.md](CURRENT_DATABASE_ARCHITECTURE.md).
 
-Analysis date: 2026-10-08.
+Analysis date: 2026-10-10.
 
 ---
 
@@ -19,25 +19,25 @@ Analysis date: 2026-10-08.
 | Field | Value |
 | --- | --- |
 | Name | Next.js UI |
-| Responsibility | Lab (ingest, review, trades), deploy (policy, backtest, approval), deployments (start, pause, stop, flatten, equity, odds, floor) |
-| Technology | Next.js 15.5.27, React 19.1.0, Tailwind CSS 4 |
-| Main files | `frontend/src/app/layout.tsx`, `frontend/src/app/page.tsx`, `frontend/src/app/deploy/page.tsx`, `frontend/src/app/deployments/page.tsx`, `frontend/src/lib/api.ts`, `frontend/src/lib/policy.ts`, `frontend/src/components/*` |
+| Responsibility | Dashboard (index quotes, paper positions and orders), markets (candle charts, manual paper orders), lab (ingest, clarify, review, trades), deploy (policy, backtest, approval), deployments (start, pause, stop, flatten, equity, odds, floor) |
+| Technology | Next.js 15.5.27, React 19.1.0, Tailwind CSS 4, `lightweight-charts` 5 |
+| Main files | `frontend/src/app/layout.tsx`, `frontend/src/app/page.tsx`, `frontend/src/app/markets/page.tsx`, `frontend/src/app/lab/page.tsx`, `frontend/src/app/deploy/page.tsx`, `frontend/src/app/deployments/page.tsx`, `frontend/src/lib/api.ts`, `frontend/src/lib/market.ts`, `frontend/src/lib/policy.ts`, `frontend/src/components/*` |
 | Sync/async | Browser `fetch` |
 | Invoked by | User browser |
 | Invokes | FastAPI at `NEXT_PUBLIC_API_URL` (default `http://127.0.0.1:8841`) |
-| External deps | None |
+| External deps | None. Market data reaches the browser through FastAPI |
 | Storage | `localStorage` keys `tsl.actor` and `tsl.token` only |
 
-Routes: `/`, `/deploy`, `/deployments`. There is no login page. A Bearer token is optional until the API requires one.
+Routes: `/`, `/markets`, `/lab`, `/deploy`, `/deployments`. There is no login page. A Bearer token is optional until the API requires one.
 
 ### 2. Backend API
 
 | Field | Value |
 | --- | --- |
 | Name | FastAPI application |
-| Responsibility | HTTP API for ingest, review, journal, audit, and live trading |
+| Responsibility | HTTP API for ingest, review, journal, audit, live trading, market quotes, and manual paper orders |
 | Technology | FastAPI, Uvicorn, Pydantic v2 |
-| Main files | `backend/app/main.py`, `backend/app/api/routes.py`, `backend/app/api/journal.py`, `backend/app/api/audit.py`, `backend/app/api/live.py`, `backend/app/api/common.py` |
+| Main files | `backend/app/main.py`, `backend/app/api/routes.py`, `backend/app/api/journal.py`, `backend/app/api/audit.py`, `backend/app/api/live.py`, `backend/app/api/market.py`, `backend/app/api/common.py` |
 | Sync/async | Synchronous route handlers. Review and approval backtests run inside the request |
 | Invoked by | The UI and operators (`GET /api/health`) |
 | Invokes | Stores and crews listed below |
@@ -57,8 +57,8 @@ There is no rate limit, idempotency key, or HTTPS redirect middleware.
 | Name | Strategy ingest |
 | Responsibility | Fetch source text and extract a strategy Markdown document |
 | Technology | `youtube-transcript-api`, `httpx`, BeautifulSoup with the `lxml` parser, LangChain chat models |
-| Main files | `backend/app/ingest/youtube.py`, `instagram.py`, `doc.py`, `store.py`, `backend/app/extract/extractor.py` |
-| Invoked by | `POST /api/ingest/extract` and `POST /api/demo/run` |
+| Main files | `backend/app/ingest/youtube.py`, `instagram.py`, `doc.py`, `store.py`, `backend/app/extract/extractor.py`, `backend/app/strategies/clarify.py` |
+| Invoked by | `POST /api/ingest/extract`, `POST /api/ingest/clarify`, and `POST /api/demo/run` |
 | External deps | YouTube, Instagram, or the document URL when those source types are used. OpenAI or Anthropic when `LLM_PROVIDER`'s key is set |
 | Database | `ingest_runs`, then `strategies` and `strategy_versions` |
 
@@ -120,7 +120,20 @@ Node order, stopping early when a node sets `stop`: `verify` → `gate` → `hou
 | Writers | `backend/scripts/import_nse_eod.py`, `import_events.py`, `fetch_news.py` |
 | Database | `MARKET_DATABASE_URL` (default `sqlite:///data/market_eod.db`). Not audited. Created with `create_all`, not Alembic |
 
-### 9. LLM
+### 9. Markets and manual paper orders
+
+| Field | Value |
+| --- | --- |
+| Name | Market screen backend |
+| Responsibility | Delayed quotes and candles for indices, NSE stocks, and global commodity futures. Manual paper orders with Indian charges, and positions netted from those orders |
+| Main files | `backend/app/api/market.py`, `backend/app/paper.py` |
+| Invoked by | `/`, `/markets` |
+| External deps | Yahoo Finance's unofficial chart API over `httpx`. Delayed, no MCX data, can change without notice |
+| Database | `paper_orders` in the research database (append-only). Quotes and candles are not stored |
+
+Paper orders are separate from the Trade Crew and from `orders` in the live database. Commodities are view-only. Stocks trade as shares (`EQ`) only. Index orders are `FUT`, `CE`, or `PE` and need a lot size from `LOT_SIZES`. Charges use the cost profile with slippage 0; futures and delivery equity use fixed FY2025-26 rates in `backend/app/paper.py`. Positions mark shares and futures at the latest quote, with index spot as the futures proxy. Options are not marked.
+
+### 10. LLM
 
 | Field | Value |
 | --- | --- |
@@ -132,7 +145,7 @@ Node order, stopping early when a node sets `stop`: `verify` → `gate` → `hou
 
 `LLM_TRADE_OPINION` is `off`, `shadow`, or `veto`. Veto is also enabled per deployment and can only skip or reduce lots. Live accounts stay refused unless `LLM_VETO_LIVE_ALLOWED=true`.
 
-### 10. Auth
+### 11. Auth
 
 | Field | Value |
 | --- | --- |
@@ -144,7 +157,7 @@ Node order, stopping early when a node sets `stop`: `verify` → `gate` → `hou
 
 There is no user table and no OAuth login.
 
-### 11. Alerts
+### 12. Alerts
 
 | Field | Value |
 | --- | --- |
@@ -157,13 +170,15 @@ There is no user table and no OAuth login.
 
 ## 2. Frontend architecture
 
-The root layout in `frontend/src/app/layout.tsx` renders three links: Trading Strategy Lab (`/`), Deploy (`/deploy`), Deployments (`/deployments`).
+The root layout in `frontend/src/app/layout.tsx` renders five links: Dashboard (`/`), Markets (`/markets`), Strategy Lab (`/lab`), Deploy (`/deploy`), Deployments (`/deployments`).
 
 `frontend/src/lib/api.ts` sends `Authorization: Bearer` when `tsl.token` is set, and `X-Actor` when `tsl.actor` is set. HTTP 401 and 403 become `AuthError`.
 
 | Page | What it calls |
 | --- | --- |
-| `/` | Ingest, demo, review run, strategy and report reads, trade list |
+| `/` | Index quotes, paper positions and orders. An exit link opens `/markets` with the closing order pre-filled |
+| `/markets` | Quotes, candles with previous-day and pivot levels (`CandleChart`), paper order placement, positions and orders |
+| `/lab` | Ingest, clarifying questions and re-extract, demo, review run, strategy and report reads, trade list |
 | `/deploy` | Broker list and accounts, credential save, approval preview, rules-only versus policy backtest, approval. Form covers sizing, compounding, booking, time and event exits, daily target, VIX sizing, withdrawal, odds gate, drawdown ladder, and capital floor |
 | `/deployments` | List, start, pause, stop, stop-and-flatten, equity, positions, capital events, drawdown, money (floor and withdrawal), odds |
 
@@ -179,10 +194,13 @@ Routers are mounted with no extra prefix beyond the one on each router.
 | Journal | `/api` | `backend/app/api/journal.py` |
 | Research audit | `/api/audit` | `backend/app/api/audit.py` |
 | Live | `/api/live` | `backend/app/api/live.py` |
+| Market and paper | `/api` | `backend/app/api/market.py` |
 
-Lab and journal routes include `GET /api/health`, `POST /api/ingest/extract`, `GET /api/ingest-runs/{id}`, `POST /api/review/run`, `POST /api/demo/run`, strategy and report reads, `POST /api/strategies/{id}/archive`, trade CSV, `GET /api/journal`, trade reviews, and improvement decisions.
+Lab and journal routes include `GET /api/health`, `POST /api/ingest/extract`, `POST /api/ingest/clarify`, `GET /api/ingest-runs/{id}`, `POST /api/review/run`, `POST /api/demo/run`, strategy and report reads, `POST /api/strategies/{id}/archive`, trade CSV, `GET /api/journal`, trade reviews, and improvement decisions.
 
 Live routes include brokers, broker accounts, credentials, approval preview, approval backtest, approval, deployment start/pause/stop, capital events, llm-veto, equity, positions, orders, live trades, opinions, phantom trades, and the live audit chain. The live read routes return 503 until `alembic -n live upgrade head` has been applied.
+
+Market and paper routes are `GET /api/market/quotes` (up to 40 symbols), `GET /api/market/candles` (`1m`, `5m`, `15m`, `60m`, `1d`), `POST /api/paper/orders`, `GET /api/paper/orders`, and `GET /api/paper/positions`. Quotes and candles return 400 for an unknown symbol, and candles return 502 when Yahoo is unreachable.
 
 OpenAPI is the FastAPI default at `/docs`. There is no separate contract file.
 
@@ -195,6 +213,8 @@ OpenAPI is the FastAPI default at `/docs`. There is no separate contract file.
 3. `extract_strategy` calls the chat model when a key is configured. Otherwise the demo path can use the fixture extractor.
 4. `IngestRunStore` inserts `ingest_runs` (extractor, model, raw output, status).
 5. A successful extract parses Markdown into a `StrategyDocument` and inserts `strategies` plus `strategy_versions`.
+6. The response, and `GET /api/strategies/{id}`, include `questions` from `clarifying_questions`. Required questions cover a missing underlying, structure, entry, stop, target, max lots, or a rule error. Optional ones cover event blackouts, a VIX range, daily entry and loss limits, and each Gap.
+7. `POST /api/ingest/clarify` turns the author's answers into hints, appends them to the original run's hints, re-extracts from the stored source, and saves a new strategy version. It returns 400 when the version was not ingested from a source, when no LLM key is set, or when no answer was given.
 
 The extractor emits a `rules:` block and does not invent thresholds. Unexpressed rules go into Gaps.
 
@@ -209,6 +229,8 @@ The extractor emits a `rules:` block and does not invent thresholds. Unexpressed
 5. Simulation runs and `sim_trades` are inserted. Reviews and improvements are inserted in the same research transaction path as the report store.
 
 The hard-stop sweep does not change `verdict_label`.
+
+`verdict_label` is one of `Not executable`, `Profitable` (every scenario passes net checks), `Conditional` (some pass), `Too few trades` (none pass and every scenario is below `VERDICT_MIN_BACKTEST_TRADES` or `VERDICT_MIN_FORWARD_TRADES`), or `Not profitable`. The verdict also counts scenarios that lose money before costs and scenarios with too few trades, and the narrative names both.
 
 ---
 
@@ -271,7 +293,7 @@ Three SQLite files by default, all relative to `backend/` when the URL is `sqlit
 
 | Database | Setting | Migrations | Audit |
 | --- | --- | --- | --- |
-| Research | `DATABASE_URL` | `backend/alembic`, head `0005_sim_v3` | Hash-chained `audit_events` |
+| Research | `DATABASE_URL` | `backend/alembic`, head `0006_paper_orders` | Hash-chained `audit_events` |
 | Live | `LIVE_DATABASE_URL` | `backend/alembic_live`, head `0005_broker_credentials` | Hash-chained `live_audit_events` |
 | Market | `MARKET_DATABASE_URL` | None (`create_all`) | None. Reports store a fingerprint of imported inputs |
 
@@ -315,6 +337,8 @@ Local ports used by the root README: API `8841`, UI `8842`. `npm run dev` with n
 | Review Crew | Present | `backend/app/agents/review_crew/graph.py` |
 | Trade Crew | Present | `backend/app/agents/trade_crew/graph.py` |
 | Paper broker | Present | `backend/app/brokers/paper.py` |
+| Manual paper orders | Present | `backend/app/api/market.py`, `backend/app/paper.py` |
+| Real-time or MCX market data | Absent | Quotes come from Yahoo, delayed. Commodities are global futures in USD |
 | Sandbox broker | Present | `backend/app/brokers/sandbox.py` |
 | Exchange broker adapter | Absent | `registry.py` registers only `paper` and `sandbox` |
 | TradingAgents package at runtime | Absent | No import from `vendor/` under `backend/app` |
@@ -329,11 +353,15 @@ Local ports used by the root README: API `8841`, UI `8842`. `npm run dev` with n
 
 ### Lab
 
-Browser → `POST /api/ingest/extract` or `POST /api/demo/run` → ingest row and strategy version → `POST /api/review/run` → Review Crew → report, simulations, trades, reviews, improvements → `GET /api/journal`.
+Browser → `POST /api/ingest/extract` or `POST /api/demo/run` → ingest row and strategy version → optional `POST /api/ingest/clarify` → new ingest row and strategy version → `POST /api/review/run` → Review Crew → report, simulations, trades, reviews, improvements → `GET /api/journal`.
 
 ### Approve and paper-trade
 
 Browser → `POST /api/live/approvals/backtest` (optional) → `POST /api/live/approvals` → `deployed_strategies` and `deployments` in the live database, plus a research audit event → `POST /api/live/deployments/{id}/start` → supervisor or a manual crew process → ticks → intents, orders, fills, live trades, heartbeats.
+
+### Manual paper trade
+
+Browser on `/markets` → `GET /api/market/candles` → FastAPI → Yahoo → `POST /api/paper/orders` → `paper_orders` row with charges, plus a `paper.order_placed` audit event → `GET /api/paper/positions` → positions netted from orders and marked at the latest quote.
 
 ### Kill switch
 
@@ -353,6 +381,7 @@ Browser → `POST /api/live/approvals/backtest` (optional) → `POST /api/live/a
 | Trade Crew | Market database | Previous range, VIX history, holidays |
 | Trade Crew | Broker adapter | `BrokerAdapter` / `QuoteSource` from the registry |
 | Supervisor | Trade Crew | Subprocess |
+| FastAPI market routes | Yahoo Finance | HTTPS via `httpx`, per request, not cached |
 | Alerts | Telegram or SMTP | HTTP or SMTP, only when configured |
 | LLM factory | OpenAI or Anthropic | HTTPS via LangChain clients |
 
@@ -372,10 +401,12 @@ flowchart LR
   MKT[(Market DB)]
   BR[Paper or Sandbox]
   LLM[OpenAI or Anthropic]
+  YF[Yahoo Finance]
 
   UI --> API
   API --> RES
   API --> LIVE
+  API --> YF
   API --> RC
   RC --> RES
   RC --> MKT
@@ -418,7 +449,9 @@ Any node from `verify` through `entry` can stop the tick before the later nodes 
 | Trade graph nodes | `backend/app/agents/trade_crew/graph.py` |
 | Broker names | `backend/app/brokers/registry.py` |
 | Settings | `backend/app/config.py`, `.env.example` |
-| Research head revision | `backend/alembic/versions/0005_sim_v3.py` |
+| Research head revision | `backend/alembic/versions/0006_paper_orders.py` |
+| Market and paper routes | `backend/app/api/market.py`, `backend/app/paper.py` |
+| Clarifying questions | `backend/app/strategies/clarify.py` |
 | Live head revision | `backend/alembic_live/versions/0005_broker_credentials.py` |
 | Market `create_all` | `backend/app/market/store.py` |
 | UI routes | `frontend/src/app/layout.tsx` |

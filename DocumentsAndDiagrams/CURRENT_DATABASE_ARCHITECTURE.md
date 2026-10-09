@@ -2,13 +2,13 @@
 
 Schema of Trading Strategy Lab as created by the current ORM and migrations. No live database was opened. Where a comment in an older migration describes tables that `0004_split_live` drops, the head revision is the applied schema.
 
-Analysis date: 2026-10-08.
+Analysis date: 2026-10-10.
 
 There are three databases. They do not share foreign keys.
 
 | Database | URL setting | Default | Schema source | Bookkeeping |
 | --- | --- | --- | --- | --- |
-| Research | `DATABASE_URL` | `sqlite:///data/genesis.db` | Alembic `backend/alembic`, head `0005_sim_v3` | `alembic_version` |
+| Research | `DATABASE_URL` | `sqlite:///data/genesis.db` | Alembic `backend/alembic`, head `0006_paper_orders` | `alembic_version` |
 | Live | `LIVE_DATABASE_URL` | `sqlite:///data/genesis_live.db` | Alembic `backend/alembic_live`, head `0005_broker_credentials` | `alembic_version` in that file |
 | Market | `MARKET_DATABASE_URL` | `sqlite:///data/market_eod.db` | `MarketBase.metadata.create_all` in `backend/app/market/store.py` | None |
 
@@ -30,7 +30,7 @@ There are three databases. They do not share foreign keys.
 
 ### Research revision chain
 
-`0001_core_sim` → `0002_live_schema` → `0003_journal` → `0004_split_live` → `0005_sim_v3`.
+`0001_core_sim` → `0002_live_schema` → `0003_journal` → `0004_split_live` → `0005_sim_v3` → `0006_paper_orders`.
 
 `0002_live_schema` created live tables inside the research database. `0004_split_live` drops them. It aborts if any of those tables still has rows. After head, live tables exist only in the live database.
 
@@ -73,6 +73,7 @@ Class:
 | `trade_reviews` | `TradeReview` | `0003` | `0004` restricts to `trade_kind = 'sim'` | CORE | Reviews of simulated trades |
 | `strategy_improvements` | `StrategyImprovement` | `0003` | — | CORE | Proposed change with evidence |
 | `improvement_decisions` | `ImprovementDecision` | `0003` | — | CORE | Accept, reject, or apply |
+| `paper_orders` | `PaperOrder` | `0006` | — | CORE | One manual paper order from the markets screen |
 | `trade_journal` | — | `0003`, rebuilt in `0004` | — | VIEW | Sim trades joined for `GET /api/journal` |
 
 ### Live (`LiveBase`)
@@ -316,6 +317,27 @@ Check `sim_trade_only`: `trade_kind = 'sim' AND sim_trade_id IS NOT NULL`.
 | `note` | text | yes | |
 | `resulting_version_id` | int | yes | FK `strategy_versions.id`. Set when applied |
 | `decided_by` | str128 | no | |
+| `created_at` | ts | no | |
+
+### `paper_orders`
+
+Positions are not stored. `GET /api/paper/positions` nets these rows by contract.
+
+| Column | Type | Null | Notes |
+| --- | --- | --- | --- |
+| `id` | str36 | no | PK |
+| `underlying` | str32 | no | Upper-cased symbol |
+| `instrument` | str8 | no | `EQ`, `FUT`, `CE`, or `PE` |
+| `strike` | float | yes | Options only |
+| `expiry` | str10 | yes | `YYYY-MM-DD` |
+| `side` | str4 | no | `BUY` or `SELL` |
+| `lots` | int | no | Shares for `EQ` |
+| `lot_size` | int | no | 1 for `EQ`, else from `LOT_SIZES` |
+| `price` | float | no | Price the user typed |
+| `charges` | json | no | Cost breakdown plus `total` |
+| `strategy_id` | str36 | yes | FK `strategies.id` |
+| `note` | text | yes | |
+| `actor` | str128 | no | |
 | `created_at` | ts | no | |
 
 ### `audit_events` and `live_audit_events`
@@ -677,6 +699,7 @@ Research, from child to parent:
 - `strategy_improvements.report_id` → `reports`
 - `improvement_decisions.improvement_id` → `strategy_improvements`
 - `improvement_decisions.resulting_version_id` → `strategy_versions`
+- `paper_orders.strategy_id` → `strategies`
 
 Live, from child to parent:
 
@@ -742,6 +765,8 @@ The Trade Crew recomputes both hashes from the frozen row and halts on a mismatc
 | Data | Where it lives |
 | --- | --- |
 | Strategy text and review history | Research |
+| Manual paper orders | Research (`paper_orders`). Not the live `orders` table |
+| Delayed quotes and candles | Not stored. Fetched from Yahoo per request |
 | Orders, fills, positions, credentials | Live |
 | NSE closes, events, headlines | Market |
 | Original video or HTML bytes | Not stored. Extracted text is on `ingest_runs.source_text` |
@@ -763,6 +788,7 @@ erDiagram
   sim_trades ||--o{ trade_reviews : reviewed
   strategies ||--o{ strategy_improvements : proposes
   strategy_improvements ||--o{ improvement_decisions : decided
+  strategies |o--o{ paper_orders : tags
 ```
 
 ```mermaid
@@ -793,7 +819,7 @@ erDiagram
 | Live models | `backend/app/db/models/live.py` |
 | Market models | `backend/app/market/models.py` |
 | Append-only and no-delete | `backend/app/db/base.py`, `guards.py`, `triggers.py` |
-| Research head | `backend/alembic/versions/0005_sim_v3.py` |
+| Research head | `backend/alembic/versions/0006_paper_orders.py` |
 | Live split | `backend/alembic/versions/0004_split_live.py` |
 | Live head | `backend/alembic_live/versions/0005_broker_credentials.py` |
 | Money and timestamps | `backend/app/db/types.py` |

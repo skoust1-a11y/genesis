@@ -2,13 +2,15 @@
 
 Functional specification, implementation, deployment, and testing
 
-Final project report | Version 1.0 | 8 October 2026
+Final project report | Version 1.1 | 10 October 2026
 
 ## Executive summary
 
 Trading Strategy Lab turns a strategy write-up into a versioned Markdown document, reviews it with Indian options charges, and trades only a frozen copy of a version a person has approved. The Review Crew runs inside the API. The Trade Crew runs as a separate process. Paper and Sandbox are the broker adapters in this repository. No exchange broker ships here.
 
-Three databases keep the records. The research database stores strategies, reports, simulated trades, reviews, and a hash-chained audit log. The live database stores approvals, orders, fills, credentials, and its own audit log. The market database stores NSE end-of-day prices, events, and headlines, and it is not audited.
+A markets screen shows delayed quotes and candle charts from Yahoo Finance and accepts manual paper orders with Indian charges. Those orders are separate from the Trade Crew.
+
+Three databases keep the records. The research database stores strategies, reports, simulated trades, reviews, manual paper orders, and a hash-chained audit log. The live database stores approvals, orders, fills, credentials, and its own audit log. The market database stores NSE end-of-day prices, events, and headlines, and it is not audited.
 
 An LLM may extract a strategy, explain a proposal, or comment on an entry the rules already approved. It does not open or close a trade. A veto, when explicitly enabled, can only skip or shrink that entry.
 
@@ -53,7 +55,7 @@ The objectives are an auditable version history, a costed review, and orders tha
 | ID | Function | Required behaviour |
 | --- | --- | --- |
 | FR01 | Ingest | Accept youtube, instagram, document (HTML), notebooklm, or markdown. Reject PDF URLs. |
-| FR02 | Extract | Produce Markdown with a `rules:` block. Unexpressed rules go into Gaps. Do not invent thresholds. |
+| FR02 | Extract | Produce Markdown with a `rules:` block. Unexpressed rules go into Gaps. Do not invent thresholds. Return clarifying questions; answers re-extract from the stored source into a new version. |
 | FR03 | Review | Run audit, scenarios, simulation, hard-stop sweep, per-trade review, verdict, and improvements. |
 | FR04 | Journal | List simulated and live trades with entry reason, target, net, and outcome. |
 | FR05 | Improvements | Record accepted, rejected, or applied. Applied saves a new strategy version. |
@@ -62,8 +64,9 @@ The objectives are an auditable version history, a costed review, and orders tha
 | FR08 | Trade | Tick only while the deployment is started. Rules in code decide entries and exits. |
 | FR09 | Kill switch | Stop first, then cancel working orders. Flatten, which closes positions, requires an API token. |
 | FR10 | Audit | Append a hash-chained event for research writes and for live writes. Expose a verify route for each chain. |
+| FR11 | Markets | Show delayed quotes and candles. Place manual paper orders with charges and net them into positions. Commodities are view-only. |
 
-The lab page is `/`. Deploy is `/deploy`. Deployments is `/deployments`.
+The dashboard is `/`. Markets is `/markets`. The lab is `/lab`. Deploy is `/deploy`. Deployments is `/deployments`.
 
 ## 3 Security and interface contracts
 
@@ -83,10 +86,14 @@ Broker secrets are Fernet ciphertext under `BROKER_CREDENTIALS_KEY`. API respons
 | --- | --- |
 | GET /api/health | Liveness. |
 | POST /api/ingest/extract | Extract a strategy and store the ingest run. |
+| POST /api/ingest/clarify | Re-extract with the author's answers. Needs an LLM key and an ingested version. |
 | POST /api/review/run | Run the Review Crew and store the report. |
 | POST /api/demo/run | Run the bundled fixture. |
 | GET /api/journal | Merge simulated and live trades. |
 | GET /api/audit/verify | Recompute the research hash chain. |
+| GET /api/market/quotes, GET /api/market/candles | Delayed Yahoo data. 400 for an unknown symbol. |
+| POST /api/paper/orders | Record a manual paper order with charges. |
+| GET /api/paper/positions | Positions netted from paper orders, marked at the latest quote. |
 | GET /api/live/approvals/preview | Rules, hash, blockers, verdict. |
 | POST /api/live/approvals/backtest | Rules only versus rules with policy and ladder. |
 | POST /api/live/approvals | Freeze the version and create the deployment. |
@@ -98,7 +105,7 @@ Live reads return 503 until `alembic -n live upgrade head` has been applied. The
 
 ## 4 System architecture
 
-The browser talks only to FastAPI. The Review Crew runs in that process. The Trade Crew does not. A supervisor starts one crew subprocess per started deployment.
+The browser talks only to FastAPI. FastAPI fetches quotes and candles from Yahoo Finance per request. The Review Crew runs in that process. The Trade Crew does not. A supervisor starts one crew subprocess per started deployment.
 
 ![Architecture](diagrams/architecture.svg)
 
@@ -115,10 +122,11 @@ Research, live, and market data are three databases. Approval copies the strateg
 | SQLAlchemy 2 and Alembic | Research and live schemas. Market tables use `create_all` |
 | LangGraph | Review Crew and Trade Crew graphs |
 | LangChain OpenAI or Anthropic | The one provider selected by `LLM_PROVIDER` |
-| HTTPX, Beautiful Soup, lxml | HTML ingest |
+| HTTPX, Beautiful Soup, lxml | HTML ingest. HTTPX also fetches Yahoo market data |
 | youtube-transcript-api | YouTube transcripts |
 | cryptography | Fernet for broker credentials |
-| Next.js 15, React 19, Tailwind 4 | Lab, deploy, and deployments pages |
+| Next.js 15, React 19, Tailwind 4 | Dashboard, markets, lab, deploy, and deployments pages |
+| lightweight-charts | Candle charts on the markets page |
 | pytest | Backend tests. No test calls a real LLM or a real broker |
 
 There is no vector store, no Auth0, and no separate metrics service.
@@ -127,7 +135,7 @@ There is no vector store, no Auth0, and no separate metrics service.
 
 ![Workflows](diagrams/workflow.svg)
 
-Review order is fixed: audit, scenarios, simulate, hard-stop sweep, trade review, verdict, improve. The sweep can propose a capital stop. It does not set `verdict_label`.
+Review order is fixed: audit, scenarios, simulate, hard-stop sweep, trade review, verdict, improve. The sweep can propose a capital stop. It does not set `verdict_label`. The label is `Not executable`, `Profitable`, `Conditional`, `Too few trades`, or `Not profitable`.
 
 A Trade Crew tick verifies the frozen hashes, checks that the deployment is started, checks market hours on the broker feed, observes, reconciles, exits, applies drawdown and the capital floor, then considers an entry. Once an entry is reached, risk, opinion, explain, and execute all run. Opinion changes lots only in veto mode, and only downward.
 
@@ -141,7 +149,7 @@ Orders go through `backend/app/trading/orders.py` for paper and live. Hedges are
 
 ![Databases](diagrams/database.svg)
 
-Research head is Alembic `0005_sim_v3`. Live head is `0005_broker_credentials`. The market database has no Alembic revision. Column definitions are in `CURRENT_DATABASE_ARCHITECTURE.md`.
+Research head is Alembic `0006_paper_orders`. Live head is `0005_broker_credentials`. The market database has no Alembic revision. Column definitions are in `CURRENT_DATABASE_ARCHITECTURE.md`.
 
 ## 9 Data model and lifecycle
 
@@ -150,6 +158,7 @@ Research head is Alembic `0005_sim_v3`. Live head is `0005_broker_credentials`. 
 | strategies, strategy_versions, ingest_runs | Identity, immutable text, extract record |
 | reports, simulation_runs, sim_trades | One review and its trades |
 | trade_reviews, strategy_improvements, improvement_decisions | Reviews and human decisions |
+| paper_orders | Manual paper orders from the markets screen |
 | audit_events | Research hash chain |
 | deployed_strategies, deployments, deployment_events | Frozen approval and status |
 | trade_intents, orders, order_events, fills, live_trades | Decisions and broker activity |
@@ -203,6 +212,7 @@ The automated suite is `uv run pytest` in `backend/`. Tests migrate temporary SQ
 | Area | What the tests cover |
 | --- | --- |
 | Research schema | Versioning, immutability, audit chain, journal, import |
+| Markets and clarify | Yahoo parsing, paper charges and netting, clarifying questions |
 | Review | Rules, costs, hard-stop sweep, improvements |
 | Trade Crew | Entry, exits, blocked intents, tampered snapshots, kill switch |
 | Money | Drawdown ladder, capital floor, withdrawal, odds gate, policy |
@@ -236,6 +246,7 @@ These are code gates. They are not measured latency or accuracy percentages.
 - Daily broker login is manual.
 - Langfuse is not integrated.
 - PDF ingest is rejected.
+- Market quotes come from Yahoo's unofficial API. They are delayed, can break without notice, and have no MCX data. Paper option positions are not marked.
 
 ### Source register
 
@@ -251,4 +262,4 @@ These are code gates. They are not measured latency or accuracy percentages.
 | diagrams/workflow.svg | Section 6 |
 | diagrams/database.svg | Section 8 |
 
-Analysis date: 8 October 2026. Schema claims come from the ORM and the Alembic heads. No live database was opened to produce this report.
+Analysis date: 10 October 2026. Schema claims come from the ORM and the Alembic heads. No live database was opened to produce this report.

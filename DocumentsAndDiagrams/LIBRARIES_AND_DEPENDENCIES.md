@@ -4,7 +4,7 @@ Libraries and external services Trading Strategy Lab actually uses. Each entry w
 
 Application code was not changed to produce this document.
 
-Analysis date: 2026-10-08.
+Analysis date: 2026-10-10.
 
 ## 1. Overview
 
@@ -36,7 +36,7 @@ Backend packages require Python `>=3.12`. The frontend declares Next.js `15.5.27
 3. **Category:** API
 4. **Purpose:** HTTP routes, request models, and OpenAPI.
 5. **Why it is used:** The API is a FastAPI app.
-6. **Where it is used:** `backend/app/main.py`, `backend/app/api/routes.py`, `journal.py`, `audit.py`, `live.py`, `common.py`.
+6. **Where it is used:** `backend/app/main.py`, `backend/app/api/routes.py`, `journal.py`, `audit.py`, `live.py`, `market.py`, `common.py`.
 7. **Main functionality:** `FastAPI`, `APIRouter`, `Depends`, `HTTPException`.
 8. **Important configuration:** `BACKEND_PORT` (default 8841), `CORS_ORIGINS`.
 9. **Criticality:** Core.
@@ -132,10 +132,10 @@ Backend packages require Python `>=3.12`. The frontend declares Next.js `15.5.27
 1. **Name:** httpx
 2. **Version:** `>=0.28.1`
 3. **Category:** HTTP client
-4. **Purpose:** Fetch HTML and Instagram pages. Send Telegram alerts.
-5. **Where it is used:** `backend/app/ingest/doc.py`, `instagram.py`, `backend/app/alerts.py`.
+4. **Purpose:** Fetch HTML and Instagram pages. Send Telegram alerts. Fetch delayed quotes and candles for the markets screen.
+5. **Where it is used:** `backend/app/ingest/doc.py`, `instagram.py`, `backend/app/alerts.py`, `backend/app/api/market.py`.
 6. **Criticality:** Supporting.
-7. **External service:** The URL the user submitted, and `api.telegram.org` when alerts are configured.
+7. **External service:** The URL the user submitted, `api.telegram.org` when alerts are configured, and `query1.finance.yahoo.com` when the dashboard or markets page loads.
 
 ### Beautiful Soup and lxml
 
@@ -219,6 +219,15 @@ Audit chains, heartbeats, and alerts are application code (`backend/app/audit/`,
 4. **Purpose:** Utility classes on the pages and components.
 5. **Criticality:** Core for the current layout.
 
+### lightweight-charts
+
+1. **Name:** lightweight-charts
+2. **Version:** `^5.2.1`
+3. **Category:** UI
+4. **Purpose:** Candlestick chart with previous-day and pivot level lines.
+5. **Where it is used:** `frontend/src/components/CandleChart.tsx` on `/markets`.
+6. **Criticality:** Supporting. Only the markets page loads it.
+
 The UI does not depend on an HTTP client library. `frontend/src/lib/api.ts` uses `fetch`.
 
 ## 8. Testing and lint
@@ -243,6 +252,7 @@ Tests do not call a live LLM or a network broker. They migrate temporary SQLite 
 | Telegram | Both `ALERT_TELEGRAM_BOT_TOKEN` and `ALERT_TELEGRAM_CHAT_ID` set | No |
 | SMTP server | `ALERT_SMTP_HOST` set | No |
 | NSE hosts | Only the import scripts, which download or read bhavcopy files the operator points them at | No |
+| Yahoo Finance chart API | `GET /api/market/quotes`, `GET /api/market/candles`, and `GET /api/paper/positions` when a share or futures position is open. Unofficial and delayed | No |
 | Langfuse | Never, with the current code | No |
 
 Paper trading on the replay feed needs none of these.
@@ -280,7 +290,8 @@ Paper trading on the replay feed needs none of these.
 | cryptography | Supporting | Yes |
 | pytest | Development-only | Tests |
 | next, react, react-dom, tailwindcss | Core for the UI | Yes |
+| lightweight-charts | Supporting | Yes |
 
 ## Summary
 
-The running system is FastAPI, SQLAlchemy, Alembic, LangGraph, and a Next.js UI. LLM calls go through LangChain to either OpenAI or Anthropic. HTML ingest uses HTTPX, Beautiful Soup, and lxml. YouTube ingest uses `youtube-transcript-api`. Broker secrets use Fernet. There is no vector database, no Auth0, and no Langfuse client in this repository.
+The running system is FastAPI, SQLAlchemy, Alembic, LangGraph, and a Next.js UI. LLM calls go through LangChain to either OpenAI or Anthropic. HTML ingest uses HTTPX, Beautiful Soup, and lxml. YouTube ingest uses `youtube-transcript-api`. Market quotes come from Yahoo Finance over HTTPX and are charted with `lightweight-charts`. Broker secrets use Fernet. There is no vector database, no Auth0, and no Langfuse client in this repository.

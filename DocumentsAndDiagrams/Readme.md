@@ -4,7 +4,7 @@ Factual product brief for the current application. Component, schema, and depend
 
 **Source of truth:** application code, Alembic revisions, and `.env.example`. This brief does not add behaviour that the code does not implement.
 
-Analysis date: 2026-10-08.
+Analysis date: 2026-10-10.
 
 ---
 
@@ -19,10 +19,12 @@ The lab ingests a strategy, runs a Review Crew that backtests and forward-tests 
 ## Current situation
 
 1. A strategy is pasted, fetched from YouTube, Instagram, or an HTML page, or loaded from the demo fixture.
-2. An extractor turns it into Markdown with a `rules:` block. Anything it cannot express is listed under Gaps.
+2. An extractor turns it into Markdown with a `rules:` block. Anything it cannot express is listed under Gaps. The lab asks clarifying questions, and the author's answers re-extract a new version from the same source.
 3. The Review Crew replays the rules on imported NSE end-of-day data, or on the bundled synthetic sample when that data is missing, and writes a verdict, trades, reviews, and improvement proposals.
 4. A person approves one version for a broker account. Approval copies that version into the live database.
 5. A separate Trade Crew process ticks that deployment. It checks the frozen rules in code, then sends orders through the account's broker adapter.
+
+Separately, the dashboard and markets screen show delayed quotes and candle charts from Yahoo Finance and accept manual paper orders with Indian charges. Those orders are recorded in `paper_orders` and do not go through the Trade Crew.
 
 ---
 
@@ -65,7 +67,7 @@ Accept `youtube`, `instagram`, `document` (HTML), `notebooklm`, or `markdown`. P
 
 ### Review Crew
 
-A LangGraph workflow audits the strategy, builds scenarios, simulates backtest and forward windows, sweeps hard stops, writes a review per simulated trade, synthesizes a verdict, and proposes improvements. The verdict label comes from the scenarios. It does not come from the hard-stop sweep.
+A LangGraph workflow audits the strategy, builds scenarios, simulates backtest and forward windows, sweeps hard stops, writes a review per simulated trade, synthesizes a verdict, and proposes improvements. The verdict label comes from the scenarios. It does not come from the hard-stop sweep. When no scenario passes and every scenario has too few trades, the label is `Too few trades` rather than `Not profitable`.
 
 ### Approval and Trade Crew
 
@@ -86,7 +88,7 @@ These are checks in the application, not measured service-level objectives. Ther
 - Amounts use `Numeric(18, 4)`.
 - Live approval requires parsed rules, empty Gaps, a matching `confirm_rules_sha256`, a completed report, `X-Actor` or a token, a mode-matching account, and no other active deployment of that strategy in that mode.
 - Live mode also requires `LIVE_TRADING_ENABLED`, a live-capable registered broker, resolved credentials, an allowed structure, and `LIVE_MIN_PAPER_DAYS` when that setting is above zero.
-- Tests cover the research schema, the live schema, the Trade Crew, and the Sandbox broker. No test calls a real LLM or a real broker.
+- Tests cover the research schema, the live schema, the Trade Crew, the Sandbox broker, paper orders, and clarifying questions. No test calls a real LLM or a real broker.
 
 ---
 
@@ -97,7 +99,8 @@ These are checks in the application, not measured service-level objectives. Ther
 3. Research database, live database, and an unaudited market database.
 4. Broker adapters (Paper and Sandbox). No Zerodha, Upstox, Dhan, or Angel One adapter ships in this tree.
 5. Audit hash chains, heartbeats, and Telegram or SMTP alerts.
-6. Next.js UI for the lab, deploy, and deployments.
+6. Next.js UI for the dashboard, markets, lab, deploy, and deployments.
+7. Delayed market data from Yahoo Finance for the markets screen. No MCX feed.
 
 `vendor/TradingAgents` is an architecture reference. Runtime code does not import it. See [vendor/INTEGRATION.md](../vendor/INTEGRATION.md).
 

@@ -2,9 +2,9 @@
 
 How Trading Strategy Lab uses its tables. Traced from the SQLAlchemy models, Alembic revisions, stores, and API routes. Column types are in [CURRENT_DATABASE_ARCHITECTURE.md](CURRENT_DATABASE_ARCHITECTURE.md).
 
-The research database maps **10** tables plus the `trade_journal` view. The live database maps **19** tables. The market database maps **5** tables. All of them have a current writer. Nothing in the head schema is an unused leftover table. Live tables that `0002_live_schema` created inside the research database are dropped by `0004_split_live`.
+The research database maps **11** tables plus the `trade_journal` view. The live database maps **19** tables. The market database maps **5** tables. All of them have a current writer. Nothing in the head schema is an unused leftover table. Live tables that `0002_live_schema` created inside the research database are dropped by `0004_split_live`.
 
-Analysis date: 2026-10-08.
+Analysis date: 2026-10-10.
 
 ## Executive summary
 
@@ -19,6 +19,7 @@ Analysis date: 2026-10-08.
 | `trade_reviews` | Research | Review of a simulated trade | Journal |
 | `strategy_improvements` | Research | Proposed rule change and its evidence | Improvements |
 | `improvement_decisions` | Research | Human decision on a proposal | Improvements |
+| `paper_orders` | Research | One manual paper order placed from the markets screen | Markets |
 | `audit_events` | Research | Hash-chained research audit log | Audit |
 | `deployed_strategies` | Live | Frozen copy of an approved version | Approval |
 | `broker_accounts` | Live | Broker, masked account ref, mode | Brokers |
@@ -51,7 +52,7 @@ Analysis date: 2026-10-08.
 
 Application code opens three SQLAlchemy engines (`backend/app/db/session.py` and `backend/app/market/store.py`).
 
-- **Research** holds ingest, versions, reports, simulations, reviews, improvements, and `audit_events`.
+- **Research** holds ingest, versions, reports, simulations, reviews, improvements, manual paper orders, and `audit_events`.
 - **Live** holds everything that happens after approval. It does not foreign-key back to research. Approval copies the version text, rules, and hashes.
 - **Market** holds NSE reference data. It is not append-only. Reports store a fingerprint of what was imported.
 
@@ -74,14 +75,14 @@ Alembic bookkeeping (`alembic_version`) is omitted below.
 
 One row per extract attempt. `extractor`, `model`, and `raw_output` are the reproducibility record for the LLM step.
 
-- **Written by:** `IngestRunStore` from `POST /api/ingest/extract` and the demo path.
+- **Written by:** `IngestRunStore` from `POST /api/ingest/extract`, `POST /api/ingest/clarify`, and the demo path. A clarify run stores the original hints plus the author's answers.
 - **Read by:** `GET /api/ingest-runs/{id}`.
 
 ### strategy_versions
 
 The Markdown that was approved or reviewed. Later edits are new rows. `content_sha256` covers the text. Rules live in `frontmatter`.
 
-- **Written by:** ingest, and by an improvement decision of `applied`.
+- **Written by:** ingest, clarify, and an improvement decision of `applied`.
 - **Read by:** review, approval preview, and the UI version picker.
 
 ### reports
@@ -125,6 +126,13 @@ A proposed change. `evidence` includes the trade keys. The hard-stop recommendat
 
 - **Written by:** `POST /api/improvements/{id}/decisions`.
 - **Read by:** the improvements list, which derives status from these rows.
+
+### paper_orders
+
+A manual paper order from `/markets`. Separate from the Trade Crew and from the live `orders` table. `charges` is computed at insert. Positions are not stored; they are netted from these rows by average cost.
+
+- **Written by:** `POST /api/paper/orders` in `backend/app/api/market.py`, with a `paper.order_placed` audit event.
+- **Read by:** `GET /api/paper/orders` and `GET /api/paper/positions` (`net_positions` in `backend/app/paper.py`).
 
 ### audit_events
 
@@ -281,6 +289,7 @@ Headlines only, with publish time and fetch time. Feeds are not a backfill.
 | --- | --- |
 | Strategy identity | `strategies`, `strategy_versions`, `ingest_runs` |
 | Review | `reports`, `simulation_runs`, `sim_trades`, `trade_reviews`, `strategy_improvements`, `improvement_decisions` |
+| Manual paper trading | `paper_orders` |
 | Research audit | `audit_events` |
 | Approval | `deployed_strategies`, `broker_accounts`, `deployments`, `deployment_events` |
 | Execution | `trade_intents`, `orders`, `order_events`, `fills`, `live_trades`, `broker_charges` |
@@ -295,7 +304,8 @@ Headlines only, with publish time and fetch time. Feeds are not a backfill.
 
 | Flow | Tables written |
 | --- | --- |
-| Ingest | `ingest_runs`, `strategies`, `strategy_versions`, `audit_events` |
+| Ingest or clarify | `ingest_runs`, `strategies`, `strategy_versions`, `audit_events` |
+| Manual paper order | `paper_orders`, `audit_events` |
 | Review | `reports`, `simulation_runs`, `sim_trades`, `trade_reviews`, `strategy_improvements`, `audit_events` |
 | Apply improvement | `improvement_decisions`, `strategy_versions`, `strategies` (version pointer), `audit_events` |
 | Approve | `deployed_strategies`, `deployments`, `deployment_events`, `live_audit_events`, and one research `audit_events` row |
@@ -308,7 +318,7 @@ Headlines only, with publish time and fetch time. Feeds are not a backfill.
 
 ## 5. Table dependency map
 
-Research parents, in insert order: `strategies` and `ingest_runs`, then `strategy_versions`, then `reports`, then `simulation_runs`, then `sim_trades`, then `trade_reviews`. Improvements point at a strategy, a version, and optionally a report. Decisions point at an improvement and optionally a new version.
+Research parents, in insert order: `strategies` and `ingest_runs`, then `strategy_versions`, then `reports`, then `simulation_runs`, then `sim_trades`, then `trade_reviews`. Improvements point at a strategy, a version, and optionally a report. Decisions point at an improvement and optionally a new version. `paper_orders` optionally points at a strategy.
 
 Live parents, in insert order: `broker_accounts` and `deployed_strategies`, then `deployments`, then events, intents, orders, fills, and trades. Credentials and heartbeats point at accounts and deployments. They can exist before any trade.
 
@@ -359,5 +369,5 @@ There is no embedding column, no `tsvector`, and no vector extension. Search is 
 
 - Table names match `__tablename__` on the ORM classes exported from `backend/app/db/models/__init__.py` and `backend/app/market/models.py`.
 - `LIVE_APPEND_ONLY_TABLES` lists the same 19 live tables.
-- Research append-only list matches the nine append-only research tables. `strategies` is no-delete rather than append-only.
+- Research append-only list matches the ten append-only research tables. `strategies` is no-delete rather than append-only.
 - No service writes a table that is absent from this list.

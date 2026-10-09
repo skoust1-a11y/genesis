@@ -21,6 +21,7 @@
   <text x="210" y="80" class="s">Missing entry, exit, or risk rules fail here.</text>
   <text x="210" y="200" class="s">NSE end-of-day data, or the bundled sample.</text>
   <text x="210" y="260" class="s">Does not change the verdict label.</text>
+  <text x="210" y="380" class="s">Too few trades if every scenario is thin.</text>
   <text x="210" y="440" class="s">Proposals need a human decision to apply.</text>
   <g id="trade">
     <rect class="box" x="560" y="52" width="150" height="36" rx="4"/><text x="576" y="74" class="t">verify</text>
