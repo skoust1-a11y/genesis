@@ -104,6 +104,25 @@ class AuditEvent(AppendOnly, Base):
     hash: Mapped[str] = mapped_column(String(64))
 
 
+class User(Base):
+    __tablename__ = "users"
+
+    username: Mapped[str] = mapped_column(String(64), primary_key=True)
+    password_hash: Mapped[str] = mapped_column(String(256))
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class UserSession(Base):
+    """A login. Only the token's sha256 is stored; logout deletes the row."""
+
+    __tablename__ = "user_sessions"
+
+    token_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    username: Mapped[str] = mapped_column(ForeignKey("users.username"), index=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime())
+
+
 class PaperOrder(AppendOnly, Base):
     """A manual paper trade placed from the markets screen; positions are these orders netted."""
 

@@ -162,7 +162,8 @@ export default function Lab() {
 
   const verdictClass = useMemo(() => {
     if (verdict === "Profitable") return "bg-emerald-100 text-emerald-900";
-    if (verdict === "Conditional" || verdict === "Too few trades") return "bg-amber-100 text-amber-900";
+    if (verdict === "Conditional" || verdict === "Too few trades" || verdict === "Synthetic data only")
+      return "bg-amber-100 text-amber-900";
     if (verdict === "Not profitable") return "bg-rose-100 text-rose-900";
     return "bg-zinc-100 text-zinc-800";
   }, [verdict]);

@@ -12,7 +12,8 @@ export function setActor(name: string): void {
   window.localStorage.setItem(ACTOR_KEY, name);
 }
 
-/** The API token (from `uv run python -m app.auth new-token NAME`). Its name becomes the audit actor. */
+/** A login session token (from /login) or a static API token (`uv run python -m app.auth new-token NAME`).
+ * Its name becomes the audit actor. */
 export function getToken(): string {
   if (typeof window === "undefined") return "";
   return window.localStorage.getItem(TOKEN_KEY) ?? "";
@@ -43,7 +44,10 @@ export async function api<T = unknown>(path: string, init: { method?: string; bo
   if (!res.ok) {
     const detail = (data as { detail?: unknown }).detail;
     const message = typeof detail === "string" ? detail : JSON.stringify(detail ?? res.statusText);
-    if (res.status === 401 || res.status === 403) throw new AuthError(`${message} — set an API token`);
+    if (res.status === 401 && path !== "/api/auth/login" && window.location.pathname !== "/login") {
+      window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname)}`);
+    }
+    if (res.status === 401 || res.status === 403) throw new AuthError(`${message} — log in or set an API token`);
     throw new Error(message);
   }
   return data as T;

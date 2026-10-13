@@ -1,46 +1,121 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="520" viewBox="0 0 1100 520">
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="760" viewBox="0 0 1240 760">
   <style>
     text { font-family: Helvetica, Arial, sans-serif; fill: #1c1917; }
     .box { fill: #fff; stroke: #44403c; stroke-width: 1.4; }
+    .grp { fill: #f5f5f4; stroke: #a8a29e; stroke-width: 1.2; }
+    .ln { stroke: #44403c; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+    .stop { stroke: #b91c1c; stroke-width: 1.2; fill: none; stroke-dasharray: 4 3; marker-end: url(#r); }
+    .h { font-size: 18px; font-weight: 700; }
+    .sub { font-size: 12px; fill: #57534e; }
     .t { font-size: 13px; font-weight: 700; }
     .s { font-size: 11px; fill: #44403c; }
-    .h { font-size: 16px; font-weight: 700; }
+    .l { font-size: 10.5px; fill: #57534e; }
+    .r { font-size: 11px; fill: #b91c1c; }
   </style>
-  <rect width="1100" height="520" fill="#fafaf9"/>
-  <text x="36" y="32" class="h">Review Crew</text>
-  <text x="560" y="32" class="h">Trade Crew tick</text>
-  <g id="review">
-    <rect class="box" x="36" y="52" width="150" height="44" rx="4"/><text x="52" y="78" class="t">audit</text>
-    <rect class="box" x="36" y="112" width="150" height="44" rx="4"/><text x="52" y="138" class="t">scenarios</text>
-    <rect class="box" x="36" y="172" width="150" height="44" rx="4"/><text x="52" y="198" class="t">simulate</text>
-    <rect class="box" x="36" y="232" width="150" height="44" rx="4"/><text x="52" y="258" class="t">hard stop sweep</text>
-    <rect class="box" x="36" y="292" width="150" height="44" rx="4"/><text x="52" y="318" class="t">trade review</text>
-    <rect class="box" x="36" y="352" width="150" height="44" rx="4"/><text x="52" y="378" class="t">verdict</text>
-    <rect class="box" x="36" y="412" width="150" height="44" rx="4"/><text x="52" y="438" class="t">improve</text>
-  </g>
-  <text x="210" y="80" class="s">Missing entry, exit, or risk rules fail here.</text>
-  <text x="210" y="200" class="s">NSE end-of-day data, or the bundled sample.</text>
-  <text x="210" y="260" class="s">Does not change the verdict label.</text>
-  <text x="210" y="380" class="s">Too few trades if every scenario is thin.</text>
-  <text x="210" y="440" class="s">Proposals need a human decision to apply.</text>
-  <g id="trade">
-    <rect class="box" x="560" y="52" width="150" height="36" rx="4"/><text x="576" y="74" class="t">verify</text>
-    <rect class="box" x="730" y="52" width="150" height="36" rx="4"/><text x="746" y="74" class="t">gate</text>
-    <rect class="box" x="900" y="52" width="150" height="36" rx="4"/><text x="916" y="74" class="t">hours</text>
-    <rect class="box" x="560" y="110" width="150" height="36" rx="4"/><text x="576" y="132" class="t">observe</text>
-    <rect class="box" x="730" y="110" width="150" height="36" rx="4"/><text x="746" y="132" class="t">reconcile</text>
-    <rect class="box" x="900" y="110" width="150" height="36" rx="4"/><text x="916" y="132" class="t">exits</text>
-    <rect class="box" x="560" y="168" width="150" height="36" rx="4"/><text x="576" y="190" class="t">drawdown</text>
-    <rect class="box" x="730" y="168" width="150" height="36" rx="4"/><text x="746" y="190" class="t">daily target</text>
-    <rect class="box" x="900" y="168" width="150" height="36" rx="4"/><text x="916" y="190" class="t">entry</text>
-    <rect class="box" x="560" y="226" width="150" height="36" rx="4"/><text x="576" y="248" class="t">risk</text>
-    <rect class="box" x="730" y="226" width="150" height="36" rx="4"/><text x="746" y="248" class="t">opinion</text>
-    <rect class="box" x="900" y="226" width="150" height="36" rx="4"/><text x="916" y="248" class="t">explain</text>
-    <rect class="box" x="730" y="284" width="150" height="36" rx="4"/><text x="746" y="306" class="t">execute</text>
-  </g>
-  <text x="560" y="360" class="s">verify through entry can end the tick early.</text>
-  <text x="560" y="382" class="s">risk, opinion, explain, and execute always run once entry is reached.</text>
-  <text x="560" y="404" class="s">opinion can skip or shrink an approved entry only in veto mode.</text>
-  <text x="560" y="426" class="s">explain appends a note after the decision. It is not an input.</text>
-  <text x="560" y="470" class="s">Hash mismatch, position mismatch, or a failed order halts the deployment.</text>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#44403c"/>
+    </marker>
+    <marker id="r" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#b91c1c"/>
+    </marker>
+  </defs>
+  <rect width="1240" height="760" fill="#fafaf9"/>
+  <text x="40" y="38" class="h">Review Crew and Trade Crew</text>
+  <text x="40" y="58" class="sub">Both are LangGraph state graphs. The Review Crew runs inside the review request; each Trade Crew tick runs in the deployment's own process.</text>
+
+  <!-- Review Crew -->
+  <rect class="grp" x="40" y="74" width="540" height="660" rx="8"/>
+  <text x="56" y="98" class="t">Review Crew · POST /api/review/run</text>
+
+  <rect class="box" x="60" y="114" width="160" height="40" rx="5"/><text x="74" y="139" class="t">audit</text>
+  <path class="ln" d="M140 154 V178"/>
+  <rect class="box" x="60" y="178" width="160" height="40" rx="5"/><text x="74" y="203" class="t">scenarios</text>
+  <path class="ln" d="M140 218 V242"/>
+  <rect class="box" x="60" y="242" width="160" height="40" rx="5"/><text x="74" y="267" class="t">simulate</text>
+  <path class="ln" d="M140 282 V306"/>
+  <rect class="box" x="60" y="306" width="160" height="40" rx="5"/><text x="74" y="331" class="t">hard_stop</text>
+  <path class="ln" d="M140 346 V370"/>
+  <rect class="box" x="60" y="370" width="160" height="40" rx="5"/><text x="74" y="395" class="t">trade_review</text>
+  <path class="ln" d="M140 410 V434"/>
+  <rect class="box" x="60" y="434" width="160" height="40" rx="5"/><text x="74" y="459" class="t">verdict</text>
+  <path class="ln" d="M140 474 V498"/>
+  <rect class="box" x="60" y="498" width="160" height="40" rx="5"/><text x="74" y="523" class="t">improve</text>
+  <path class="ln" d="M140 538 V574"/>
+
+  <text x="236" y="130" class="s">Missing Entry, Exit or Risk rules, or rule errors:</text>
+  <text x="236" y="145" class="s">the label becomes Not executable.</text>
+  <text x="236" y="194" class="s">The strategy's rules plus stress variants: IV rank,</text>
+  <text x="236" y="209" class="s">short distance, stop and target (MAX_SCENARIO_COMBOS).</text>
+  <text x="236" y="258" class="s">Backtest and forward windows, day by day on NSE EOD</text>
+  <text x="236" y="273" class="s">closes with Indian charges, or on the synthetic sample.</text>
+  <text x="236" y="322" class="s">Stops of 2, 3, 4, 5% of capital × the strategy's R:R.</text>
+  <text x="236" y="337" class="s">Recommends one stop. Does not change the verdict.</text>
+  <text x="236" y="386" class="s">A deterministic review for each simulated trade:</text>
+  <text x="236" y="401" class="s">process verdict, mistake tags, lesson.</text>
+  <text x="236" y="450" class="s">Profitable, Conditional, Too few trades or Not</text>
+  <text x="236" y="465" class="s">profitable, from the scenario windows only.</text>
+  <text x="236" y="514" class="s">Proposals backed by trade evidence, plus the hard</text>
+  <text x="236" y="529" class="s">stop. Optional LLM rationale. A person decides.</text>
+
+  <rect class="box" x="60" y="574" width="500" height="64" rx="6"/>
+  <text x="74" y="596" class="t">Report store (research DB)</text>
+  <text x="74" y="614" class="s">reports with payload and provenance inputs, simulation runs, sim trades,</text>
+  <text x="74" y="630" class="s">trade reviews, strategy improvements, audit event</text>
+  <text x="60" y="668" class="l">Provenance: cost profile, settings, market-data fingerprint, ENGINE_VERSION,</text>
+  <text x="60" y="684" class="l">REVIEW_RULES_VERSION, git commit, app version.</text>
+  <text x="60" y="708" class="l">Approval later needs a completed report for the exact version.</text>
+
+  <!-- Trade Crew -->
+  <rect class="grp" x="600" y="74" width="600" height="660" rx="8"/>
+  <text x="616" y="98" class="t">Trade Crew tick · one deployment</text>
+
+  <rect class="box" x="620" y="112" width="150" height="34" rx="5"/><text x="634" y="134" class="t">verify</text>
+  <path class="ln" d="M695 146 V158"/>
+  <rect class="box" x="620" y="158" width="150" height="34" rx="5"/><text x="634" y="180" class="t">gate</text>
+  <path class="ln" d="M695 192 V204"/>
+  <rect class="box" x="620" y="204" width="150" height="34" rx="5"/><text x="634" y="226" class="t">hours</text>
+  <path class="ln" d="M695 238 V250"/>
+  <rect class="box" x="620" y="250" width="150" height="34" rx="5"/><text x="634" y="272" class="t">observe</text>
+  <path class="ln" d="M695 284 V296"/>
+  <rect class="box" x="620" y="296" width="150" height="34" rx="5"/><text x="634" y="318" class="t">reconcile</text>
+  <path class="ln" d="M695 330 V342"/>
+  <rect class="box" x="620" y="342" width="150" height="34" rx="5"/><text x="634" y="364" class="t">exits</text>
+  <path class="ln" d="M695 376 V388"/>
+  <rect class="box" x="620" y="388" width="150" height="34" rx="5"/><text x="634" y="410" class="t">drawdown</text>
+  <path class="ln" d="M695 422 V434"/>
+  <rect class="box" x="620" y="434" width="150" height="34" rx="5"/><text x="634" y="456" class="t">daily</text>
+  <path class="ln" d="M695 468 V480"/>
+  <rect class="box" x="620" y="480" width="150" height="34" rx="5"/><text x="634" y="502" class="t">entry</text>
+  <path class="ln" d="M695 514 V526"/>
+  <rect class="box" x="620" y="526" width="150" height="34" rx="5"/><text x="634" y="548" class="t">risk</text>
+  <path class="ln" d="M695 560 V572"/>
+  <rect class="box" x="620" y="572" width="150" height="34" rx="5"/><text x="634" y="594" class="t">opinion</text>
+  <path class="ln" d="M695 606 V618"/>
+  <rect class="box" x="620" y="618" width="150" height="34" rx="5"/><text x="634" y="640" class="t">explain</text>
+  <path class="ln" d="M695 652 V664"/>
+  <rect class="box" x="620" y="664" width="150" height="34" rx="5"/><text x="634" y="686" class="t">execute</text>
+
+  <path class="stop" d="M770 129 H812"/><text x="820" y="133" class="r">halted: snapshot hash differs from the approved one</text>
+  <path class="stop" d="M770 175 H812"/><text x="820" y="179" class="r">idle: deployment not started (paused or stopped)</text>
+  <path class="stop" d="M770 221 H812"/><text x="820" y="225" class="r">market_closed: outside the NSE session (broker feed only)</text>
+  <path class="stop" d="M770 267 H812"/><text x="820" y="271" class="r">no_market or stale_market: no usable quotes</text>
+  <path class="stop" d="M770 313 H812"/><text x="820" y="317" class="r">halted: broker positions differ from the live DB</text>
+  <path class="stop" d="M770 359 H812"/><text x="820" y="363" class="r">halted if a close fails</text>
+  <text x="960" y="363" class="s">closes each position whose exit fired</text>
+  <path class="stop" d="M770 405 H812"/><text x="820" y="409" class="r">paused: drawdown ladder or capital floor</text>
+  <path class="stop" d="M770 451 H812"/><text x="820" y="455" class="r">halted if close_all fails</text>
+  <text x="972" y="455" class="s">daily profit target and withdrawal alert</text>
+  <path class="stop" d="M770 497 H812"/><text x="820" y="501" class="r">no_signal, holding or exited</text>
+  <text x="992" y="501" class="s">otherwise builds the proposal</text>
+
+  <text x="790" y="547" class="s">Lots, R:R, daily loss, losses today, gap between trades, portfolio limits,</text>
+  <text x="790" y="561" class="s">sizing, floor buffer and odds gate. Failures are recorded as blocked.</text>
+  <text x="790" y="593" class="s">LLM_TRADE_OPINION: off, shadow (stored) or veto (skip or fewer lots only).</text>
+  <text x="790" y="639" class="s">Optional note appended to reason_text after the decision; never an input.</text>
+  <text x="790" y="676" class="s">Writes the intent, then orders hedges first and places protective stops.</text>
+  <text x="790" y="691" class="s">A failed leg or refused stop unwinds the entry and halts the deployment.</text>
+
+  <path class="stop" d="M620 724 H650"/>
+  <text x="658" y="728" class="l">ends the tick; later nodes do not run. From risk onward every node runs once the tick reaches it.</text>
 </svg>

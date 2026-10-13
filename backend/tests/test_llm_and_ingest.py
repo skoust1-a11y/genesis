@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import pytest
 from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models.fake_chat_models import FakeListChatModel
 from langchain_core.messages import AIMessage
 from langchain_openai import ChatOpenAI
+from pydantic import BaseModel
 from youtube_transcript_api import NoTranscriptFound
 
 from app.config import Settings, get_settings
 from app.extract import extractor
 from app.extract.extractor import FIXTURE_MARKDOWN, SINGLE_PASS_CHARS, extract_strategy, split_into_chunks
 from app.ingest import youtube
-from app.llm import chat_model
+from app.llm import chat_model, served_model
 
 
 def settings(**values) -> Settings:
@@ -29,6 +31,36 @@ def test_chat_model_follows_llm_provider():
     assert claude.llm_enabled and claude.opinion_model == "claude-test"
 
     assert not settings(LLM_PROVIDER="anthropic", OPENAI_API_KEY="sk-test").llm_enabled  # the other provider's key
+
+
+def test_fallback_provider_when_the_first_has_no_key_or_fails():
+    no_key = settings(FALLBACK_LLM_PROVIDER="google", GOOGLE_API_KEY="g-test", LLM_OPINION_MODEL="gpt-only")
+    model = chat_model(no_key, no_key.opinion_model)
+    assert isinstance(model, ChatOpenAI) and model.model_name == "gemini-2.5-flash" and "googleapis" in model.openai_api_base
+    assert no_key.llm_enabled and no_key.active_llm_provider == "google" and no_key.llm_model == "gemini-2.5-flash"
+
+    both = settings(OPENAI_API_KEY="sk-test", FALLBACK_LLM_PROVIDER="groq", GROQ_API_KEY="gsk-test")
+    model = chat_model(both, "gpt-x")
+    assert model.runnable.model_name == "gpt-x" and model.fallbacks[0].model_name == "openai/gpt-oss-120b"
+    assert both.active_llm_provider == "openai"
+
+    class Out(BaseModel):
+        ok: bool
+
+    failing = model.runnable.model_copy(update={"openai_api_base": "http://127.0.0.1:9"})  # nothing listens there
+    good = FakeListChatModel(responses=["fine"])
+    assert failing.with_fallbacks([good]).invoke("hi").content == "fine"
+    assert len(model.with_structured_output(Out).fallbacks) == 1  # opinion and lessons keep their fallback
+
+    chain = settings(FALLBACK_LLM_PROVIDER=" groq, google,huggingface", GROQ_API_KEY="gsk", HF_TOKEN="hf")
+    assert chain.llm_providers == ["groq", "huggingface"]  # no OpenAI or Google key: skipped
+    model = chat_model(chain)
+    assert model.runnable.model_name == "openai/gpt-oss-120b"
+    assert [f.openai_api_base for f in model.fallbacks] == ["https://router.huggingface.co/v1"]
+
+    groq_reply = AIMessage(content="x", response_metadata={"model_name": "openai/gpt-oss-120b"})
+    assert served_model(groq_reply, both) == "openai/gpt-oss-120b"
+    assert served_model(AIMessage(content="x"), both) == both.llm_model
 
 
 class FakeTranscript:

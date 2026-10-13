@@ -92,7 +92,7 @@ def test_report_inputs_capture_market_data_and_versions(client, demo):
     assert inputs["market_data"]["sha256"] == hashlib.sha256(MARKET_DATA_PATH.read_bytes()).hexdigest()
     assert inputs["market_data"]["source"] == "sample_synthetic"
     assert inputs["engine_version"] == "6"
-    assert inputs["settings_snapshot"]["verdict_min_backtest_trades"] == 3
+    assert inputs["settings_snapshot"]["verdict_min_backtest_trades"] == 30
     assert inputs["review_rules_version"] == "1"
     assert inputs["cost_profile"]["brokerage_per_order"] == 20
     assert "openai_api_key" not in str(inputs).lower()

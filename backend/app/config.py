@@ -1,18 +1,30 @@
 from functools import lru_cache
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+LLMProvider = Literal["openai", "anthropic", "groq", "google", "huggingface"]
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    llm_provider: Literal["openai", "anthropic"] = Field(default="openai", alias="LLM_PROVIDER")
+    llm_provider: LLMProvider = Field(default="openai", alias="LLM_PROVIDER")
+    # comma-separated, tried in order when LLM_PROVIDER has no key or a call to it fails
+    fallback_llm_providers: Annotated[list[LLMProvider], NoDecode] = Field(
+        default_factory=list, alias="FALLBACK_LLM_PROVIDER"
+    )
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")
     openai_model: str = Field(default="gpt-4o-mini", alias="OPENAI_MODEL")
     anthropic_api_key: str | None = Field(default=None, alias="ANTHROPIC_API_KEY")
     anthropic_model: str = Field(default="claude-sonnet-5-5", alias="ANTHROPIC_MODEL")
+    groq_api_key: str | None = Field(default=None, alias="GROQ_API_KEY")
+    groq_model: str = Field(default="openai/gpt-oss-120b", alias="GROQ_MODEL")
+    google_api_key: str | None = Field(default=None, alias="GOOGLE_API_KEY")
+    google_model: str = Field(default="gemini-2.5-flash", alias="GOOGLE_MODEL")
+    huggingface_api_key: str | None = Field(default=None, alias="HF_TOKEN")
+    huggingface_model: str = Field(default="meta-llama/Llama-3.3-70B-Instruct", alias="HF_MODEL")
 
     data_dir: str = Field(default="data", alias="DATA_DIR")
     database_url: str = Field(default="sqlite:///data/genesis.db", alias="DATABASE_URL")
@@ -23,8 +35,9 @@ class Settings(BaseSettings):
     default_capital_inr: float = Field(default=500_000, alias="DEFAULT_CAPITAL_INR")
     default_max_lots: int = Field(default=2, alias="DEFAULT_MAX_LOTS")
     max_scenario_combos: int = Field(default=24, alias="MAX_SCENARIO_COMBOS")
-    verdict_min_backtest_trades: int = Field(default=3, alias="VERDICT_MIN_BACKTEST_TRADES")
-    verdict_min_forward_trades: int = Field(default=2, alias="VERDICT_MIN_FORWARD_TRADES")
+    # Fewer trades than this cannot tell an edge from luck; the verdict is then "Too few trades".
+    verdict_min_backtest_trades: int = Field(default=30, alias="VERDICT_MIN_BACKTEST_TRADES")
+    verdict_min_forward_trades: int = Field(default=10, alias="VERDICT_MIN_FORWARD_TRADES")
     # Hard stops, as % of capital, the review report backtests; empty turns the sweep off.
     hard_stop_sweep_pcts: str = Field(default="2,3,4,5", alias="HARD_STOP_SWEEP_PCTS")
     iv_rank_lookback_days: int = Field(default=252, alias="IV_RANK_LOOKBACK_DAYS")
@@ -37,6 +50,8 @@ class Settings(BaseSettings):
     sebi_per_crore: float = Field(default=10, alias="SEBI_PER_CRORE")
     stamp_duty_pct: float = Field(default=0.00003, alias="STAMP_DUTY_PCT")
     slippage_bps: float = Field(default=5, alias="SLIPPAGE_BPS")
+    # Floor on simulated slippage, in INR 0.05 ticks per unit per fill: 5 bps alone is under one tick below INR 100.
+    slippage_min_ticks: float = Field(default=1, ge=0, alias="SLIPPAGE_MIN_TICKS")
     # "effective-date:rate" pairs used when a trade date is known; the flat rates above apply otherwise.
     # Verify against current NSE / Finance Act rates before relying on them.
     stt_schedule: str = Field(default="2000-01-01:0.000625,2024-10-01:0.001", alias="STT_SCHEDULE")
@@ -128,6 +143,8 @@ class Settings(BaseSettings):
 
     # API auth: comma-separated `name:sha256(token)` pairs. Empty leaves research and paper flows open.
     api_tokens: str = Field(default="", alias="API_TOKENS")
+    # Lifetime of a username/password login (users from `python -m app.auth new-user NAME`).
+    session_hours: float = Field(default=12, gt=0, alias="SESSION_HOURS")
 
     backend_port: int = Field(default=8841, alias="BACKEND_PORT")
     cors_origins: str = Field(default="http://127.0.0.1:8842", alias="CORS_ORIGINS")
@@ -151,17 +168,38 @@ class Settings(BaseSettings):
         }
         return {k: v for k, v in values.items() if v}
 
+    @field_validator("fallback_llm_providers", mode="before")
+    @classmethod
+    def _split_providers(cls, value: str | list | None) -> list:
+        return [p.strip() for p in value.split(",") if p.strip()] if isinstance(value, str) else value or []
+
+    def provider_key(self, provider: str) -> str | None:
+        return getattr(self, f"{provider}_api_key")
+
+    def provider_model(self, provider: str) -> str:
+        return getattr(self, f"{provider}_model")
+
+    @property
+    def llm_providers(self) -> list[str]:
+        """LLM_PROVIDER then each FALLBACK_LLM_PROVIDER, those with a key only; the first one is used."""
+        order = dict.fromkeys((self.llm_provider, *self.fallback_llm_providers))
+        return [p for p in order if self.provider_key(p)]
+
+    @property
+    def active_llm_provider(self) -> str:
+        return (self.llm_providers or [self.llm_provider])[0]
+
     @property
     def llm_api_key(self) -> str | None:
-        return self.anthropic_api_key if self.llm_provider == "anthropic" else self.openai_api_key
+        return self.provider_key(self.active_llm_provider)
 
     @property
     def llm_model(self) -> str:
-        return self.anthropic_model if self.llm_provider == "anthropic" else self.openai_model
+        return self.provider_model(self.active_llm_provider)
 
     @property
     def llm_enabled(self) -> bool:
-        return bool(self.llm_api_key)
+        return bool(self.llm_providers)
 
     @staticmethod
     def _per_underlying(raw: str) -> dict[str, float]:

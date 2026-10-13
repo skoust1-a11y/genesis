@@ -58,7 +58,7 @@ def report_inputs(
             },
             "common_risk": settings.common_risk,
             "llm_enabled": settings.llm_enabled,
-            "llm_provider": settings.llm_provider if settings.llm_enabled else None,
+            "llm_provider": settings.active_llm_provider if settings.llm_enabled else None,
             "llm_model": settings.llm_model if settings.llm_enabled else None,
         },
         "market_data": market_data_fingerprint(strategy.rules.instrument.underlying if strategy.rules else None),

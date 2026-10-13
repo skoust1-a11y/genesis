@@ -13,12 +13,15 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit import current_actor, record_event
+from app.brokers.groww import GrowwQuotes
 from app.config import get_settings
 from app.db.models import PaperOrder, Strategy
 from app.db.serialize import row_to_dict
 from app.db.session import get_db
 from app.db.types import utcnow
+from app.market.feed import BrokerFeed
 from app.paper import net_positions, order_charges
+from app.trading.option_pnl import plan_pnl
 
 router = APIRouter(prefix="/api")
 
@@ -134,25 +137,86 @@ def market_candles(symbol: str, interval: Literal["1m", "5m", "15m", "60m", "1d"
     except httpx.HTTPError as exc:
         raise HTTPException(status_code=502, detail=f"market data source unavailable: {exc}") from exc
     bars = parse_yahoo_chart(payload)
+    if not bars:
+        return {"symbol": symbol.upper(), "segment": segment, "interval": interval, "bars": [], "levels": [], "zones": []}
+    session = bars[-1]["date"][:10]
     if interval == "1d":
         bars = [b | {"date": b["date"][:10]} for b in bars]
-        daily = bars
+        daily, intraday = bars, []
     else:
         try:
             daily = parse_yahoo_chart(_chart(ticker, "1d", "5d"))
         except httpx.HTTPError:
             daily = []  # levels are a bonus; the chart still loads without them
+        # Yahoo's daily list sometimes lacks the current session, so rebuild it from the intraday bars.
+        day = [b for b in bars if b["date"][:10] == session]
+        today = {
+            "date": session, "high": max(b["high"] or b["close"] for b in day),
+            "low": min(b["low"] or b["close"] for b in day), "close": day[-1]["close"],
+        }  # fmt: skip
+        daily = [d for d in daily if d["date"][:10] < session] + [today]
+        minutes = int(interval[:-1])
+        # Commodities trade round the clock, so they have no 09:15 opening range.
+        intraday = intraday_levels(add_vwap(bars), 15 // minutes if segment != "commodity" else 0)
+    now = datetime.now(IST)
+    session_over = segment != "commodity" and (
+        session < now.date().isoformat() or now.strftime("%H:%M") >= get_settings().market_close
+    )  # fmt: skip
+    levels = trading_levels(daily, session_over) + intraday
     return {
-        "symbol": symbol.upper(), "segment": segment, "interval": interval, "bars": bars,
-        "levels": trading_levels(daily),
+        "symbol": symbol.upper(), "segment": segment, "interval": interval, "bars": bars, "levels": levels,
+        "zones": trading_zones(levels, bars[-1]["close"]),
     }  # fmt: skip
 
 
-def trading_levels(daily: list[dict]) -> list[dict]:
-    """Previous session's high/low/close and classic floor pivots for the latest session in `daily`."""
-    if len(daily) < 2:
+# Option-chain providers by name: any `QuoteSource` (a broker adapter for Kite, Dhan, ... plugs in here too).
+QUOTE_PROVIDERS = {"groww": GrowwQuotes}
+
+
+@router.get("/market/option-pnl")
+def option_pnl(
+    entry: float = Query(gt=0, description="Index level at which the option is bought"),
+    stop: float = Query(gt=0),
+    target1: float = Query(gt=0),
+    target2: float | None = Query(default=None, gt=0),
+    option_type: Literal["CE", "PE"] = "CE",
+    strike: float | None = Query(default=None, gt=0, description="Defaults to the at-the-money strike now"),
+    underlying: str = Query(default="NIFTY", max_length=20),
+    provider: str = "groww",
+    lots: int = Query(default=1, ge=1, le=100),
+    entry_after_days: float = Query(default=0, ge=0, le=30),
+    hold_days: float = Query(default=0.15, ge=0, le=30),
+):
+    """Net P&L per exit for buying an option when the index reaches `entry`, priced from a provider's chain."""
+    factory = QUOTE_PROVIDERS.get(provider)
+    if factory is None:
+        raise HTTPException(status_code=400, detail=f"unknown provider {provider!r} (available: {', '.join(QUOTE_PROVIDERS)})")
+    settings = get_settings()
+    feed = BrokerFeed(factory(), settings, iv_rank=lambda *_: None, prev_range=lambda *_: None)
+    try:
+        snapshot = feed.snapshot(underlying)
+    except (httpx.HTTPError, ValueError, KeyError) as exc:
+        raise HTTPException(status_code=502, detail=f"option chain unavailable from {provider}: {exc}") from exc
+    if snapshot is None:
+        raise HTTPException(status_code=502, detail=f"{provider} returned no index quote or expiry for {underlying}")
+    step = settings.strike_step(underlying) or 50
+    exits = {"stop": stop, "target1": target1} | ({"target2": target2} if target2 else {})
+    try:
+        plan = plan_pnl(
+            snapshot, settings, option_type, strike or round(snapshot.spot / step) * step, entry, exits,
+            lots=lots, entry_after_days=entry_after_days, hold_days=hold_days,
+        )  # fmt: skip
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return plan | {"provider": provider}
+
+
+def trading_levels(daily: list[dict], session_over: bool = False) -> list[dict]:
+    """Previous session's high/low/close and classic floor pivots for the latest session in `daily`, or for the
+    next session once the latest one is `session_over`."""
+    if len(daily) < (1 if session_over else 2):
         return []
-    prev = daily[-2]
+    prev = daily[-1] if session_over else daily[-2]
     c = prev["close"]
     h, low = prev["high"] or c, prev["low"] or c
     p = (h + low + c) / 3
@@ -161,6 +225,58 @@ def trading_levels(daily: list[dict]) -> list[dict]:
         "R2": p + (h - low), "R1": 2 * p - low, "P": p, "S1": 2 * p - h, "S2": p - (h - low),
     }  # fmt: skip
     return [{"label": k, "price": round(v, 2)} for k, v in levels.items()]
+
+
+def intraday_levels(bars: list[dict], or_bars: int, swing: int = 2, keep: int = 3) -> list[dict]:
+    """Levels from the latest session in intraday `bars`: its high/low so far (DH/DL), the opening range over the
+    first `or_bars` bars (ORH/ORL, skipped when 0), and the `keep` latest swing highs/lows price has not traded
+    through since (BSL/SSL: buy-/sell-side liquidity, the stops resting above/below them; 1 is the most recent)."""
+    day = [b for b in bars if b["date"][:10] == bars[-1]["date"][:10] and None not in (b["high"], b["low"])]
+    if not day:
+        return []
+    hi, lo = [b["high"] for b in day], [b["low"] for b in day]
+    levels = [("DH", max(hi)), ("DL", min(lo))]
+    if or_bars:
+        levels += [("ORH", max(hi[:or_bars])), ("ORL", min(lo[:or_bars]))]
+    # A swing needs `swing` bars either side; beating every later bar means it is both a swing and still untouched.
+    rng = range(swing, len(day) - swing)
+    bsl = [hi[i] for i in rng if hi[i] >= max(hi[i - swing : i]) and hi[i] > max(hi[i + 1 :]) and hi[i] != max(hi)]
+    ssl = [lo[i] for i in rng if lo[i] <= min(lo[i - swing : i]) and lo[i] < min(lo[i + 1 :]) and lo[i] != min(lo)]
+    levels += [(f"BSL{n}", p) for n, p in enumerate(reversed(bsl[-keep:]), 1)]
+    levels += [(f"SSL{n}", p) for n, p in enumerate(reversed(ssl[-keep:]), 1)]
+    return [{"label": k, "price": round(v, 2)} for k, v in levels]
+
+
+def trading_zones(levels: list[dict], last: float, width: float = 0.003) -> list[dict]:
+    """Bands where 2+ distinct level prices sit within `width` (a fraction of `last`) of the band's lowest level;
+    price tends to react where levels pile up. `side` is relative to `last`."""
+    groups: list[list[dict]] = []
+    for lv in sorted(levels, key=lambda lv: lv["price"]):
+        if groups and lv["price"] - groups[-1][0]["price"] <= width * last:
+            groups[-1].append(lv)
+        else:
+            groups.append([lv])
+    zones = []
+    for g in groups:
+        low, high = g[0]["price"], g[-1]["price"]
+        if low == high:
+            continue  # one price, however many labels share it
+        side = "resistance" if low > last else "support" if high < last else "at price"
+        zones.append({"low": low, "high": high, "labels": [lv["label"] for lv in g], "side": side})
+    return zones
+
+
+def add_vwap(bars: list[dict]) -> list[dict]:
+    """Sets each intraday bar's session VWAP (reset daily); None until the source reports volume (indices never do)."""
+    day, pv, vol = None, 0.0, 0
+    for b in bars:
+        if b["date"][:10] != day:
+            day, pv, vol = b["date"][:10], 0.0, 0
+        if b["volume"] and None not in (b["high"], b["low"]):
+            pv += (b["high"] + b["low"] + b["close"]) / 3 * b["volume"]
+            vol += b["volume"]
+        b["vwap"] = round(pv / vol, 2) if vol else None
+    return bars
 
 
 class PaperOrderIn(BaseModel):

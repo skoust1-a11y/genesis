@@ -1,8 +1,11 @@
 # Scheduled macro events for 2026, same format as macro_2024_2025.yaml.
+# VERIFY before relying on these: dates were entered by hand from the sources below.
 # Sources: RBI press release 2025-2026/2306 (MPC schedule 2026-27); federalreserve.gov FOMC calendar 2026.
-# Budget and election dates not added yet.
+# Union Budget 2026: Sunday 1 Feb, NSE held a special trading session. No general election in 2026.
 source: manual_macro_calendar
 events:
+  - {date: 2026-02-01, kind: budget, title: Union Budget 2026-27}
+
   # RBI Monetary Policy Committee decisions (announced 10:00 IST, last day of the meeting)
   - {date: 2026-04-08, kind: rbi_policy, title: RBI MPC decision}
   - {date: 2026-06-05, kind: rbi_policy, title: RBI MPC decision}

@@ -1,13 +1,19 @@
 "use client";
 
 import {
+  type AutoscaleInfo,
   CandlestickSeries,
   ColorType,
   CrosshairMode,
   HistogramSeries,
+  LineSeries,
   type IChartApi,
   type IPriceLine,
+  type IPrimitivePaneRenderer,
+  type IPrimitivePaneView,
   type ISeriesApi,
+  type ISeriesPrimitive,
+  type SeriesAttachedParameter,
   LineStyle,
   type MouseEventParams,
   type Time,
@@ -16,16 +22,31 @@ import {
 } from "lightweight-charts";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-type Bar = { date: string; open: number | null; high: number | null; low: number | null; close: number; volume?: number | null };
+import { inr } from "@/lib/api";
+import type { RiskPlan } from "@/lib/risk";
+
+type Bar = {
+  date: string; open: number | null; high: number | null; low: number | null; close: number;
+  volume?: number | null; vwap?: number | null;
+};
 export type Level = { label: string; price: number };
+export type Zone = { low: number; high: number; labels: string[]; side: "support" | "resistance" | "at price" };
 
 const UP = "#059669";
 const DOWN = "#e11d48";
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const day = (d: string) => `${d.slice(8, 10)} ${MONTHS[Number(d.slice(5, 7)) - 1]}`;
 const num = (v: number) => v.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const VWAP = "#c026d3";
 const levelColor = (l: string) =>
-  l.startsWith("Entry") ? "#7c3aed" : l.startsWith("PD") ? "#2563eb" : l[0] === "R" ? DOWN : l[0] === "S" ? UP : "#52525b";
+  l.startsWith("Entry") ? "#7c3aed"
+  : l.startsWith("PD") ? "#2563eb"
+  : /^(DH|DL|OR)/.test(l) ? "#d97706"
+  : /^(BSL|SSL)/.test(l) ? "#0891b2"
+  : l[0] === "R" ? DOWN
+  : l[0] === "S" ? UP
+  : "#52525b";
+const zoneColor = (z: Zone) => (z.side === "support" ? UP : z.side === "resistance" ? DOWN : "#52525b");
 
 // The chart library labels times in UTC, so IST wall-clock times are handed over as if they were UTC.
 const toTime = (d: string): Time =>
@@ -33,11 +54,71 @@ const toTime = (d: string): Time =>
     ? ((Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), +d.slice(11, 13), +d.slice(14, 16)) / 1000) as UTCTimestamp)
     : d;
 
+type Box = { low: number; high: number; color: string; text: string; right?: boolean };
+
+/** Draws labelled boxes from `start` to the chart's right edge, beneath the candles. */
+class Boxes implements ISeriesPrimitive<Time> {
+  private boxes: Box[] = [];
+  private start: Time | null = null;
+  private p: SeriesAttachedParameter<Time> | null = null;
+
+  attached(p: SeriesAttachedParameter<Time>) {
+    this.p = p;
+  }
+
+  detached() {
+    this.p = null;
+  }
+
+  set(boxes: Box[], start: Time | null) {
+    this.boxes = boxes;
+    this.start = start;
+    this.p?.requestUpdate();
+  }
+
+  paneViews(): IPrimitivePaneView[] {
+    const draw = (target: Parameters<IPrimitivePaneRenderer["draw"]>[0]) => {
+      const p = this.p;
+      if (!p || this.start === null) return;
+      const x0 = p.chart.timeScale().timeToCoordinate(this.start) ?? 0;
+      target.useBitmapCoordinateSpace(({ context: ctx, bitmapSize, horizontalPixelRatio: hr, verticalPixelRatio: vr }) => {
+        ctx.font = `600 ${10 * vr}px ui-sans-serif, system-ui, sans-serif`;
+        ctx.textBaseline = "middle";
+        for (const b of this.boxes) {
+          const top = p.series.priceToCoordinate(b.high);
+          const bottom = p.series.priceToCoordinate(b.low);
+          if (top === null || bottom === null) continue;
+          const [x, y, w, h] = [Math.max(0, x0 * hr), top * vr, bitmapSize.width, (bottom - top) * vr];
+          ctx.fillStyle = `${b.color}1a`;
+          ctx.fillRect(x, y, w - x, h);
+          ctx.strokeStyle = `${b.color}99`;
+          ctx.lineWidth = hr;
+          ctx.strokeRect(x, y, w - x, h);
+          // Label on a white tag, centred on the box, so neighbouring boxes cannot overprint it.
+          const [tw, th] = [ctx.measureText(b.text).width + 8 * hr, 14 * vr];
+          const [tx, ty] = [b.right ? w - tw - 4 * hr : x + 4 * hr, y + h / 2 - th / 2];
+          ctx.fillStyle = "#ffffffe6";
+          ctx.fillRect(tx, ty, tw, th);
+          ctx.strokeRect(tx, ty, tw, th);
+          ctx.fillStyle = b.color;
+          ctx.fillText(b.text, tx + 4 * hr, ty + th / 2);
+        }
+      });
+    };
+    return [{ zOrder: () => "bottom", renderer: () => ({ draw }) }];
+  }
+}
+
 /** Interactive candlestick chart (scroll to zoom, drag to pan). `date` is "YYYY-MM-DD" or "YYYY-MM-DD HH:MM" IST. */
-export function CandleChart({ bars, levels = [] }: { bars: Bar[]; levels?: Level[] }) {
+export function CandleChart({
+  bars, levels = [], zones = [], plans = [],
+}: { bars: Bar[]; levels?: Level[]; zones?: Zone[]; plans?: { label: string; plan: RiskPlan }[] }) {
   const wrap = useRef<HTMLDivElement>(null);
   const box = useRef<HTMLDivElement>(null);
-  const chart = useRef<{ api: IChartApi; candles: ISeriesApi<"Candlestick">; volume: ISeriesApi<"Histogram">; lines: IPriceLine[] }>(null);
+  const chart = useRef<{
+    api: IChartApi; candles: ISeriesApi<"Candlestick">; volume: ISeriesApi<"Histogram">; vwap: ISeriesApi<"Line">;
+    lines: IPriceLine[]; boxes: Boxes;
+  }>(null);
   const shownKey = useRef("");
   const [hover, setHover] = useState<number | null>(null);
   const [showLevels, setShowLevels] = useState(true);
@@ -70,9 +151,14 @@ export function CandleChart({ bars, levels = [] }: { bars: Bar[]; levels?: Level
       priceScaleId: "", priceFormat: { type: "volume" }, lastValueVisible: false, priceLineVisible: false,
     });
     volume.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+    const vwap = api.addSeries(LineSeries, {
+      color: VWAP, lineWidth: 1, title: "VWAP", priceLineVisible: false, crosshairMarkerVisible: false,
+    });
     const onMove = (p: MouseEventParams) => setHover(p.logical ?? null);
     api.subscribeCrosshairMove(onMove);
-    chart.current = { api, candles, volume, lines: [] };
+    const boxes = new Boxes();
+    candles.attachPrimitive(boxes);
+    chart.current = { api, candles, volume, vwap, lines: [], boxes };
     return () => {
       api.unsubscribeCrosshairMove(onMove);
       api.remove();
@@ -84,6 +170,8 @@ export function CandleChart({ bars, levels = [] }: { bars: Bar[]; levels?: Level
     const c = chart.current;
     if (!c) return;
     c.api.applyOptions({ timeScale: { timeVisible: intraday, secondsVisible: false } });
+    // Indices report no volume, so give the candles the space the volume bars would take.
+    c.candles.priceScale().applyOptions({ scaleMargins: { top: 0.08, bottom: data.some((b) => b.volume) ? 0.22 : 0.05 } });
     c.candles.setData(
       data.map((b) => ({ time: b.time, open: b.open ?? b.close, high: b.high ?? b.close, low: b.low ?? b.close, close: b.close })),
     );
@@ -99,16 +187,64 @@ export function CandleChart({ bars, levels = [] }: { bars: Bar[]; levels?: Level
   }, [data, intraday]);
 
   useEffect(() => {
+    chart.current?.vwap.setData(
+      showLevels ? data.flatMap((b) => (b.vwap != null ? [{ time: b.time, value: b.vwap }] : [])) : [],
+    );
+  }, [data, showLevels]);
+
+  // Boxes start at the latest session's first candle (the last candle on the daily chart) and run to the right edge.
+  // A position's loss/reward boxes show even with levels hidden: they are about money at stake.
+  useEffect(() => {
+    const last = data.at(-1);
+    const start = intraday ? data.find((b) => b.date.slice(0, 10) === last?.date.slice(0, 10)) : last;
+    const zoneBoxes = (showLevels ? zones : []).map((z) => ({
+      low: z.low, high: z.high, color: zoneColor(z),
+      text: `${z.side.toUpperCase()} ${num(z.low)}–${num(z.high)} · ${z.labels.join(" ")}`,
+    }));
+    const riskBoxes = plans.flatMap(({ label, plan: r }) => [
+      {
+        low: Math.min(r.entry, r.stop), high: Math.max(r.entry, r.stop), color: DOWN, right: true,
+        text: `${label} · STOP ${num(r.stop)} · RISK ${inr(r.riskRs)} (${num(r.risk)} pts)`,
+      },
+      ...(r.target === null ? [] : [{
+        low: Math.min(r.entry, r.target), high: Math.max(r.entry, r.target), color: UP, right: true,
+        text: `TARGET ${num(r.target)} · ${inr(r.rewardRs ?? 0)} · ${r.rr}R`,
+      }]),
+    ]);
+    chart.current?.boxes.set(start ? [...zoneBoxes, ...riskBoxes] : [], start?.time ?? null);
+  }, [zones, plans, data, intraday, showLevels]);
+
+  useEffect(() => {
     const c = chart.current;
     if (!c) return;
     c.lines.forEach((l) => c.candles.removePriceLine(l));
-    c.lines = (showLevels ? levels : []).map((l) =>
+    const prices = [
+      ...(showLevels ? levels : []).map((l) => l.price),
+      ...plans.flatMap(({ plan: r }) => (r.target === null ? [r.stop] : [r.stop, r.target])),
+    ];
+    // Price lines do not widen the axis by themselves, so on 1m/5m the levels sat off-screen.
+    c.candles.applyOptions({
+      autoscaleInfoProvider: (base: () => AutoscaleInfo | null) => {
+        const r = base();
+        return r?.priceRange && prices.length
+          ? { ...r, priceRange: { minValue: Math.min(r.priceRange.minValue, ...prices), maxValue: Math.max(r.priceRange.maxValue, ...prices) } }
+          : r;
+      },
+    });
+    // A zone box already marks its levels, and levels at one price share a line, so the price axis stays readable.
+    const byPrice = new Map<number, string[]>();
+    for (const l of showLevels ? levels : []) {
+      if (l.label.startsWith("Entry") || !zones.some((z) => z.low <= l.price && l.price <= z.high)) {
+        byPrice.set(l.price, [...(byPrice.get(l.price) ?? []), l.label]);
+      }
+    }
+    c.lines = [...byPrice].map(([price, labels]) =>
       c.candles.createPriceLine({
-        price: l.price, color: levelColor(l.label), lineWidth: 1, lineStyle: LineStyle.SparseDotted, axisLabelVisible: true,
-        title: l.label,
+        price, color: levelColor(labels[0]), lineWidth: 1, lineStyle: LineStyle.SparseDotted, axisLabelVisible: true,
+        title: labels.join("/"),
       }),
     );
-  }, [levels, showLevels]);
+  }, [levels, zones, plans, showLevels]);
 
   const shown = data[hover !== null && hover >= 0 && hover < data.length ? hover : data.length - 1];
   const prev = shown && data[data.indexOf(shown) - 1];
@@ -172,6 +308,9 @@ export function CandleChart({ bars, levels = [] }: { bars: Bar[]; levels?: Level
         {[
           "Scroll to zoom · drag to pan · double-click the price axis to reset",
           showLevels && levels.length > 0 && "PDH/PDL/PDC: previous session high/low/close · P, R1–R2, S1–S2: floor pivots",
+          showLevels && intraday &&
+            "DH/DL: today's high/low · ORH/ORL: 15-min opening range · BSL/SSL: untouched swing highs/lows today (1 = latest)",
+          showLevels && zones.length > 0 && "Boxes: 2+ levels within 0.3%, where price tends to react",
           intraday && "Times in IST (UTC+5:30)",
         ]
           .filter(Boolean)

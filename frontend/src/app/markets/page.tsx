@@ -3,14 +3,18 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
-import { CandleChart, type Level } from "@/components/CandleChart";
+import { CandleChart, type Level, type Zone } from "@/components/CandleChart";
 import { IndexStrip } from "@/components/IndexStrip";
 import { api, inr, pct } from "@/lib/api";
+import { riskPlan } from "@/lib/risk";
 import {
   COMMODITIES, INDICES, type Position, type Quote, type Segment, fetchQuotes, money, segmentOf, signed,
 } from "@/lib/market";
 
-type Bar = { date: string; open: number | null; high: number | null; low: number | null; close: number; volume: number | null };
+type Bar = {
+  date: string; open: number | null; high: number | null; low: number | null; close: number;
+  volume: number | null; vwap?: number | null;
+};
 
 type Instrument = "EQ" | "FUT" | "CE" | "PE";
 
@@ -58,6 +62,7 @@ export default function Markets() {
   const [timeframe, setTimeframe] = useState("5m");
   const [bars, setBars] = useState<Bar[]>([]);
   const [levels, setLevels] = useState<Level[]>([]);
+  const [zones, setZones] = useState<Zone[]>([]);
   const [positions, setPositions] = useState<Position[]>([]);
   const [ticket, setTicket] = useState<Ticket>(blankTicket("index"));
   const [error, setError] = useState<string | null>(null);
@@ -104,14 +109,16 @@ export default function Markets() {
 
   useEffect(() => {
     const load = () =>
-      api<{ bars: Bar[]; levels: Level[] }>(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}`)
+      api<{ bars: Bar[]; levels: Level[]; zones: Zone[] }>(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}`)
         .then((d) => {
           setBars(d.bars);
           setLevels(d.levels ?? []);
+          setZones(d.zones ?? []);
         })
         .catch((e) => setError(e instanceof Error ? e.message : "Could not load candles"));
     setBars([]);
     setLevels([]);
+    setZones([]);
     load();
     const timer = setInterval(load, 60_000);
     return () => clearInterval(timer);
@@ -126,14 +133,24 @@ export default function Markets() {
   }, []);
 
   // Option entries are premiums, not prices on this chart, so only shares and futures get an entry line.
+  const onChart = useMemo(
+    () => positions.filter((p) => p.underlying === symbol && p.quantity !== 0 && (p.instrument === "EQ" || p.instrument === "FUT")),
+    [positions, symbol],
+  );
   const chartLevels = useMemo<Level[]>(
     () => [
       ...levels,
-      ...positions
-        .filter((p) => p.underlying === symbol && p.quantity !== 0 && (p.instrument === "EQ" || p.instrument === "FUT"))
-        .map((p) => ({ label: `Entry ${p.instrument} ${p.quantity > 0 ? "long" : "short"}`, price: p.avg_price })),
+      ...onChart.map((p) => ({ label: `Entry ${p.instrument} ${p.quantity > 0 ? "long" : "short"}`, price: p.avg_price })),
     ],
-    [levels, positions, symbol],
+    [levels, onChart],
+  );
+  const plans = useMemo(
+    () =>
+      onChart.flatMap((p) => {
+        const plan = riskPlan(p.avg_price, p.quantity, levels, zones);
+        return plan ? [{ label: `${p.instrument} ${p.quantity > 0 ? "LONG" : "SHORT"} ${Math.abs(p.quantity)}`, plan }] : [];
+      }),
+    [onChart, levels, zones],
   );
 
   const lastPrice = bars.at(-1)?.close ?? quote?.price;
@@ -310,7 +327,7 @@ export default function Markets() {
               ))}
             </div>
           </div>
-          <CandleChart bars={bars} levels={chartLevels} />
+          <CandleChart bars={bars} levels={chartLevels} zones={zones} plans={plans} />
           <div className="flex flex-wrap gap-2">
             <a
               className="rounded-md border px-3 py-1 text-sm hover:bg-zinc-50"

@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd agent that starts the NIFTY liquidity signals (app.liquidity_signals) at 09:10 Monday to Friday.
+  It exits by itself after 14:30, or at 10:00 on a market holiday. caffeinate keeps the Mac awake meanwhile.
+  Replace /path/to/genesis/backend and the uv path (`which uv`), then:
+    cp deploy/com.genesis.liquidity-signals.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/com.genesis.liquidity-signals.plist
+  Log: data/logs/liquidity-signals.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.genesis.liquidity-signals</string>
+  <key>WorkingDirectory</key>
+  <string>/path/to/genesis/backend</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/caffeinate</string>
+    <string>-i</string>
+    <string>/opt/homebrew/bin/uv</string>
+    <string>run</string>
+    <string>python</string>
+    <string>-m</string>
+    <string>app.liquidity_signals</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>10</integer></dict>
+    <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>9</integer><key>Minute</key><integer>10</integer></dict>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>PYTHONUNBUFFERED</key><string>1</string></dict>
+  <key>StandardOutPath</key>
+  <string>/path/to/genesis/backend/data/logs/liquidity-signals.log</string>
+  <key>StandardErrorPath</key>
+  <string>/path/to/genesis/backend/data/logs/liquidity-signals.log</string>
+</dict>
+</plist>

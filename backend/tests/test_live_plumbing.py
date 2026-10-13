@@ -18,7 +18,7 @@ from app.audit import audit_context
 from app.auth import hash_token
 from app.auth.__main__ import main as auth_cli
 from app.brokers import credentials, registry
-from app.brokers.base import OrderRequest
+from app.brokers.base import OrderAck, OrderRequest
 from app.brokers.registry import BrokerSpec, CredentialField
 from app.brokers.sandbox import SandboxBroker, SandboxMarket
 from app.config import get_settings
@@ -190,6 +190,24 @@ def test_unfilled_order_gives_up_after_the_reprice_steps(live_session, sandbox_d
     steps = get_settings().order_reprice_steps
     assert error == f"order for {orders[0].tradingsymbol} not filled after {steps} re-prices (0 of 75 filled)"
     assert len(orders) == steps + 1 and len(broker.cancels) == steps + 1
+    live_session.rollback()
+
+
+class PendingCancelBroker(SandboxBroker):
+    """A broker whose cancel is acknowledged but not yet done, as real exchanges answer it."""
+
+    def cancel_order(self, broker_order_id: str) -> OrderAck:
+        self.cancels.append(broker_order_id)
+        return OrderAck(self._orders[broker_order_id].request["client_order_id"], broker_order_id, True)
+
+
+def test_no_reprice_while_the_cancelled_order_can_still_fill(live_session, sandbox_deployment, profile):
+    broker = PendingCancelBroker("paper", market=SandboxMarket(spread_pct=20), profile=profile, clock=Clock())
+    manager, intent = _manager(live_session, sandbox_deployment, broker, profile, lot_size=75)
+    with audit_context("test"):
+        orders, error = manager.execute(intent, [_leg(broker, quantity=75)])
+    assert len(orders) == 1 and broker.cancels == [orders[0].broker_order_id]  # nothing re-sent
+    assert error is not None and "still OPEN after cancel" in error
     live_session.rollback()
 
 

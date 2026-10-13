@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import func, select
 
+from app.agents.review_crew.graph import _verdict_node
 from app.agents.review_crew.improver import propose_improvements
 from app.agents.review_crew.reviewer import review_sim_runs, review_trade
 from app.db.models import SimTrade, StrategyImprovement, TradeReview
@@ -227,3 +228,21 @@ def test_human_review_supersedes_agent_review(client, demo):
     assert r.status_code == 400
     assert client.get("/api/trades/sim/999999/reviews").status_code == 404
     assert client.get("/api/trades/bogus/1/reviews").status_code == 400
+
+
+def _verdict(source: str, bt_trades: int, fw_trades: int) -> str:
+    def window(net, trades):
+        return {"net_pnl": net, "gross_pnl": net, "trades": trades}
+
+    results = [{"backtest": window(1000, bt_trades), "forward": window(500, fw_trades)}]
+    state = {"scenario_results": results, "audit": {"simulatable": True, "issues": []}, "data_source": source}
+    return _verdict_node(state)["verdict"]["label"]
+
+
+def test_synthetic_data_is_never_called_profitable():
+    assert _verdict("nse_eod", 40, 12) == "Profitable"
+    assert _verdict("sample_synthetic", 40, 12) == "Synthetic data only"
+
+
+def test_a_handful_of_winning_trades_is_too_few_to_judge():
+    assert _verdict("nse_eod", 3, 2) == "Too few trades"

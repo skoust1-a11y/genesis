@@ -1,5 +1,15 @@
 from app.db import guards  # noqa: F401  (registers append-only listeners)
-from app.db.models.core import AuditEvent, IngestRun, PaperOrder, Report, Strategy, StrategyVersion, new_id
+from app.db.models.core import (
+    AuditEvent,
+    IngestRun,
+    PaperOrder,
+    Report,
+    Strategy,
+    StrategyVersion,
+    User,
+    UserSession,
+    new_id,
+)
 from app.db.models.journal import ImprovementDecision, StrategyImprovement, TradeReview
 from app.db.models.live import (
     LIVE_APPEND_ONLY_TABLES,
@@ -72,5 +82,7 @@ __all__ = [
     "TradeIntent",
     "TradeOpinion",
     "TradeReview",
+    "User",
+    "UserSession",
     "new_id",
 ]

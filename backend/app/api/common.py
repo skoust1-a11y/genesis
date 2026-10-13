@@ -26,12 +26,15 @@ def or_400(fn: Callable[..., T], *args, **kwargs) -> T:
 
 
 def ensure_authenticated() -> str:
-    """The caller's token name. 403 when no API_TOKENS are configured, 401 without a valid token.
-    Applies even when API_TOKENS is empty: broker credentials and live trading always need a token."""
-    if not get_settings().token_hashes:
+    """The caller's token name. 403 when no API token or user exists, 401 without a valid token.
+    Applies even then: broker credentials and live trading always need a token."""
+    if not auth.enabled(get_settings()):
         raise HTTPException(
             status_code=403,
-            detail="this action needs API authentication: set API_TOKENS (uv run python -m app.auth new-token NAME)",
+            detail=(
+                "this action needs API authentication: create a login (uv run python -m app.auth new-user NAME) "
+                "or set API_TOKENS (uv run python -m app.auth new-token NAME)"
+            ),
         )
     name = auth.authenticated_actor()
     if name is None:

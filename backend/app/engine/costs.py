@@ -6,6 +6,8 @@ from dataclasses import dataclass, field, fields
 from app.config import Settings
 from app.strategies.schema import StrategyDocument
 
+TICK = 0.05  # NSE index option tick size, INR
+
 
 def rate_on(schedule: list[tuple[str, float]], trade_date: str | None, default: float) -> float:
     """The rate in force on `trade_date` from (effective_date, rate) pairs; `default` without a date."""
@@ -30,6 +32,7 @@ class CostProfile:
     stt_schedule: list[tuple[str, float]] = field(default_factory=list)
     exchange_txn_schedule: list[tuple[str, float]] = field(default_factory=list)
     exercise_stt_pct: float = 0.00125
+    slippage_min_ticks: float = 0  # per unit per fill; applies when the fill quantity is known
 
     def stt_rate(self, trade_date: str | None = None) -> float:
         return rate_on(self.stt_schedule, trade_date, self.stt_pct)
@@ -82,16 +85,19 @@ def resolve_cost_profile(settings: Settings, strategy: StrategyDocument) -> Cost
         stt_schedule=[] if "stt_pct" in fm else settings.schedule(settings.stt_schedule),
         exchange_txn_schedule=[] if "exchange_txn_pct" in fm else settings.schedule(settings.exchange_txn_schedule),
         exercise_stt_pct=float(fm.get("exercise_stt_pct", settings.exercise_stt_pct)),
+        slippage_min_ticks=float(fm.get("slippage_min_ticks", settings.slippage_min_ticks)),
     )
 
 
 def cost_breakdown(
-    notional: float, orders: int, profile: CostProfile, side: str | None = None, trade_date: str | None = None
+    notional: float, orders: int, profile: CostProfile, side: str | None = None, trade_date: str | None = None,
+    quantity: int | None = None,
 ) -> CostBreakdown:
     """Charges on `notional` premium turnover.
 
     STT applies to sells and stamp duty to buys; without a side both apply (the conservative
-    estimate used when one figure covers several legs).
+    estimate used when one figure covers several legs). With `quantity`, slippage is at least
+    `slippage_min_ticks` option ticks per unit.
     """
     turnover = abs(notional)
     brokerage = profile.brokerage_per_order * orders
@@ -104,7 +110,7 @@ def cost_breakdown(
         sebi=sebi,
         stamp_duty=turnover * profile.stamp_duty_pct if side in (None, "BUY") else 0.0,
         gst=(brokerage + exchange + sebi) * profile.gst_pct,
-        slippage=turnover * (profile.slippage_bps / 10_000),
+        slippage=max(turnover * profile.slippage_bps / 10_000, (quantity or 0) * profile.slippage_min_ticks * TICK),
     )
 
 
@@ -112,7 +118,9 @@ def leg_costs(fills: Iterable[tuple[str, float, int]], profile: CostProfile, tra
     """Charges for one order per (side, price, quantity) fill."""
     total = CostBreakdown.zero()
     for side, price, quantity in fills:
-        total += cost_breakdown(price * quantity, 1, profile, side=side, trade_date=trade_date)
+        total += cost_breakdown(
+            price * quantity, 1, profile, side=side, trade_date=trade_date, quantity=quantity
+        )
     return total
 
 

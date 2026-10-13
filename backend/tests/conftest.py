@@ -69,6 +69,7 @@ def _code_default_settings(monkeypatch):
     """Code defaults for settings the developer's .env commonly changes."""
     for name, value in (
         ("OPENAI_API_KEY", ""), ("ANTHROPIC_API_KEY", ""), ("LLM_PROVIDER", "openai"),
+        ("FALLBACK_LLM_PROVIDER", ""), ("GROQ_API_KEY", ""), ("GOOGLE_API_KEY", ""), ("HF_TOKEN", ""),
         ("DEFAULT_CAPITAL_INR", "500000"), ("DEFAULT_MAX_LOTS", "2"),
         ("PORTFOLIO_MAX_OPEN_POSITIONS", "3"), ("PORTFOLIO_MAX_DAILY_LOSS_INR", "10000"),
         ("MAX_ENTRIES_PER_DAY", "0"), ("MAX_CONSECUTIVE_LOSSES", "0"), ("LOSS_COOLDOWN_DAYS", "0"),

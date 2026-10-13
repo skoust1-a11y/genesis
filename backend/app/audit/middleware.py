@@ -27,9 +27,11 @@ def _clean(value: str | None, limit: int) -> str | None:
 
 
 def _needs_token(scope) -> bool:
-    """With API_TOKENS set: every mutating request and every /api/live read."""
-    method = scope.get("method", "GET")
-    return method in MUTATING or (method != "OPTIONS" and scope.get("path", "").startswith("/api/live"))
+    """Once auth is enabled: every mutating request except login, and every /api/live read."""
+    method, path = scope.get("method", "GET"), scope.get("path", "")
+    if path == "/api/auth/login":
+        return False
+    return method in MUTATING or (method != "OPTIONS" and path.startswith("/api/live"))
 
 
 async def _reject(send, request_id: str, status: int, detail: str) -> None:
@@ -52,7 +54,7 @@ class AuditContextMiddleware:
     """Pure ASGI middleware so the context vars reach sync endpoints run in the threadpool.
 
     A valid `Authorization: Bearer` token makes its name the actor (X-Actor is then ignored); an
-    invalid one gets 401. When API_TOKENS is set, requests that need a token and lack one get 401.
+    invalid one gets 401. Once a token or user exists, requests that need a token and lack one get 401.
     """
 
     def __init__(self, app) -> None:
@@ -71,10 +73,10 @@ class AuditContextMiddleware:
             scheme, _, token = authorization.partition(" ")
             name = auth.verify(token.strip(), settings) if scheme.lower() == "bearer" and token.strip() else None
             if name is None:
-                await _reject(send, request_id, 401, "invalid API token")
+                await _reject(send, request_id, 401, "invalid or expired token: log in again")
                 return
             actor = name
-        elif settings.token_hashes and _needs_token(scope):
+        elif _needs_token(scope) and auth.enabled(settings):
             await _reject(send, request_id, 401, "this API needs a token: send Authorization: Bearer <token>")
             return
 

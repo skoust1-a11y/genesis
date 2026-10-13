@@ -264,7 +264,15 @@ These actions always need a token, even with `API_TOKENS` empty; without it they
 - approving, starting, the LLM veto and capital events on a live deployment
 - `stop` with `flatten`
 
-The frontend stores the token in the browser's `localStorage`; enter it on `/deploy`. Static tokens suit one user or a small team on a private network; they are not a multi-user login. Expose the API publicly only behind TLS.
+The frontend stores the token in the browser's `localStorage`; enter it on `/deploy`. Static tokens suit scripts and a small team on a private network. Expose the API publicly only behind TLS.
+
+#### Username and password logins
+
+```bash
+uv run python -m app.auth new-user alice   # prompts for the password; run again to reset it
+```
+
+Users log in at `/login` (`POST /api/auth/login`) and get a session token that expires after `SESSION_HOURS` (default 12). The token works like a static one: it is sent as `Authorization: Bearer`, its username is the audit actor, and once any user exists the rules above apply as if `API_TOKENS` were set. Passwords are stored as salted scrypt hashes and sessions as the sha256 of their token. Logging out (`POST /api/auth/logout`) or resetting the password ends sessions. Five failed logins lock a username for 15 minutes, counted per API process. `CORS_ORIGINS='*'` is only refused at startup when `API_TOKENS` is set, so list the frontend origin explicitly when you use logins.
 
 ### Supervisor and alerts
 
@@ -283,6 +291,24 @@ Alerts (`app/alerts.py`) go to Telegram (`ALERT_TELEGRAM_BOT_TOKEN`, `ALERT_TELE
 - a kill switch that could not cancel or flatten
 
 Every alert is also logged. A failed delivery is logged and never blocks trading.
+
+To get the trade your strategies suggest, and to check that alerts arrive, run:
+
+```bash
+uv run python -m app.suggest                  # every strategy that is not archived
+uv run python -m app.suggest --strategy ID    # one strategy
+```
+
+For each strategy, it checks the entry rules on the latest day in the imported market data, or on the bundled sample without an import. If they pass, it lists the legs, lot count, premium, target, stop and max loss. It prints the result and sends it to the alert channels. Prices are end-of-day closes, so treat it as a plan for the next session; a deployment's risk and portfolio limits are not applied. The exit code is 1 when nothing was delivered.
+
+For intraday NIFTY signals from the liquidity sweep strategy (v2, see `DocumentsAndDiagrams/NIFTY_Liquidity_Plan_2026-10-13.xlsx`), start this before 09:15 and leave it running:
+
+```bash
+uv run python -m app.liquidity_signals          # checks every 5 min until 14:30
+uv run python -m app.liquidity_signals --once   # one check, e.g. to test delivery
+```
+
+It sends the day's levels once, then a suggested trade (side, entry, stop, 2R target, risk per lot) when every entry condition is met on a completed 5m bar. The ATM call (long) or put (short) is priced from Groww's live chain at entry, stop and target, and Telegram also gets two charts: the option's premium (estimated from the index at the chain's IV, as no intraday option data is free) and NIFTY's 5m candles. A trigger more than 15 minutes old is printed as missed and not sent. Bars come from Yahoo (a few minutes delayed) and VWAP from the NIFTYBEES ETF, so check the live price before acting. To start it at 09:10 every weekday, install `deploy/com.genesis.liquidity-signals.plist` (instructions inside).
 
 ### Going live
 
@@ -420,6 +446,7 @@ policy:
 | `BROKER_CREDENTIALS_KEY` | — | Fernet key for stored credentials |
 | `BROKER_<BROKER>_<FIELD>` | — | Credential fallback, e.g. `BROKER_ZERODHA_ACCESS_TOKEN` |
 | `API_TOKENS` | — | `name:sha256` pairs, comma-separated |
+| `SESSION_HOURS` | 12 | Lifetime of a web login |
 | `MAX_SPREAD_PCT` | `5` | Wider bid/ask spreads mark a quote stale, which blocks entries on that leg |
 | `ORDER_FILL_TIMEOUT_S` / `ORDER_POLL_INTERVAL_S` | `30` / `1` | How long to wait for a fill, and how often to poll |
 | `ORDER_REPRICE_STEPS` / `MAX_SLIPPAGE_BPS` | `2` / `100` | Re-prices toward the market, and how far from the quote |

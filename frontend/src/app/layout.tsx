@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
+
+import { AuthNav } from "@/components/AuthNav";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -50,6 +52,7 @@ export default function RootLayout({
             <span className="ml-auto rounded-full bg-amber-100 px-3 py-1 text-xs font-medium text-amber-900">
               Paper trading
             </span>
+            <AuthNav />
           </div>
         </nav>
         {children}

@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="640" viewBox="0 0 1240 640">
+  <style>
+    text { font-family: Helvetica, Arial, sans-serif; fill: #1c1917; }
+    .box { fill: #fff; stroke: #44403c; stroke-width: 1.4; }
+    .ext { fill: #fff; stroke: #78716c; stroke-width: 1.2; stroke-dasharray: 5 3; }
+    .ln { stroke: #44403c; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+    .h { font-size: 18px; font-weight: 700; }
+    .sub { font-size: 12px; fill: #57534e; }
+    .t { font-size: 13px; font-weight: 700; }
+    .s { font-size: 11px; fill: #44403c; }
+    .l { font-size: 10.5px; fill: #57534e; }
+    .sec { font-size: 12px; font-weight: 700; fill: #57534e; }
+  </style>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#44403c"/>
+    </marker>
+  </defs>
+  <rect width="1240" height="640" fill="#fafaf9"/>
+  <text x="40" y="38" class="h">Strategy lab flow: ingest, clarify, review, improve</text>
+  <text x="40" y="58" class="sub">UI page /lab. Every step writes new rows; nothing is edited in place.</text>
+
+  <text x="40" y="80" class="sec">1. Ingest</text>
+  <rect class="ext" x="40" y="88" width="196" height="104" rx="6"/>
+  <text x="52" y="110" class="t">Strategy source</text>
+  <text x="52" y="130" class="s">YouTube or Instagram URL,</text>
+  <text x="52" y="145" class="s">HTML document URL,</text>
+  <text x="52" y="160" class="s">NotebookLM notes, Markdown,</text>
+  <text x="52" y="175" class="s">or the demo fixture</text>
+  <path class="ln" d="M236 140 H280"/>
+
+  <rect class="box" x="280" y="88" width="196" height="104" rx="6"/>
+  <text x="292" y="110" class="t">POST /api/ingest/extract</text>
+  <text x="292" y="130" class="s">fetches the source text</text>
+  <text x="292" y="145" class="s">(PDF URLs are refused)</text>
+  <text x="292" y="160" class="s">/api/demo/run uses the</text>
+  <text x="292" y="175" class="s">bundled NotebookLM fixture</text>
+  <path class="ln" d="M476 140 H520"/>
+
+  <rect class="box" x="520" y="88" width="196" height="104" rx="6"/>
+  <text x="532" y="110" class="t">Extractor</text>
+  <text x="532" y="130" class="s">LLM_PROVIDER model writes</text>
+  <text x="532" y="145" class="s">Markdown with a rules: block</text>
+  <text x="532" y="160" class="s">Unclear rules go to Gaps;</text>
+  <text x="532" y="175" class="s">thresholds are never invented</text>
+  <path class="ln" d="M716 140 H760"/>
+
+  <rect class="box" x="760" y="88" width="196" height="104" rx="6"/>
+  <text x="772" y="110" class="t">Version saved</text>
+  <text x="772" y="130" class="s">ingest_runs: extractor,</text>
+  <text x="772" y="145" class="s">model, raw output, status</text>
+  <text x="772" y="160" class="s">strategies and</text>
+  <text x="772" y="175" class="s">strategy_versions (hashed)</text>
+  <path class="ln" d="M956 140 H1000"/>
+
+  <rect class="box" x="1000" y="88" width="196" height="104" rx="6"/>
+  <text x="1012" y="110" class="t">Clarifying questions</text>
+  <text x="1012" y="130" class="s">required: underlying,</text>
+  <text x="1012" y="145" class="s">structure, entry, stop,</text>
+  <text x="1012" y="160" class="s">target, lots, rule errors</text>
+  <text x="1012" y="175" class="s">optional: blackouts, VIX, Gaps</text>
+
+  <path class="ln" d="M1098 192 V226 H858 V192"/>
+  <text x="880" y="244" class="l">POST /api/ingest/clarify: the answers become hints, the stored</text>
+  <text x="880" y="258" class="l">source is extracted again and saved as a new version (needs an LLM key)</text>
+
+  <text x="40" y="290" class="sec">2. Review and improve</text>
+  <path class="ln" d="M800 192 V272 H210 V300"/>
+  <text x="222" y="266" class="l">any saved version can be reviewed</text>
+
+  <rect class="box" x="40" y="300" width="196" height="104" rx="6"/>
+  <text x="52" y="322" class="t">POST /api/review/run</text>
+  <text x="52" y="342" class="s">loads a version, or raw</text>
+  <text x="52" y="357" class="s">Markdown, and runs the</text>
+  <text x="52" y="372" class="s">Review Crew in the request</text>
+  <path class="ln" d="M236 352 H280"/>
+
+  <rect class="box" x="280" y="300" width="196" height="104" rx="6"/>
+  <text x="292" y="322" class="t">Review Crew</text>
+  <text x="292" y="342" class="s">audit, scenarios, simulate,</text>
+  <text x="292" y="357" class="s">hard stop, trade reviews,</text>
+  <text x="292" y="372" class="s">verdict, improve</text>
+  <text x="292" y="390" class="l">detail in workflow diagram</text>
+  <path class="ln" d="M476 352 H520"/>
+
+  <rect class="box" x="520" y="300" width="196" height="104" rx="6"/>
+  <text x="532" y="322" class="t">Report</text>
+  <text x="532" y="342" class="s">verdict and scenario results,</text>
+  <text x="532" y="357" class="s">hard-stop sweep, sim trades,</text>
+  <text x="532" y="372" class="s">trade reviews, proposals</text>
+  <text x="532" y="390" class="l">GET /api/journal lists trades</text>
+  <path class="ln" d="M716 352 H760"/>
+
+  <rect class="box" x="760" y="300" width="196" height="104" rx="6"/>
+  <text x="772" y="322" class="t">Improvements</text>
+  <text x="772" y="342" class="s">GET /api/strategies/{id}/</text>
+  <text x="772" y="357" class="s">improvements, each with</text>
+  <text x="772" y="372" class="s">evidence and a status</text>
+  <path class="ln" d="M956 352 H1000"/>
+
+  <rect class="box" x="1000" y="300" width="196" height="104" rx="6"/>
+  <text x="1012" y="322" class="t">Decision</text>
+  <text x="1012" y="342" class="s">POST /api/improvements/{id}/</text>
+  <text x="1012" y="357" class="s">decisions: accepted,</text>
+  <text x="1012" y="372" class="s">rejected or applied</text>
+  <text x="1012" y="390" class="l">rejected and applied are final</text>
+
+  <path class="ln" d="M1098 404 V440"/>
+  <rect class="box" x="1000" y="440" width="196" height="64" rx="6"/>
+  <text x="1012" y="462" class="t">Applied</text>
+  <text x="1012" y="480" class="s">edited Markdown saved as a</text>
+  <text x="1012" y="495" class="s">new version (resulting_version_id)</text>
+  <path class="ln" d="M1000 472 H138 V404"/>
+  <text x="300" y="466" class="l">the new version goes through review again before it can be approved</text>
+
+  <text x="40" y="540" class="sec">Alongside</text>
+  <rect class="box" x="40" y="550" width="436" height="58" rx="6"/>
+  <text x="52" y="572" class="t">Human trade reviews</text>
+  <text x="52" y="590" class="s">POST /api/trades/{sim|live}/{id}/reviews; newer ones supersede</text>
+  <rect class="box" x="520" y="550" width="196" height="58" rx="6"/>
+  <text x="532" y="572" class="t">Archive</text>
+  <text x="532" y="590" class="s">soft delete, never removed</text>
+  <rect class="box" x="760" y="550" width="436" height="58" rx="6"/>
+  <text x="772" y="572" class="t">Approve for paper or live</text>
+  <text x="772" y="590" class="s">a reviewed version with no Gaps; continues in the live trading flow</text>
+</svg>

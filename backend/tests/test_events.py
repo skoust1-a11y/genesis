@@ -36,11 +36,11 @@ def store(market_db_url):
 
 
 def test_seed_calendar_loads_and_is_marked_for_verification():
-    [path] = sorted(SEED_DIR.glob("*.yaml"))
-    events = load_event_yaml(path)
+    paths = sorted(SEED_DIR.glob("*.yaml"))
+    events = [e for path in paths for e in load_event_yaml(path)]
     assert {e["kind"] for e in events} == {"budget", "election", "rbi_policy", "fomc"}
     assert all(e["underlying"] is None and e["source"] == "manual_macro_calendar" for e in events)
-    assert "VERIFY" in path.read_text()
+    assert all("VERIFY" in path.read_text() for path in paths)
 
 
 def test_unknown_event_kind_is_rejected(tmp_path):

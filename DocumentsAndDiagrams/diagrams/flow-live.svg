@@ -1,0 +1,177 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="760" viewBox="0 0 1240 760">
+  <style>
+    text { font-family: Helvetica, Arial, sans-serif; fill: #1c1917; }
+    .box { fill: #fff; stroke: #44403c; stroke-width: 1.4; }
+    .bad { fill: #fff; stroke: #b91c1c; stroke-width: 1.4; }
+    .ext { fill: #fff; stroke: #78716c; stroke-width: 1.2; stroke-dasharray: 5 3; }
+    .db { fill: #f5f5f4; stroke: #a8a29e; stroke-width: 1.2; }
+    .ln { stroke: #44403c; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+    .rl { stroke: #b91c1c; stroke-width: 1.4; fill: none; marker-end: url(#r); }
+    .h { font-size: 18px; font-weight: 700; }
+    .sub { font-size: 12px; fill: #57534e; }
+    .t { font-size: 13px; font-weight: 700; }
+    .s { font-size: 11px; fill: #44403c; }
+    .l { font-size: 10.5px; fill: #57534e; }
+    .sec { font-size: 12px; font-weight: 700; fill: #57534e; }
+  </style>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#44403c"/>
+    </marker>
+    <marker id="r" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#b91c1c"/>
+    </marker>
+  </defs>
+  <rect width="1240" height="760" fill="#fafaf9"/>
+  <text x="40" y="38" class="h">Approve, deploy and trade (paper or live)</text>
+  <text x="40" y="58" class="sub">UI pages /deploy and /deployments. Routes are under /api/live. Red marks the failure paths.</text>
+
+  <text x="40" y="80" class="sec">1. Approve</text>
+  <rect class="box" x="40" y="88" width="196" height="104" rx="6"/>
+  <text x="52" y="110" class="t">/deploy page</text>
+  <text x="52" y="130" class="s">pick a reviewed version,</text>
+  <text x="52" y="145" class="s">mode (paper or live), broker</text>
+  <text x="52" y="160" class="s">account, capital and</text>
+  <text x="52" y="175" class="s">risk limits</text>
+  <path class="ln" d="M236 140 H280"/>
+
+  <rect class="box" x="280" y="88" width="196" height="104" rx="6"/>
+  <text x="292" y="110" class="t">Preview</text>
+  <text x="292" y="130" class="s">GET /approvals/preview</text>
+  <text x="292" y="145" class="s">blockers: rule errors, open</text>
+  <text x="292" y="160" class="s">Gaps, no completed report,</text>
+  <text x="292" y="175" class="s">archived; live gates if live</text>
+  <path class="ln" d="M476 140 H520"/>
+
+  <rect class="box" x="520" y="88" width="196" height="104" rx="6"/>
+  <text x="532" y="110" class="t">Risk-limit backtest</text>
+  <text x="532" y="130" class="s">POST /approvals/backtest</text>
+  <text x="532" y="145" class="s">optional: rules alone vs</text>
+  <text x="532" y="160" class="s">rules plus risk limits and</text>
+  <text x="532" y="175" class="s">the drawdown ladder</text>
+  <path class="ln" d="M716 140 H760"/>
+
+  <rect class="box" x="760" y="88" width="196" height="104" rx="6"/>
+  <text x="772" y="110" class="t">Approve</text>
+  <text x="772" y="130" class="s">POST /approvals freezes</text>
+  <text x="772" y="145" class="s">content and rules SHA-256</text>
+  <text x="772" y="160" class="s">into deployed_strategies</text>
+  <text x="772" y="175" class="s">and deployments; audit event</text>
+  <path class="ln" d="M956 140 H1000"/>
+
+  <rect class="box" x="1000" y="88" width="196" height="104" rx="6"/>
+  <text x="1012" y="110" class="t">Start</text>
+  <text x="1012" y="130" class="s">POST /deployments/{id}/start</text>
+  <text x="1012" y="145" class="s">live mode needs the API</text>
+  <text x="1012" y="160" class="s">token; pause and stop use</text>
+  <text x="1012" y="175" class="s">the same route</text>
+
+  <path class="ln" d="M1098 192 V222 H138 V260"/>
+  <text x="150" y="216" class="l">status started: the supervisor picks it up on its next poll</text>
+
+  <text x="40" y="252" class="sec">2. Trade</text>
+  <rect class="box" x="40" y="260" width="196" height="104" rx="6"/>
+  <text x="52" y="282" class="t">Supervisor</text>
+  <text x="52" y="302" class="s">python -m app.live supervise</text>
+  <text x="52" y="317" class="s">one crew subprocess per</text>
+  <text x="52" y="332" class="s">started deployment; restarts</text>
+  <text x="52" y="347" class="s">crashes, heartbeat alerts</text>
+  <path class="ln" d="M236 312 H280"/>
+
+  <rect class="box" x="280" y="260" width="196" height="104" rx="6"/>
+  <text x="292" y="282" class="t">Trade Crew tick</text>
+  <text x="292" y="302" class="s">every --interval s (default 60)</text>
+  <text x="292" y="317" class="s">verify, gate, hours, observe,</text>
+  <text x="292" y="332" class="s">reconcile, exits, drawdown,</text>
+  <text x="292" y="347" class="s">daily, entry</text>
+  <path class="ln" d="M476 312 H520"/>
+
+  <rect class="box" x="520" y="260" width="196" height="104" rx="6"/>
+  <text x="532" y="282" class="t">risk, opinion, execute</text>
+  <text x="532" y="302" class="s">sizes the entry, records the</text>
+  <text x="532" y="317" class="s">LLM opinion (a veto only when</text>
+  <text x="532" y="332" class="s">enabled), writes the trade</text>
+  <text x="532" y="347" class="s">intent</text>
+  <path class="ln" d="M716 312 H760"/>
+
+  <rect class="box" x="760" y="260" width="196" height="104" rx="6"/>
+  <text x="772" y="282" class="t">Order manager</text>
+  <text x="772" y="302" class="s">hedge legs first; LIMIT at</text>
+  <text x="772" y="317" class="s">the quote, re-priced within</text>
+  <text x="772" y="332" class="s">MAX_SLIPPAGE_BPS; split by</text>
+  <text x="772" y="347" class="s">freeze qty; value, rate caps</text>
+  <path class="ln" d="M956 312 H1000"/>
+
+  <rect class="ext" x="1000" y="260" width="196" height="104" rx="6"/>
+  <text x="1012" y="282" class="t">Broker</text>
+  <text x="1012" y="302" class="s">Paper or Sandbox adapter:</text>
+  <text x="1012" y="317" class="s">quotes, orders, fills,</text>
+  <text x="1012" y="332" class="s">positions, stop orders</text>
+
+  <path class="ln" d="M378 364 V396"/>
+  <path class="ln" d="M618 364 V396"/>
+  <path class="ln" d="M858 364 V396"/>
+  <rect class="db" x="40" y="396" width="1156" height="40" rx="6"/>
+  <text x="52" y="421" class="t">Live DB</text>
+  <text x="120" y="421" class="s">intents, orders, fills, live trades, opinions, deployment events, capital events and the live audit chain</text>
+
+  <text x="40" y="474" class="sec">3. Exits and failures</text>
+  <rect class="box" x="40" y="482" width="196" height="96" rx="6"/>
+  <text x="52" y="504" class="t">Exit</text>
+  <text x="52" y="524" class="s">exits node: stop, target or</text>
+  <text x="52" y="539" class="s">days-to-expiry rule closes</text>
+  <text x="52" y="554" class="s">the legs via the order manager</text>
+
+  <rect class="box" x="280" y="482" width="196" height="96" rx="6"/>
+  <text x="292" y="504" class="t">Protective stops</text>
+  <text x="292" y="524" class="s">placed at the broker after</text>
+  <text x="292" y="539" class="s">every entry; they stay when</text>
+  <text x="292" y="554" class="s">the crew halts or stops</text>
+
+  <rect class="bad" x="520" y="482" width="196" height="96" rx="6"/>
+  <text x="532" y="504" class="t">Send or stop fails</text>
+  <text x="532" y="524" class="s">a leg does not fill or a stop</text>
+  <text x="532" y="539" class="s">cannot be placed: unwind</text>
+  <text x="532" y="554" class="s">closes the filled legs</text>
+  <path class="rl" d="M716 530 H760"/>
+
+  <rect class="bad" x="760" y="482" width="196" height="96" rx="6"/>
+  <text x="772" y="504" class="t">Halt</text>
+  <text x="772" y="524" class="s">halted event; working orders</text>
+  <text x="772" y="539" class="s">cancelled, stops kept;</text>
+  <text x="772" y="554" class="s">alert by Telegram or SMTP</text>
+
+  <rect class="box" x="1000" y="482" width="196" height="96" rx="6"/>
+  <text x="1012" y="504" class="t">Drawdown and floor</text>
+  <text x="1012" y="524" class="s">ladder or floor pauses;</text>
+  <text x="1012" y="539" class="s">the supervisor resumes it</text>
+  <text x="1012" y="554" class="s">after resume_after_days</text>
+
+  <text x="40" y="616" class="sec">4. Kill switch: POST /deployments/{id}/stop</text>
+  <rect class="box" x="40" y="624" width="196" height="80" rx="6"/>
+  <text x="52" y="646" class="t">Stop event first</text>
+  <text x="52" y="666" class="s">status stopped, so the crew</text>
+  <text x="52" y="681" class="s">sends nothing new</text>
+  <path class="ln" d="M236 664 H280"/>
+
+  <rect class="box" x="280" y="624" width="196" height="80" rx="6"/>
+  <text x="292" y="646" class="t">Cancel working orders</text>
+  <text x="292" y="666" class="s">protective stops stay</text>
+  <path class="ln" d="M476 664 H520"/>
+
+  <rect class="box" x="520" y="624" width="196" height="80" rx="6"/>
+  <text x="532" y="646" class="t">flatten: true</text>
+  <text x="532" y="666" class="s">needs the API token; closes</text>
+  <text x="532" y="681" class="s">every position, then the stops</text>
+  <path class="rl" d="M716 664 H760"/>
+
+  <rect class="bad" x="760" y="624" width="196" height="80" rx="6"/>
+  <text x="772" y="646" class="t">If a step fails</text>
+  <text x="772" y="666" class="s">deployment stays stopped;</text>
+  <text x="772" y="681" class="s">error returned and alerted</text>
+
+  <rect class="ext" x="1000" y="624" width="196" height="80" rx="6"/>
+  <text x="1012" y="646" class="t">Halted deployment</text>
+  <text x="1012" y="666" class="s">can still be flattened</text>
+  <text x="1012" y="681" class="s">with stop and flatten: true</text>
+</svg>

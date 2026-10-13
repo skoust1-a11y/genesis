@@ -68,6 +68,7 @@ def _metrics(r: SimResult) -> dict:
         "window": [r.window_start, r.window_end],
         "by_year": r.by_year,
         "skipped_signals": r.skipped,
+        "stats": r.stats,
     }
 
 
@@ -78,6 +79,7 @@ def _run_sims_node(state: ReviewState) -> ReviewState:
     cost_summary = {
         "brokerage_per_order": profile.brokerage_per_order,
         "slippage_bps": profile.slippage_bps,
+        "slippage_min_ticks": profile.slippage_min_ticks,
         "note": "Charges on every simulated fill: brokerage, STT on sells, exchange, GST, SEBI, stamp duty on "
         "buys and slippage; STT on long in-the-money legs exercised at expiry.",
     }
@@ -157,9 +159,11 @@ def _verdict_node(state: ReviewState) -> ReviewState:
         label = "Too few trades"
     else:
         label = "Not profitable"
+    data_source = state.get("data_source", "none")
+    if data_source != "nse_eod" and label in ("Profitable", "Conditional"):
+        label = "Synthetic data only"  # synthetic prices prove nothing; approval then needs an acknowledgement
     best = max(results, key=lambda x: x["backtest"]["net_pnl"] + x["forward"]["net_pnl"], default=None)
     worst = min(results, key=lambda x: x["backtest"]["net_pnl"] + x["forward"]["net_pnl"], default=None)
-    data_source = state.get("data_source", "none")
     verdict = {
         "label": label,
         "scenarios_tested": len(results),

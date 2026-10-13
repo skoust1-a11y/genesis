@@ -108,6 +108,46 @@ def test_trading_levels_use_previous_session():
     assert (levels["R1"], levels["S1"]) == (round(2 * p - 90, 2), round(2 * p - 110, 2))
     assert (levels["R2"], levels["S2"]) == (round(p + 20, 2), round(p - 20, 2))
     assert trading_levels([today]) == []
+    assert {lv["label"]: lv["price"] for lv in trading_levels([prev, today], session_over=True)}["PDH"] == 200
+
+
+def test_trading_zones_group_nearby_levels():
+    from app.api.market import trading_zones
+
+    levels = [
+        {"label": "S1", "price": 990}, {"label": "SSL1", "price": 992}, {"label": "PDL", "price": 950},
+        {"label": "PDH", "price": 1010}, {"label": "DH", "price": 1010}, {"label": "R1", "price": 1012},
+        {"label": "P", "price": 999}, {"label": "PDC", "price": 1001}, {"label": "DL", "price": 950},
+    ]  # fmt: skip
+    assert trading_zones(levels, last=1000, width=0.003) == [
+        {"low": 990, "high": 992, "labels": ["S1", "SSL1"], "side": "support"},
+        {"low": 999, "high": 1001, "labels": ["P", "PDC"], "side": "at price"},
+        {"low": 1010, "high": 1012, "labels": ["PDH", "DH", "R1"], "side": "resistance"},
+    ]  # PDL and DL share one price, so they are a line, not a zone
+    assert trading_zones([], last=1000) == []
+
+
+def test_intraday_levels_and_vwap():
+    from app.api.market import add_vwap, intraday_levels
+
+    def bar(t, high, low, volume=0):
+        return {"date": t, "open": low, "high": high, "low": low, "close": high, "volume": volume}
+
+    yesterday = bar("2025-10-08 15:25", 999, 1, 100)
+    today = [  # 5m bars
+        bar("2025-10-09 09:15", 105, 100), bar("2025-10-09 09:20", 107, 101), bar("2025-10-09 09:25", 106, 99),
+        bar("2025-10-09 09:30", 110, 102), bar("2025-10-09 09:35", 108, 103), bar("2025-10-09 09:40", 107, 98),
+        bar("2025-10-09 09:45", 109, 102), bar("2025-10-09 09:50", 108, 104), bar("2025-10-09 09:55", 112, 101),
+        bar("2025-10-09 10:00", 111, 106), bar("2025-10-09 10:05", 110, 107),
+    ]  # fmt: skip
+    levels = {lv["label"]: lv["price"] for lv in intraday_levels([yesterday, *today], or_bars=3)}
+    # Swing highs 110 and 109 were run by the 112 day high; swing low 99 was taken by the 98 day low.
+    assert levels == {"DH": 112, "DL": 98, "ORH": 107, "ORL": 99, "SSL1": 101}
+    assert "ORH" not in {lv["label"] for lv in intraday_levels(today, or_bars=0)}
+    assert intraday_levels([], or_bars=3) == []
+
+    vwap = [b["vwap"] for b in add_vwap([yesterday, bar("2025-10-09 09:15", 12, 6, 0), bar("2025-10-09 09:20", 12, 6, 10)])]
+    assert vwap == [round((999 + 1 + 999) / 3, 2), None, 10]
 
 
 def test_paper_orders_by_segment(client, monkeypatch):

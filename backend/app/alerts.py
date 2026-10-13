@@ -69,6 +69,24 @@ def send(settings: Settings, subject: str, body: str) -> list[str]:
     return sent
 
 
+def send_photo(settings: Settings, caption: str, png: bytes) -> bool:
+    """A chart to Telegram (email gets only the text alert); like `send`, a failure is logged, never raised."""
+    if not (settings.alert_telegram_bot_token and settings.alert_telegram_chat_id):
+        return False
+    try:
+        response = httpx.post(
+            f"https://api.telegram.org/bot{settings.alert_telegram_bot_token}/sendPhoto",
+            data={"chat_id": settings.alert_telegram_chat_id, "caption": caption[:1024]},
+            files={"photo": ("chart.png", png, "image/png")},
+            timeout=30,
+        )
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        log.error("photo via telegram failed: %s: %s", type(exc).__name__, exc)
+        return False
+
+
 def notify(settings: Settings, event: str, deployment_id: str | None, detail: str) -> list[str]:
     """`event`: halted | paused | resumed | protective_stop | reconcile_mismatch | heartbeat_missed | crashes |
     floor_raised | floor_top_up_needed | withdrawal_due."""

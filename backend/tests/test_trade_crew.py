@@ -229,7 +229,10 @@ def decisions(live_session, deployment_id):
 def test_llm_explanation_never_changes_the_decision(client, approvable, paper_account, live_session, make_ctx,
                                                     monkeypatch):  # fmt: skip
     calls = []
-    monkeypatch.setattr(graph, "_llm_explain", lambda settings, facts: calls.append(facts) or "Rich IV, so we sold.")
+    monkeypatch.setattr(
+        graph, "_llm_explain",
+        lambda settings, facts: calls.append(facts) or ("Rich IV, so we sold.", settings.openai_model),
+    )
 
     plain = approve_and_start(client, approvable, paper_account)
     run_tick(make_ctx(plain, [ENTRY]))

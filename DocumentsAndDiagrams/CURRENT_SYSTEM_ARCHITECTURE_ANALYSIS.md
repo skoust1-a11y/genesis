@@ -351,15 +351,25 @@ Local ports used by the root README: API `8841`, UI `8842`. `npm run dev` with n
 
 ## 14. Current end-to-end flows
 
+![Architecture](diagrams/architecture.svg)
+
+![Review Crew and Trade Crew](diagrams/workflow.svg)
+
 ### Lab
+
+![Lab flow](diagrams/flow-lab.svg)
 
 Browser → `POST /api/ingest/extract` or `POST /api/demo/run` → ingest row and strategy version → optional `POST /api/ingest/clarify` → new ingest row and strategy version → `POST /api/review/run` → Review Crew → report, simulations, trades, reviews, improvements → `GET /api/journal`.
 
 ### Approve and paper-trade
 
+![Approve, deploy and trade](diagrams/flow-live.svg)
+
 Browser → `POST /api/live/approvals/backtest` (optional) → `POST /api/live/approvals` → `deployed_strategies` and `deployments` in the live database, plus a research audit event → `POST /api/live/deployments/{id}/start` → supervisor or a manual crew process → ticks → intents, orders, fills, live trades, heartbeats.
 
 ### Manual paper trade
+
+![Markets and manual paper trading](diagrams/flow-paper.svg)
 
 Browser on `/markets` → `GET /api/market/candles` → FastAPI → Yahoo → `POST /api/paper/orders` → `paper_orders` row with charges, plus a `paper.order_placed` audit event → `GET /api/paper/positions` → positions netted from orders and marked at the latest quote.
 

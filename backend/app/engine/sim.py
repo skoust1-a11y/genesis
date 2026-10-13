@@ -35,6 +35,7 @@ from typing import Any
 from app.agents.trade_crew.legs import signed
 from app.config import Settings
 from app.engine.costs import CostBreakdown, CostProfile, exercise_costs, leg_costs
+from app.engine.metrics import performance
 from app.live import drawdown
 from app.market.feed import MarketFeed, MarketSnapshot, intrinsic
 from app.strategies.rules import (
@@ -181,6 +182,7 @@ class SimResult:
     by_year: dict[str, dict] = field(default_factory=dict)
     skipped: dict[str, int] = field(default_factory=dict)  # entry signals not taken, by reason
     management: dict = field(default_factory=dict)  # what the policy and drawdown ladder did, when given
+    stats: dict = field(default_factory=dict)  # `app.engine.metrics.performance`
 
 
 @dataclass
@@ -553,6 +555,7 @@ def simulate(
     last_market: MarketSnapshot | None = None
     last_index = 0
     first_day: str | None = None
+    days_in_market = 0
     day_index: dict[str, int] = {}  # market date -> trading days replayed before it
 
     def close(position: _Position, quotes: list[float], fired: Check) -> TradeResult:
@@ -754,6 +757,7 @@ def simulate(
 
         unrealized = sum(_unrealized(p, p.last_quotes) for p in open_positions)
         curve.append({"date": market.as_of, "equity": round(realized + unrealized, 4)})
+        days_in_market += bool(open_positions)
 
     if last_market is not None:
         for position in open_positions:
@@ -803,6 +807,7 @@ def simulate(
             | _odds_summary(gate, odds_history, odds_blocked, last_market.as_of if last_market else None)
             if m else {}
         ),
+        stats=performance([t.net for t in trades], curve, approved, days_in_market),
     )
 
 

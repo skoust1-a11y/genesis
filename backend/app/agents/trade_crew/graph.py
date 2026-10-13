@@ -225,11 +225,11 @@ def _check_dict(c: Check) -> dict:
 _describe = describe_check
 
 
-def _llm_explain(settings: Settings, facts: dict[str, Any]) -> str | None:
+def _llm_explain(settings: Settings, facts: dict[str, Any]) -> tuple[str, str] | None:
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from app.llm import chat_model
+        from app.llm import chat_model, served_model
 
         llm = chat_model(settings)
         resp = llm.invoke(
@@ -241,7 +241,8 @@ def _llm_explain(settings: Settings, facts: dict[str, Any]) -> str | None:
                 HumanMessage(content=str(facts)),
             ]
         )
-        return str(resp.content).strip() or None
+        text = str(resp.content).strip()
+        return (text, served_model(resp, settings)) if text else None
     except Exception:
         return None
 
@@ -250,8 +251,8 @@ def _reason(ctx: CrewContext, default: str, facts: dict[str, Any]) -> tuple[str,
     if not (ctx.explain and ctx.settings.llm_enabled):
         return default, None
     ctx.live.rollback()  # release the SQLite write lock while the LLM runs
-    text = _llm_explain(ctx.settings, facts)
-    return (f"{default}\n\n{text}", ctx.settings.llm_model) if text else (default, None)
+    explained = _llm_explain(ctx.settings, facts)
+    return (f"{default}\n\n{explained[0]}", explained[1]) if explained else (default, None)
 
 
 # Orders

@@ -1,0 +1,94 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="430" viewBox="0 0 1240 430">
+  <style>
+    text { font-family: Helvetica, Arial, sans-serif; fill: #1c1917; }
+    .box { fill: #fff; stroke: #44403c; stroke-width: 1.4; }
+    .ext { fill: #fff; stroke: #78716c; stroke-width: 1.2; stroke-dasharray: 5 3; }
+    .db { fill: #f5f5f4; stroke: #a8a29e; stroke-width: 1.2; }
+    .ln { stroke: #44403c; stroke-width: 1.4; fill: none; marker-end: url(#a); }
+    .h { font-size: 18px; font-weight: 700; }
+    .sub { font-size: 12px; fill: #57534e; }
+    .t { font-size: 13px; font-weight: 700; }
+    .s { font-size: 11px; fill: #44403c; }
+    .l { font-size: 10.5px; fill: #57534e; }
+    .sec { font-size: 12px; font-weight: 700; fill: #57534e; }
+  </style>
+  <defs>
+    <marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#44403c"/>
+    </marker>
+  </defs>
+  <rect width="1240" height="430" fill="#fafaf9"/>
+  <text x="40" y="38" class="h">Markets and manual paper trading</text>
+  <text x="40" y="58" class="sub">UI page /markets. Arrows show which part calls which.</text>
+
+  <text x="40" y="80" class="sec">1. Watch</text>
+  <rect class="box" x="40" y="88" width="196" height="104" rx="6"/>
+  <text x="52" y="110" class="t">/markets page</text>
+  <text x="52" y="130" class="s">watchlist of indices, stocks</text>
+  <text x="52" y="145" class="s">and commodities, a chart</text>
+  <text x="52" y="160" class="s">and an order ticket</text>
+  <path class="ln" d="M236 140 H280"/>
+
+  <rect class="box" x="280" y="88" width="196" height="104" rx="6"/>
+  <text x="292" y="110" class="t">GET /api/market/quotes</text>
+  <text x="292" y="130" class="s">up to 40 symbols, 8 at a time</text>
+  <text x="292" y="145" class="s">index rows carry the lot size</text>
+  <text x="292" y="160" class="s">failed symbols are listed</text>
+  <text x="292" y="175" class="s">as missing; unknown ones: 400</text>
+  <path class="ln" d="M476 140 H520"/>
+
+  <rect class="ext" x="520" y="88" width="196" height="104" rx="6"/>
+  <text x="532" y="110" class="t">Yahoo Finance</text>
+  <text x="532" y="130" class="s">delayed quotes and charts</text>
+  <text x="532" y="145" class="s">commodities are global</text>
+  <text x="532" y="160" class="s">futures in USD</text>
+  <rect class="box" x="760" y="88" width="196" height="104" rx="6"/>
+  <text x="772" y="110" class="t">GET /api/market/candles</text>
+  <text x="772" y="130" class="s">1m, 5m, 15m, 60m or 1d bars</text>
+  <text x="772" y="145" class="s">plus PDH, PDL, PDC and floor</text>
+  <text x="772" y="160" class="s">pivots from the daily bars</text>
+  <text x="772" y="175" class="s">502 if Yahoo is unreachable</text>
+  <path class="ln" d="M760 140 H716"/>
+  <path class="ln" d="M138 192 V214 H858 V192"/>
+  <text x="150" y="228" class="l">the chart</text>
+
+  <text x="40" y="252" class="sec">2. Paper orders</text>
+  <rect class="box" x="40" y="260" width="196" height="104" rx="6"/>
+  <text x="52" y="282" class="t">Order ticket</text>
+  <text x="52" y="302" class="s">underlying, EQ, FUT, CE or PE,</text>
+  <text x="52" y="317" class="s">side, lots, price, optional</text>
+  <text x="52" y="332" class="s">strategy link and note</text>
+  <path class="ln" d="M236 312 H280"/>
+
+  <rect class="box" x="280" y="260" width="196" height="104" rx="6"/>
+  <text x="292" y="282" class="t">POST /api/paper/orders</text>
+  <text x="292" y="302" class="s">stocks: shares only</text>
+  <text x="292" y="317" class="s">index: FUT or options, needs</text>
+  <text x="292" y="332" class="s">LOT_SIZES</text>
+  <text x="292" y="347" class="s">commodities: view-only (400)</text>
+  <path class="ln" d="M476 312 H520"/>
+
+  <rect class="box" x="520" y="260" width="196" height="104" rx="6"/>
+  <text x="532" y="282" class="t">Charges</text>
+  <text x="532" y="302" class="s">cost profile charges with no</text>
+  <text x="532" y="317" class="s">slippage; FY2025-26 rates</text>
+  <text x="532" y="332" class="s">for futures and delivery</text>
+  <text x="532" y="347" class="s">shares</text>
+  <path class="ln" d="M716 312 H760"/>
+
+  <rect class="db" x="760" y="260" width="196" height="104" rx="6"/>
+  <text x="772" y="282" class="t">Research DB</text>
+  <text x="772" y="302" class="s">a paper_orders row and a</text>
+  <text x="772" y="317" class="s">paper.order_placed event</text>
+  <text x="772" y="332" class="s">in the audit chain</text>
+  <path class="ln" d="M956 312 H1000"/>
+
+  <rect class="box" x="1000" y="260" width="196" height="104" rx="6"/>
+  <text x="1012" y="282" class="t">GET /api/paper/positions</text>
+  <text x="1012" y="302" class="s">net positions from orders</text>
+  <text x="1012" y="317" class="s">shares and futures marked at</text>
+  <text x="1012" y="332" class="s">the latest quote; options</text>
+  <text x="1012" y="347" class="s">are not marked</text>
+
+  <text x="40" y="400" class="l">These orders are manual and never reach a broker. A strategy deployed in paper mode trades through the Paper broker adapter instead (see the live trading flow).</text>
+</svg>

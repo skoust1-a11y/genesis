@@ -177,7 +177,7 @@ def add_llm_rationale(proposals: list[dict], strategy_markdown: str, settings) -
     try:
         from langchain_core.messages import HumanMessage, SystemMessage
 
-        from app.llm import chat_model
+        from app.llm import chat_model, served_model
 
         llm = chat_model(settings)
         items = [{"title": p["title"], "rationale": p["rationale"]} for p in proposals]
@@ -201,5 +201,5 @@ def add_llm_rationale(proposals: list[dict], strategy_markdown: str, settings) -
         return
     for proposal, note in zip(proposals, notes):
         if isinstance(note, str) and note.strip():
-            proposal["rationale"] += f"\n\nLLM note ({settings.llm_model}): {note.strip()}"
-            proposal["evidence"]["llm_model"] = settings.llm_model
+            proposal["rationale"] += f"\n\nLLM note ({served_model(resp, settings)}): {note.strip()}"
+            proposal["evidence"]["llm_model"] = served_model(resp, settings)

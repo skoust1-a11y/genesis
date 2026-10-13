@@ -144,6 +144,12 @@ class OrderManager:
                     if order is None or rejections > retries:
                         return orders, f"order for {leg['tradingsymbol']} rejected: {message}"
                     break
+                if status not in TERMINAL_ORDER_STATUSES:
+                    # Re-sending while the old order can still fill could double the position.
+                    return orders, (
+                        f"order {order.broker_order_id} for {leg['tradingsymbol']} is still {status} after cancel; "
+                        "not re-sent, check it at the broker"
+                    )
                 if filled < quantity:
                     break
             else:
@@ -180,6 +186,18 @@ class OrderManager:
         if not ack.accepted:
             return order, "REJECTED", 0, ack.message
         polls = max(1, math.ceil(self.settings.order_fill_timeout_s / self.settings.order_poll_interval_s))
+        update = self._wait(order, leg, polls)
+        if update is None or update.status not in TERMINAL_ORDER_STATUSES:
+            self.adapter.cancel_order(order.broker_order_id)
+            update = self._wait(order, leg, polls)
+        filled = sum(f.quantity for f in self.store.fills_for_order(order.id))
+        self._charges(order)
+        self.live.commit()
+        status = self.store.order_status(order.id) or "OPEN"
+        return order, status, filled, update.message if update else None
+
+    def _wait(self, order: Order, leg: dict[str, Any], polls: int) -> OrderUpdate | None:
+        """Sync the order until it is terminal or `polls` polls have passed."""
         update = None
         for i in range(polls):
             update = self.sync(order, leg)
@@ -187,14 +205,7 @@ class OrderManager:
                 break
             if i < polls - 1:
                 self.sleep(self.settings.order_poll_interval_s)
-        else:
-            self.adapter.cancel_order(order.broker_order_id)
-            update = self.sync(order, leg)
-        filled = sum(f.quantity for f in self.store.fills_for_order(order.id))
-        self._charges(order)
-        self.live.commit()
-        status = self.store.order_status(order.id) or "OPEN"
-        return order, status, filled, update.message if update else None
+        return update
 
     def _client_order_id(self, intent: TradeIntent) -> str:
         return f"tc-{intent.id}-{len(self.store.orders_for_intent(intent.id)):02d}"

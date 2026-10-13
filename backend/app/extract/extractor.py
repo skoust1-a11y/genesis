@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.config import get_settings
-from app.llm import chat_model
+from app.llm import chat_model, served_model
 from app.strategies.rules import ENTRY_FIELDS, EVENT_KINDS, EXIT_KINDS, OPS, STRUCTURES
 
 FIXTURE_MARKDOWN = """---
@@ -183,7 +183,8 @@ def extract_strategy(source: dict, hints: str = "") -> ExtractionResult:
             f"{body}"
         )
     )
-    reply = _content(llm.invoke([system, user]))
+    resp = llm.invoke([system, user])
+    reply, model = _content(resp), served_model(resp, settings)
     raw = reply if notes is None else f"# Condensed notes\n\n{notes}\n\n# Extraction\n\n{reply}"
     content = reply.strip()
     if not content.startswith("---"):
@@ -191,8 +192,8 @@ def extract_strategy(source: dict, hints: str = "") -> ExtractionResult:
         if m:
             content = m.group(1).strip()
     if not content.startswith("---"):
-        raise ExtractionError("Extractor did not return valid strategy markdown", raw, settings.llm_model)
-    return ExtractionResult(content, "llm", settings.llm_model, raw)
+        raise ExtractionError("Extractor did not return valid strategy markdown", raw, model)
+    return ExtractionResult(content, "llm", model, raw)
 
 
 class ExtractionError(ValueError):
