@@ -9,7 +9,10 @@ Long:  5m trades >1 pt below the previous day's low -> 15m close above the last 
 Short: 5m trades >1 pt above the previous day's high -> 15m close back below it -> 5m close below the last
        confirmed 5m swing low -> 5m close below VWAP, below that high and below the day's open.
        Stop: last 5m swing high after the raid + 5.
-Target 2R, entries 09:30-14:30, one per side per day, exit 15:10 if neither stop nor target is hit.
+Target 3R, stop to entry once price reaches +1R, entries 09:30-14:30, one per side per day, exit 15:10 if neither
+stop nor target is hit. Option: OTM_STEPS strikes out of the money (2016-2026: more trades fit the risk budget).
+Skipped: NIFTY expiry days, setups risking under MIN_RISK points, and
+BREAK_DAYS trading days after LOSS_STREAK losses in a row. Size: RISK_PCT% of the trading capital at risk per trade.
 """
 
 from __future__ import annotations
@@ -36,17 +39,26 @@ from app.api.market import (
 from app.brokers.groww import GrowwQuotes
 from app.config import Settings, get_settings
 from app.market.feed import BrokerFeed
+from app.market.hours import holidays
+from app.paper import order_charges
 from app.trading.option_pnl import black76, plan_pnl
 
 # ponytail: Yahoo bars are a few minutes delayed and the index has no volume, so VWAP comes from the NIFTYBEES ETF.
 # Switch to broker bars (Groww/Kite) and NIFTY futures VWAP for real-time signals.
 INDEX, VWAP_PROXY = "^NSEI", "NIFTYBEES.NS"
-SWING, R_MULT, FIRST_ENTRY, LAST_ENTRY = 2, 2.0, "09:30", "14:30"
+SWING, R_MULT, OTM_STEPS, FIRST_ENTRY, LAST_ENTRY = 2, 3.0, 2, "09:30", "14:30"
 FRESH = timedelta(minutes=15)  # older triggers are reported as missed, never sent: no chasing a late entry
+MIN_RISK = 30  # pts: over 2016-2026 setups with a closer stop earned nothing after costs
+RISK_PCT, LOSS_STREAK, BREAK_DAYS, EXIT = 5, 3, 3, "15:10"
 
 
 def _at(date: str, minutes: int) -> str:
     return (datetime.strptime(date, "%Y-%m-%d %H:%M") + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M")
+
+
+def strike_of(s: dict, step: float) -> float:
+    """OTM_STEPS strikes out of the money: above the entry for a long's call, below it for a short's put."""
+    return (round(s["entry"] / step) + (OTM_STEPS if s["side"] == "Long" else -OTM_STEPS)) * step
 
 
 def _bucket(date: str) -> str:
@@ -73,8 +85,10 @@ def pivots(bars: list[dict], key: str) -> list[int]:
     return [j for j in range(n, len(bars) - n) if bars[j][key] == pick(b[key] for b in bars[j - n : j + n + 1])]
 
 
-def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: float) -> list[dict]:
-    """Entries in one session's completed 5m `bars`; `above_vwap[date]` is whether that bar closed above VWAP."""
+def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: float,
+         min_risk: float = MIN_RISK, stop_at: str = "swing") -> list[dict]:  # fmt: skip
+    """Entries in one session's completed 5m `bars`; `above_vwap[date]` is whether that bar closed above VWAP.
+    `stop_at` "sweep" puts every stop 5 pts past the sweep low / raid high instead of at the last swing."""
     if not bars:
         return []
     day_open, b15, out = bars[0]["open"], to_15m(bars), []
@@ -117,7 +131,9 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
                 continue
             word, level = ("above", f"PDL {pdl:,.2f}") if long else ("below", f"PDH {pdh:,.2f}")
             why.append(f"{closes_at[11:]} entry: 5m close {c:,.2f} {word} VWAP, {word} {level} and {word} the open {day_open:,.2f}")
-            if long:
+            if stop_at == "sweep":
+                stop, basis = (ext - 5, f"sweep low {ext:,.2f} - 5") if long else (ext + 5, f"raid high {ext:,.2f} + 5")
+            elif long:
                 done = [x for x in b15 if _at(x["date"], 15) <= closes_at]
                 lows = [done[j] for j in pivots(done, "low") if done[j]["date"] >= _bucket(swept)]
                 if lows and lows[-1]["low"] - 5 < c:
@@ -131,7 +147,7 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
                 else:
                     stop, basis = ext + 15, f"raid high {ext:,.2f} + 15"
             risk = abs(c - stop)
-            if risk >= 10:
+            if risk >= min_risk:
                 target = c + R_MULT * risk if long else c - R_MULT * risk
                 out.append({"side": side, "time": closes_at, "entry": c, "stop": round(stop, 2),
                             "target": round(target, 2), "risk": round(risk, 2), "level": pdl if long else pdh,
@@ -148,15 +164,17 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
     if plan:
         stop, target = plan["exits"]
         option_lines = [
-            f"BUY NIFTY {plan['option']} {plan['expiry']} ~Rs {plan['entry_premium']:,.2f} (quote Rs {plan['quote']:,.2f}, IV {plan['iv_pct']:g}%)",
+            f"BUY NIFTY {plan['option']} {plan['expiry']} ~Rs {plan['entry_premium']:,.2f} "
+            + (f"(quote Rs {plan['quote']:,.2f}, IV {plan['iv_pct']:g}%)" if plan["quote"] is not None
+               else f"(estimated at India VIX {plan['iv_pct']:g}%: no live option chain, check the real premium)"),
             f"Stop ~Rs {stop['premium']:,.2f} | Target ~Rs {target['premium']:,.2f} (estimated at the index stop/target)",
             f"Per lot ({plan['quantity']}): {stop['pnl']:+,.0f} at stop | {target['pnl']:+,.0f} at target (after charges)",
         ]
         option_loss = -stop["pnl"]
     else:
-        option = f"{round(e / step) * step:g} {'CE' if long else 'PE'}"
-        option_lines = [f"ATM {option}: ~Rs {fut_loss * 0.5:,.0f}/lot at stop (delta ~0.5; option chain unavailable)"]
-        option_loss = fut_loss * 0.5
+        option = f"{strike_of(s, step):g} {'CE' if long else 'PE'}"
+        option_lines = [f"{option}: ~Rs {fut_loss * 0.4:,.0f}/lot at stop (delta ~0.4; option chain unavailable)"]
+        option_loss = fut_loss * 0.4
     lines = [
         f"NIFTY {s['side'].upper()} signal at {s['time'][11:]} IST ({'sell-side sweep' if long else 'buy-side raid'} of {s['level']:,.2f})",
         "",
@@ -164,6 +182,7 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
         f"Entry {e:,.2f} (5m close) | Stop {s['stop']:,.2f} | Target {s['target']:,.2f}",
         f"Risk {s['risk']:.0f} pts ({s['risk'] / e:.2%}) | Reward {abs(s['target'] - e):.0f} pts | R:R 1:{R_MULT:g}",
         *([f"Stop basis: {s['stop_basis']}"] if s.get("stop_basis") else []),
+        f"Move the stop to entry {e:,.2f} once price reaches {e + s['risk'] if long else e - s['risk']:,.2f} (+1R)",
         "",
         "OPTION",
         *option_lines,
@@ -189,27 +208,63 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
         "",
         "RISK",
         f"At stop: Rs {fut_loss:,.0f}/lot futures | Rs {option_loss:,.0f}/lot option",
-        f"Option lots = (1% of capital) / Rs {option_loss:,.0f}, rounded down; skip if under 1",
-        "Max 1 trade per side, stop for the day after 2 losses, exit 15:10 if neither stop nor target is hit.",
+        (f"Option lots = {RISK_PCT}% of your trading capital / Rs {option_loss:,.0f}, e.g. Rs 50,000 -> "
+         f"{int(500 * RISK_PCT // option_loss) if option_loss > 0 else 0} (skip if 0; never more than your account can pay,"
+         " never add to a loser)"),
+        f"Max 1 trade per side (so at most 2 a day), exit {EXIT} if neither stop nor target is hit.",
+        f"{LOSS_STREAK} losses in a row = {BREAK_DAYS} trading days off.",
         "Data is a few minutes delayed: check the live price first; skip if it already ran past stop or target.",
     ]
     return "\n".join(lines)
 
 
 def option_plan(s: dict, settings: Settings) -> dict | None:
-    """The ATM call (long) or put (short) priced from Groww's live chain at entry, stop and target; None if
-    the chain is unavailable."""
+    """The strike_of() call (long) or put (short) priced from Groww's live chain at entry, stop and target; estimated
+    at India VIX when the chain is unavailable; None if VIX is unavailable too."""
     step = settings.strike_step("NIFTY") or 50
     feed = BrokerFeed(GrowwQuotes(), settings, iv_rank=lambda *_: None, prev_range=lambda *_: None)
     try:
         snapshot = feed.snapshot("NIFTY")
-        if snapshot is None:
-            return None
-        return plan_pnl(snapshot, settings, "CE" if s["side"] == "Long" else "PE", round(s["entry"] / step) * step,
-                        s["entry"], {"stop": s["stop"], "target": s["target"]})  # fmt: skip
+        if snapshot is not None:
+            return plan_pnl(snapshot, settings, "CE" if s["side"] == "Long" else "PE", strike_of(s, step),
+                            s["entry"], {"stop": s["stop"], "target": s["target"]})  # fmt: skip
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         print(f"option chain unavailable: {exc}")
+    try:
+        vix = parse_yahoo_chart(_chart("^INDIAVIX", "1d", "5d"))[-1]["close"]
+    except (httpx.HTTPError, IndexError, KeyError) as exc:
+        print(f"India VIX unavailable: {exc}")
         return None
+    return estimated_plan(s, settings, vix) if vix else None
+
+
+def weekly_expiry(day: date, settings: Settings) -> date:
+    """NIFTY's weekly expiry on or after `day`: Tuesday, or the trading day before it when Tuesday is a holiday."""
+    exp = day + timedelta(days=(1 - day.weekday()) % 7)
+    while exp.isoformat() in holidays(settings) or exp.weekday() >= 5:
+        exp -= timedelta(days=1)
+    return exp
+
+
+def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | None = None) -> dict:
+    """option_plan() without a live chain: the strike_of() option to `expiry` (default: the weekly one) priced by
+    Black-76 at `iv_pct` (India VIX, a 30-day ATM IV), forward = spot. Same shape as plan_pnl() with `quote` None."""
+    # ponytail: one IV for every strike ignores the skew (OTM puts dearer, OTM calls cheaper); use the live chain's IVs to fix.
+    step, lot = settings.strike_step("NIFTY") or 50, settings.lot_size("NIFTY") or 65
+    kind, strike = "CE" if s["side"] == "Long" else "PE", strike_of(s, step)
+    expiry = expiry or weekly_expiry(date.fromisoformat(s["time"][:10]), settings)
+    left = datetime.combine(expiry, dtime.fromisoformat(settings.market_close), IST) - datetime.strptime(
+        s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST)  # fmt: skip
+    years = lambda hold: max(left.total_seconds() / 86400 - hold, 0) / 365
+    entry = black76(s["entry"], strike, years(0), iv_pct / 100, kind)
+    buy = order_charges(settings, kind, "BUY", entry, lot, s["time"][:10])["total"]
+    exits = []
+    for spot in (s["stop"], s["target"]):
+        premium = black76(spot, strike, years(0.15), iv_pct / 100, kind)
+        charges = buy + order_charges(settings, kind, "SELL", premium, lot, s["time"][:10])["total"]
+        exits.append({"premium": round(premium, 2), "pnl": round((premium - entry) * lot - charges, 2)})
+    return {"option": f"{strike:g} {kind}", "expiry": expiry.isoformat(), "iv_pct": round(iv_pct, 2),
+            "forward_basis": 0.0, "entry_premium": round(entry, 2), "quote": None, "quantity": lot, "exits": exits}  # fmt: skip
 
 
 def option_bars(bars: list[dict], plan: dict, settings: Settings) -> list[dict]:
@@ -227,19 +282,31 @@ def option_bars(bars: list[dict], plan: dict, settings: Settings) -> list[dict]:
     return out
 
 
-def chart(bars: list[dict], levels: list[tuple], title: str, entry_time: str, entry: float, up: bool) -> bytes:
-    """PNG of 5m candles with horizontal `levels` (label, price, color, line style) and the entry marked."""
+def chart(bars: list[dict], levels: list[tuple], title: str, entry_time: str, entry: float, stop: float,
+          target: float) -> bytes:  # fmt: skip
+    """PNG of 5m candles, TradingView position style: green reward and red risk boxes from the entry candle,
+    horizontal `levels` (label, price, color, line style) tagged on the right price axis."""
     fig = Figure(figsize=(10, 5.5), dpi=110)
     ax = fig.add_subplot()
     for x, b in enumerate(bars):
         color = "#26a69a" if b["close"] >= b["open"] else "#ef5350"
         ax.vlines(x, b["low"], b["high"], color=color, linewidth=0.8)
         ax.bar(x, abs(b["close"] - b["open"]) or 0.05, bottom=min(b["open"], b["close"]), color=color, width=0.7)
-    for label, price, color, style in levels:
-        ax.axhline(price, color=color, linestyle=style, linewidth=1)
-        ax.annotate(f"{label} {price:,.2f}", (len(bars) - 0.5, price), color=color, fontsize=8, va="bottom", ha="right")
     entry_x = next((x for x, b in enumerate(bars) if _at(b["date"], 5) == entry_time), len(bars) - 1)
-    ax.plot(entry_x, entry, marker="^" if up else "v", color="#1e88e5", markersize=11)
+    right = len(bars) + 8
+    ax.fill_between([entry_x - 0.5, right], entry, target, color="#26a69a", alpha=0.18, linewidth=0)
+    ax.fill_between([entry_x - 0.5, right], entry, stop, color="#ef5350", alpha=0.18, linewidth=0)
+    ax.plot(entry_x, entry, marker="^" if target > entry else "v", color="#1e88e5", markersize=11)
+    ax.set_xlim(-1, right)
+    for _, price, color, style in levels:
+        ax.axhline(price, color=color, linestyle=style, linewidth=1)
+    low, high = ax.get_ylim()
+    gap, tag_y = (high - low) * 0.045, low - 1e9  # tags are ~4.5% of the axis tall: push each above the one below
+    for label, price, color, _ in sorted(levels, key=lambda lv: lv[1]):
+        tag_y = max(price, tag_y + gap)
+        ax.annotate(f"{label} {price:,.2f}", (1, price), xycoords=("axes fraction", "data"), xytext=(1.01, tag_y),
+                    textcoords=("axes fraction", "data"), va="center", fontsize=8, color="white", annotation_clip=False,
+                    bbox={"boxstyle": "square,pad=0.25", "fc": color, "ec": color})  # fmt: skip
     ticks = [x for x, b in enumerate(bars) if b["date"][14:16] in ("15", "45")]
     ax.set_xticks(ticks, [bars[x]["date"][11:] for x in ticks], fontsize=8)
     ax.set_title(title, fontsize=11)
@@ -249,8 +316,9 @@ def chart(bars: list[dict], levels: list[tuple], title: str, entry_time: str, en
     return buf.getvalue()
 
 
-def charts(day: list[dict], s: dict, pdh: float, pdl: float, plan: dict | None, settings: Settings) -> list[bytes]:
-    """The option's estimated premium chart (when priced) and the NIFTY chart, each with entry, stop and target."""
+def charts(day: list[dict], s: dict, levels: list[dict], plan: dict | None, settings: Settings) -> list[bytes]:
+    """The option's estimated premium chart (when priced) and the NIFTY chart, each with entry, stop and target;
+    the NIFTY chart also draws the `levels` (as in message()) that fall inside its price range."""
     out = []
     if plan:
         stop, target = (row["premium"] for row in plan["exits"])
@@ -258,23 +326,72 @@ def charts(day: list[dict], s: dict, pdh: float, pdl: float, plan: dict | None, 
             option_bars(day, plan, settings),
             [("Entry", plan["entry_premium"], "#1e88e5", "-"), ("Stop", stop, "#e53935", "--"), ("Target", target, "#43a047", "--")],
             f"NIFTY {plan['option']} {plan['expiry']}: estimated premium at IV {plan['iv_pct']:g}% (buy at {s['time'][11:]})",
-            s["time"], plan["entry_premium"], True,
+            s["time"], plan["entry_premium"], stop, target,
         ))  # fmt: skip
+    lo = min(s["stop"], s["target"], *(b["low"] for b in day))
+    hi = max(s["stop"], s["target"], *(b["high"] for b in day))
+    near = [(lv["label"], lv["price"], "#7e57c2" if lv["label"].startswith("PD") else "#5c6bc0", ":")
+            for lv in levels or [] if lo <= lv["price"] <= hi]  # fmt: skip
     out.append(chart(
         day,
-        [("PDH", pdh, "#7e57c2", ":"), ("PDL", pdl, "#7e57c2", ":"), ("Open", day[0]["open"], "#9e9e9e", ":"),
+        [*near, ("Open", day[0]["open"], "#9e9e9e", ":"),
          ("Entry", s["entry"], "#1e88e5", "-"), ("Stop", s["stop"], "#e53935", "--"), ("Target", s["target"], "#43a047", "--")],
         f"NIFTY 5m {day[0]['date'][:10]}: {s['side'].upper()} at {s['time'][11:]} IST",
-        s["time"], s["entry"], s["side"] == "Long",
+        s["time"], s["entry"], s["stop"], s["target"],
     ))  # fmt: skip
     return out
 
 
-def session_data() -> tuple[list[dict], dict[str, bool | None], list[dict]]:
-    bars = [b for b in parse_yahoo_chart(_chart(INDEX, "5m", "5d")) if None not in (b["open"], b["high"], b["low"])]
-    proxy = add_vwap(parse_yahoo_chart(_chart(VWAP_PROXY, "5m", "5d")))
+def session_data(range_: str = "5d") -> tuple[list[dict], dict[str, bool | None], list[dict]]:
+    bars = [b for b in parse_yahoo_chart(_chart(INDEX, "5m", range_)) if None not in (b["open"], b["high"], b["low"])]
+    proxy = add_vwap(parse_yahoo_chart(_chart(VWAP_PROXY, "5m", range_)))
     above = {b["date"]: b["close"] > b["vwap"] if b["vwap"] else None for b in proxy}
-    return bars, above, parse_yahoo_chart(_chart(INDEX, "1d", "1mo"))
+    return bars, above, parse_yahoo_chart(_chart(INDEX, "1d", "6mo"))
+
+
+def exit_of(day: list[dict], s: dict) -> tuple[str, float, str]:
+    """(reason, index price, time) of the first stop/target touch after the entry bar, else the 15:10 close. The stop
+    moves to the entry from the bar after one reaching +1R (same-bar order unknown: the stop counts first)."""
+    long, stop, reason = s["side"] == "Long", s["stop"], "Stop"
+    one_r = s["entry"] + s["risk"] if long else s["entry"] - s["risk"]
+    for b in day:
+        if b["date"] < s["time"]:
+            continue
+        at = _at(b["date"], 5)
+        if b["low"] <= stop if long else b["high"] >= stop:
+            return reason, stop, at
+        if b["high"] >= s["target"] if long else b["low"] <= s["target"]:
+            return "Target", s["target"], at
+        if at[11:] >= EXIT:
+            return EXIT, b["close"], at
+        if b["high"] >= one_r if long else b["low"] <= one_r:
+            stop, reason = s["entry"], "Breakeven"
+    return "Last bar", day[-1]["close"], _at(day[-1]["date"], 5)
+
+
+def break_until(bars: list[dict], above: dict, daily: list[dict], settings: Settings, today: str) -> date | None:
+    """Last day off of the latest LOSS_STREAK-losses-in-a-row break (BREAK_DAYS trading days) that the strategy's
+    own signals in `bars` before `today` caused, as if every signal was taken; a loss closes past entry on the index.
+    None if they never lost LOSS_STREAK in a row."""
+    by_day: dict[str, list[dict]] = {}
+    for b in bars:
+        if b["date"][:10] < today:
+            by_day.setdefault(b["date"][:10], []).append(b)
+    streak, until, off = 0, None, holidays(settings)
+    for d in sorted(by_day):
+        day, prev = date.fromisoformat(d), [x for x in daily if x["date"][:10] < d]
+        if (until and day <= until) or not prev or weekly_expiry(day, settings) == day:
+            continue
+        for s in scan(by_day[d], above, prev[-1]["high"], prev[-1]["low"]):
+            price = exit_of(by_day[d], s)[1]
+            streak = streak + 1 if (price - s["entry"]) * (1 if s["side"] == "Long" else -1) < 0 else 0
+            if streak == LOSS_STREAK:
+                streak, until, left = 0, day, BREAK_DAYS
+                while left:
+                    until += timedelta(days=1)
+                    left -= until.weekday() < 5 and until.isoformat() not in off
+                break
+    return until
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -284,6 +401,20 @@ def main(argv: list[str] | None = None) -> int:
     settings = get_settings()
     if not alerts.channels(settings):
         print("no alert channel: set ALERT_TELEGRAM_BOT_TOKEN and ALERT_TELEGRAM_CHAT_ID in .env (printing only)")
+    day = datetime.now(IST).date()
+    if weekly_expiry(day, settings) == day:
+        note = f"No NIFTY trades today ({day}): expiry day."
+        print(note, "| sent via", alerts.send(settings, "[genesis] liquidity strategy", note) or "nothing")
+        return 0
+    try:
+        until = break_until(*session_data("60d"), settings, day.isoformat())
+    except httpx.HTTPError as exc:
+        print(f"losing-streak check skipped, market data unavailable: {exc}")
+        until = None
+    if until and day <= until:
+        note = f"No NIFTY trades today ({day}): {LOSS_STREAK} losses in a row, break until {until}."
+        print(note, "| sent via", alerts.send(settings, "[genesis] liquidity strategy", note) or "nothing")
+        return 0
     seen: set[str] = set()
     while True:
         now = datetime.now(IST)
@@ -310,9 +441,10 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"missed (over {FRESH.seconds // 60} min old, not sent):\n{message(s, settings)}")
                     continue
                 plan = option_plan(s, settings)
-                body = message(s, settings, plan, trading_levels([prev[-1]], session_over=True) + intraday_levels(day, 3))
+                lvls = trading_levels([prev[-1]], session_over=True) + intraday_levels(day, 3)
+                body = message(s, settings, plan, lvls)
                 print(body, "| sent via", alerts.send(settings, f"[genesis] NIFTY {s['side'].upper()} signal", body) or "nothing")
-                for png in charts(day, s, pdh, pdl, plan, settings):
+                for png in charts(day, s, lvls, plan, settings):
                     alerts.send_photo(settings, body.splitlines()[0], png)
         elif bars is not None and now.strftime("%H:%M") >= "10:00":
             print(f"{now:%H:%M} no NIFTY bars for {today} (holiday or data source down)")
