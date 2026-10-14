@@ -62,9 +62,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     settings = get_settings()
-    if not alerts.channels(settings):
+    if not alerts.signal_channels(settings):
         print(
-            "no alert channel: set ALERT_TELEGRAM_BOT_TOKEN and ALERT_TELEGRAM_CHAT_ID in .env (printing only)"
+            "no alert channel: set SIGNALS_TELEGRAM_CHAT_ID (or ALERT_TELEGRAM_CHAT_ID) in .env (printing only)"
         )
     if weekly_expiry(d := datetime.now(IST).date(), settings) == d:
         print("expiry day: no equal high/low trades")
@@ -118,13 +118,13 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     body,
                     "| sent via",
-                    alerts.send(
+                    alerts.send_signal(
                         settings, f"[genesis] {TAG} NIFTY {s['side'].upper()}", body
                     )
                     or "nothing",
                 )
                 for png in charts(day, s, lvls, plan, settings):
-                    alerts.send_photo(settings, f"{TAG}: {body.splitlines()[1]}", png)
+                    alerts.send_signal_photo(settings, f"{TAG}: {body.splitlines()[1]}", png)
         elif bars is not None and now.strftime("%H:%M") >= "10:00":
             print(
                 f"{now:%H:%M} no NIFTY bars for {today} (holiday or data source down)"
@@ -147,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
             print(
                 note,
                 "| sent via",
-                alerts.send(settings, f"[genesis] {TAG} result", note) or "nothing",
+                alerts.send_signal(settings, f"[genesis] {TAG} result", note) or "nothing",
             )
     return 0
 

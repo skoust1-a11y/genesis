@@ -6,7 +6,7 @@ from sqlalchemy.exc import DBAPIError
 
 from app.db.base import Base, LiveBase
 from app.db.guards import AppendOnlyViolation
-from app.db.models import APPEND_ONLY_TABLES, LIVE_APPEND_ONLY_TABLES, Strategy
+from app.db.models import APPEND_ONLY_TABLES, LIVE_APPEND_ONLY_TABLES, Notification, Strategy
 from app.journal.store import JournalStore
 
 
@@ -81,6 +81,29 @@ def test_strategies_can_be_updated_but_not_deleted(engine, session, populated):
         conn.rollback()
     strategy = session.scalars(select(Strategy)).first()
     session.delete(strategy)
+    with pytest.raises(AppendOnlyViolation):
+        session.flush()
+    session.rollback()
+
+
+def test_notifications_can_be_updated_but_not_deleted(engine, session):
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO notifications (id, title, message, category, level, channels, details, created_at) "
+                "VALUES ('n1', 'Test', 'Msg', 'alert', 'info', '[]', '{}', '2026-01-01 00:00:00')"
+            )
+        )
+        conn.execute(text("UPDATE notifications SET title = 'New Title' WHERE id = 'n1'"))
+        with pytest.raises(DBAPIError, match="cannot be deleted"):
+            conn.execute(text("DELETE FROM notifications WHERE id = 'n1'"))
+
+    notif = session.get(Notification, "n1")
+    assert notif is not None
+    notif.title = "Updated by ORM"
+    session.flush()
+
+    session.delete(notif)
     with pytest.raises(AppendOnlyViolation):
         session.flush()
     session.rollback()

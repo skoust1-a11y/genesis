@@ -2,6 +2,7 @@ from app.db import guards  # noqa: F401  (registers append-only listeners)
 from app.db.models.core import (
     AuditEvent,
     IngestRun,
+    Notification,
     PaperOrder,
     Report,
     Strategy,
@@ -68,6 +69,7 @@ __all__ = [
     "LiveAuditEvent",
     "LiveTrade",
     "LiveTradeReview",
+    "Notification",
     "Order",
     "PaperOrder",
     "OrderEvent",

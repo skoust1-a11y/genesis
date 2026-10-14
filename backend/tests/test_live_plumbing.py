@@ -807,3 +807,41 @@ def test_alert_channels_deliver_and_never_raise(monkeypatch):
     assert alerts.notify(settings, "halted", "d1", "boom") == []  # failed delivery: logged, not raised
     assert calls[0][0] == "https://api.telegram.org/botT/sendMessage" and "boom" in calls[0][1]["text"]
     assert alerts.notify(get_settings(), "halted", "d1", "no channels") == []
+
+
+def test_signals_and_alerts_chat_separation(monkeypatch):
+    calls = []
+
+    class DummyResponse:
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(
+        alerts.httpx,
+        "post",
+        lambda url, json=None, data=None, files=None, timeout=None: calls.append((url, json or data)) or DummyResponse(),
+    )
+    # 1. Separate channels: signals to group, system alerts to admin
+    settings = get_settings().model_copy(
+        update={
+            "alert_telegram_bot_token": "TOKEN",
+            "signals_telegram_chat_id": "-5301947207",
+            "alert_telegram_chat_id": "999999",
+        }
+    )
+    alerts.send_signal(settings, "NIFTY BUY", "Entry: 25000")
+    assert calls[-1][1]["chat_id"] == "-5301947207"
+
+    alerts.notify(settings, "paused", "dep-1", "drawdown reached 2%")
+    assert calls[-1][1]["chat_id"] == "999999"
+
+    # 2. When alert_telegram_chat_id is empty, system alerts are NEVER sent to the signals group
+    silent_admin = settings.model_copy(update={"alert_telegram_chat_id": None})
+    calls_len_before = len(calls)
+    alerts.notify(silent_admin, "halted", "dep-2", "margin shortfall")
+    assert len(calls) == calls_len_before  # No telegram call made
+
+    # But signals still go to the signals group
+    alerts.send_signal(silent_admin, "NIFTY SELL", "Entry: 24800")
+    assert calls[-1][1]["chat_id"] == "-5301947207"
+

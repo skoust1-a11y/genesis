@@ -74,6 +74,9 @@ def _code_default_settings(monkeypatch):
         ("PORTFOLIO_MAX_OPEN_POSITIONS", "3"), ("PORTFOLIO_MAX_DAILY_LOSS_INR", "10000"),
         ("MAX_ENTRIES_PER_DAY", "0"), ("MAX_CONSECUTIVE_LOSSES", "0"), ("LOSS_COOLDOWN_DAYS", "0"),
         ("MAX_LOSS_PCT_OF_CAPITAL", "0"), ("LOT_SIZES", "NIFTY:75,BANKNIFTY:35"),
+        ("ALERT_TELEGRAM_BOT_TOKEN", ""), ("ALERT_TELEGRAM_CHAT_ID", ""),
+        ("SIGNALS_TELEGRAM_CHAT_ID", ""),
+        ("ALERT_SMTP_HOST", ""), ("ALERT_SMTP_FROM", ""), ("ALERT_SMTP_TO", ""),
     ):  # fmt: skip
         monkeypatch.setenv(name, value)
     get_settings.cache_clear()

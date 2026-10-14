@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     # Alerts (each channel is used only when configured)
     alert_telegram_bot_token: str | None = Field(default=None, alias="ALERT_TELEGRAM_BOT_TOKEN")
     alert_telegram_chat_id: str | None = Field(default=None, alias="ALERT_TELEGRAM_CHAT_ID")
+    signals_telegram_chat_id: str | None = Field(default=None, alias="SIGNALS_TELEGRAM_CHAT_ID")
     alert_smtp_host: str | None = Field(default=None, alias="ALERT_SMTP_HOST")
     alert_smtp_port: int = Field(default=587, alias="ALERT_SMTP_PORT")
     alert_smtp_user: str | None = Field(default=None, alias="ALERT_SMTP_USER")

@@ -142,3 +142,24 @@ class PaperOrder(AppendOnly, Base):
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     actor: Mapped[str] = mapped_column(String(128))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class Notification(NoDelete, Base):
+    """An alert or notification message dispatched to users/channels.
+
+    Can be marked read or updated, but never deleted (preserved for audit/reassessment).
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_id)
+    category: Mapped[str] = mapped_column(String(32), default="alert")
+    level: Mapped[str] = mapped_column(String(16), default="info")
+    title: Mapped[str] = mapped_column(String(200))
+    message: Mapped[str] = mapped_column(Text)
+    deployment_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    channels: Mapped[list[str]] = mapped_column(JSON, default=list)
+    read_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    details: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow, index=True)
+

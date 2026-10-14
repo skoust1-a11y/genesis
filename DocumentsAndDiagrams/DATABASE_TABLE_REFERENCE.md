@@ -20,6 +20,7 @@ Analysis date: 2026-10-10.
 | `strategy_improvements` | Research | Proposed rule change and its evidence | Improvements |
 | `improvement_decisions` | Research | Human decision on a proposal | Improvements |
 | `paper_orders` | Research | One manual paper order placed from the markets screen | Markets |
+| `notifications` | Research | Alerts and notifications log for audit and reassessment | Alerts / Inbox |
 | `audit_events` | Research | Hash-chained research audit log | Audit |
 | `deployed_strategies` | Live | Frozen copy of an approved version | Approval |
 | `broker_accounts` | Live | Broker, masked account ref, mode | Brokers |
@@ -133,6 +134,13 @@ A manual paper order from `/markets`. Separate from the Trade Crew and from the 
 
 - **Written by:** `POST /api/paper/orders` in `backend/app/api/market.py`, with a `paper.order_placed` audit event.
 - **Read by:** `GET /api/paper/orders` and `GET /api/paper/positions` (`net_positions` in `backend/app/paper.py`).
+
+### notifications
+
+Alerts and system notifications dispatched to external channels (Telegram, SMTP) and in-app notifications. Preserved for operational reassessment and audit. `NoDelete` blocks row deletion, while allowing `read_at` status updates.
+
+- **Written by:** `backend/app/alerts.py` (`notify`, `record`) and `POST /api/notifications`.
+- **Read by:** `GET /api/notifications`, updated by `POST /api/notifications/{id}/read` and `POST /api/notifications/read-all`.
 
 ### audit_events
 
