@@ -51,6 +51,7 @@ FRESH = timedelta(minutes=15)  # older triggers are reported as missed, never se
 MIN_RISK = 30  # pts: over 2016-2026 setups with a closer stop earned nothing after costs
 RISK_PCT, LOSS_STREAK, BREAK_DAYS, EXIT = 5, 3, 3, "15:10"
 MIN_VIX, MAX_VIX, STAGNATION_BARS = 11.5, 22.0, 18  # 18 bars = 90 min max stagnation before cutting midday chop
+BLACKOUT_START, BLACKOUT_END = "11:30", "13:00"  # Midday lunch lull blackout window to avoid chop
 
 
 def _at(date: str, minutes: int) -> str:
@@ -88,11 +89,12 @@ def pivots(bars: list[dict], key: str) -> list[int]:
 
 def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: float,
          min_risk: float = MIN_RISK, stop_at: str = "swing", min_sweep: float = 2.0,
-         require_trendline: bool = False) -> list[dict]:  # fmt: skip
+         require_trendline: bool = False, skip_lunch: bool = True) -> list[dict]:  # fmt: skip
     """Entries in one session's completed 5m `bars`; `above_vwap[date]` is whether that bar closed above VWAP.
     `stop_at` "sweep" puts every stop 5 pts past the sweep low / raid high instead of at the last swing.
     `min_sweep` requires sweep depth >= min_sweep (default 2.0 pts) past PDH/PDL to filter noise.
-    `require_trendline` enforces breakdown below ascending trendline (Short) or breakout above descending trendline (Long)."""
+    `require_trendline` enforces breakdown below ascending trendline (Short) or breakout above descending trendline (Long).
+    `skip_lunch` avoids entries between 11:30 and 13:00 IST to prevent lunch lull chop."""
     if not bars:
         return []
     day_open, b15, out = bars[0]["open"], to_15m(bars), []
@@ -129,6 +131,8 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
             closes_at = _at(b["date"], 5)
             if closes_at[11:] > LAST_ENTRY:
                 break
+            if skip_lunch and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
+                continue
             c = b["close"]
             inside = c > pdl and c > day_open if long else c < pdh and c < day_open
             if closes_at[11:] < FIRST_ENTRY or above_vwap.get(b["date"]) != long or not inside:

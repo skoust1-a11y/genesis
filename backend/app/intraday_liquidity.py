@@ -179,14 +179,15 @@ def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: 
                 mss_tf: int = 5, min_risk: float = MIN_RISK, target_r: float = 2.0,
                 opposing: list[dict] | None = None, min_sweep: float = 2.0,
                 with_open_only: bool = False, min_displacement: float = 0.0,
-                require_trendline: bool = False) -> list[dict]:  # fmt: skip
+                require_trendline: bool = False, skip_lunch: bool = True) -> list[dict]:  # fmt: skip
     """Signals in one session's completed 5m `bars` (vwap/atrs aligned to them) from sweeps of `levels`.
     `mss_tf` 5 or 15: the structure shift's timeframe; 0: no structure shift. `opposing` (default `levels`): pool for
     the opposing-liquidity target `opp` (nearest intact level 1R+ away).
     `min_sweep`: minimum sweep depth past the level (default 2.0 pts to filter noise).
     `with_open_only`: only take Longs above day open, Shorts below day open.
     `min_displacement`: minimum real body size (in ATR) for the entry candle.
-    `require_trendline`: enforce breakdown below ascending trendline (Short) or breakout above descending trendline (Long)."""
+    `require_trendline`: enforce breakdown below ascending trendline (Short) or breakout above descending trendline (Long).
+    `skip_lunch`: avoid entries between 11:30 and 13:00 IST to prevent lunch lull chop."""
     if not bars:
         return []
     sh5, sl5, m15, out = _last_pivots(bars, "high"), _last_pivots(bars, "low"), _mss15(bars) if mss_tf == 15 else {}, []
@@ -199,6 +200,8 @@ def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: 
             closes_at = _at(b["date"], 5)
             if closes_at[11:] > LAST_ENTRY:
                 break
+            if skip_lunch and "11:30" <= closes_at[11:] <= "13:00":
+                continue
             for lv in pool:
                 if lv["id"] in used or lv["known"] > i or (lv["until"] is not None and i >= lv["until"]):
                     continue

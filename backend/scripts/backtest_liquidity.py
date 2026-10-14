@@ -209,7 +209,8 @@ def option_exit(plan: dict, spot: float, at: str, settings: Settings) -> float:
 def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict], vix: dict[str, float],
              since: str = "", stop_at: str = "swing", require_trendline: bool = False,
              include_equal: bool = False, staged: bool = False,
-             otm_steps: int = OTM_STEPS, stagnation_bars: int = 0) -> tuple[list[dict], list[str]]:  # fmt: skip
+             otm_steps: int = OTM_STEPS, stagnation_bars: int = 0,
+             skip_lunch: bool = True) -> tuple[list[dict], list[str]]:  # fmt: skip
     """Every signal from `since` (before today) with its index exit and 1-unit option premiums; and the days."""
     by_day: dict[str, list[dict]] = defaultdict(list)
     for b in bars:
@@ -227,7 +228,7 @@ def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict
         expiry = expiry_for(date.fromisoformat(d), trading, settings)
         if expiry.isoformat() == d:
             continue  # no trades on expiry day
-        day_signals = scan(by_day[d], above, prev["high"], prev["low"], stop_at=stop_at, require_trendline=require_trendline)
+        day_signals = scan(by_day[d], above, prev["high"], prev["low"], stop_at=stop_at, require_trendline=require_trendline, skip_lunch=skip_lunch)
         for s in day_signals:
             s.setdefault("pool", f"PD{'L' if s['side'] == 'Long' else 'H'}")
         if include_equal:
@@ -240,7 +241,7 @@ def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict
                 for n_idx, b_item in enumerate(by_day[d], 1):
                     tot_p += (b_item["high"] + b_item["low"] + b_item["close"]) / 3.0
                     v_list.append(tot_p / n_idx)
-                for eq_s in scan_levels(by_day[d], v_list, atrs, eq_lvs, "equal", min_sweep=2.0, with_open_only=True, require_trendline=require_trendline):
+                for eq_s in scan_levels(by_day[d], v_list, atrs, eq_lvs, "equal", min_sweep=2.0, with_open_only=True, require_trendline=require_trendline, skip_lunch=skip_lunch):
                     eq_s["pool"] = f"Equal {'High (EQH)' if eq_s['side'] == 'Short' else 'Low (EQL)'}"
                     day_signals.append(eq_s)
         for s in day_signals:
@@ -563,6 +564,11 @@ def main() -> None:
         default=0,
         help="exit if no +0.5R progress after N 5m bars (e.g. 18 = 90m)",
     )
+    parser.add_argument(
+        "--allow-lunch",
+        action="store_true",
+        help="allow entries during lunch lull (11:30 - 13:00 IST), default is to skip them",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     settings = get_settings()
@@ -598,6 +604,7 @@ def main() -> None:
             staged=args.staged,
             otm_steps=args.otm_steps,
             stagnation_bars=args.stagnation_bars,
+            skip_lunch=not args.allow_lunch,
         )
         runs[stop_at] = (
             trades,
