@@ -554,8 +554,8 @@ def main() -> None:
     parser.add_argument(
         "--otm-steps",
         type=int,
-        default=2,
-        help="OTM strikes (+2 OTM, 0 ATM, -1 1-ITM)",
+        default=0,
+        help="Strike selection: 0 = ATM (default), 2 = 2-OTM, -1 = 1-ITM",
     )
     parser.add_argument(
         "--stagnation-bars",

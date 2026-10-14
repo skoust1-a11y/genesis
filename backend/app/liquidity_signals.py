@@ -46,7 +46,7 @@ from app.trading.option_pnl import black76, plan_pnl
 # ponytail: Yahoo bars are a few minutes delayed and the index has no volume, so VWAP comes from the NIFTYBEES ETF.
 # Switch to broker bars (Groww/Kite) and NIFTY futures VWAP for real-time signals.
 INDEX, VWAP_PROXY = "^NSEI", "NIFTYBEES.NS"
-SWING, R_MULT, OTM_STEPS, FIRST_ENTRY, LAST_ENTRY = 2, 3.0, 2, "09:30", "14:30"
+SWING, R_MULT, OTM_STEPS, FIRST_ENTRY, LAST_ENTRY = 2, 3.0, 0, "09:30", "14:30"
 FRESH = timedelta(minutes=15)  # older triggers are reported as missed, never sent: no chasing a late entry
 MIN_RISK = 30  # pts: over 2016-2026 setups with a closer stop earned nothing after costs
 RISK_PCT, LOSS_STREAK, BREAK_DAYS, EXIT = 5, 3, 3, "15:10"

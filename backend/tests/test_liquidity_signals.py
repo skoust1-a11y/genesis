@@ -79,11 +79,14 @@ def test_estimated_option_plan_without_a_live_chain():
          "risk": 62.0, "level": 22304.45}  # fmt: skip
     plan = estimated_plan(s, settings, 12.0)
     (stop, target), entry = plan["exits"], plan["entry_premium"]
-    assert plan["option"] == "22650 CE" and plan["expiry"]  # 2 strikes above the 22550 ATM == "2026-10-19" and plan["quote"] is None
+    assert plan["option"] == "22550 CE" and plan["expiry"] == "2026-10-19" and plan["quote"] is None
     assert stop["premium"] < entry < target["premium"] and stop["pnl"] < 0 < target["pnl"]
     assert "estimated at India VIX 12%" in message(s, settings, plan)
     put = estimated_plan({**s, "side": "Short", "stop": 22599.8, "target": 22413.8}, settings, 12.0)
-    assert put["option"] == "22450 PE" and put["exits"][1]["premium"] > put["entry_premium"]
+    assert put["option"] == "22550 PE" and put["exits"][1]["premium"] > put["entry_premium"]
+    # Test explicit otm_steps=2 still works
+    plan_otm = estimated_plan(s, settings, 12.0, otm_steps=2)
+    assert plan_otm["option"] == "22650 CE"
 
 
 def test_backtest_exit_is_stop_first_then_target_then_the_1510_close_with_breakeven_after_1r():
