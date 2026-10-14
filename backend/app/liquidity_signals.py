@@ -57,9 +57,9 @@ def _at(date: str, minutes: int) -> str:
     return (datetime.strptime(date, "%Y-%m-%d %H:%M") + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M")
 
 
-def strike_of(s: dict, step: float) -> float:
-    """OTM_STEPS strikes out of the money: above the entry for a long's call, below it for a short's put."""
-    return (round(s["entry"] / step) + (OTM_STEPS if s["side"] == "Long" else -OTM_STEPS)) * step
+def strike_of(s: dict, step: float, otm_steps: int = OTM_STEPS) -> float:
+    """otm_steps strikes out of the money: above the entry for a long's call, below it for a short's put."""
+    return (round(s["entry"] / step) + (otm_steps if s["side"] == "Long" else -otm_steps)) * step
 
 
 def _bucket(date: str) -> str:
@@ -265,7 +265,7 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
     return "\n".join(lines)
 
 
-def option_plan(s: dict, settings: Settings, lots: int = 2) -> dict | None:
+def option_plan(s: dict, settings: Settings, lots: int = 2, otm_steps: int = OTM_STEPS) -> dict | None:
     """The strike_of() call (long) or put (short) priced from Groww's live chain at entry, stop and target; estimated
     at India VIX when the chain is unavailable; None if VIX is unavailable too."""
     step = settings.strike_step("NIFTY") or 50
@@ -274,7 +274,7 @@ def option_plan(s: dict, settings: Settings, lots: int = 2) -> dict | None:
     try:
         snapshot = feed.snapshot("NIFTY")
         if snapshot is not None:
-            plan = plan_pnl(snapshot, settings, "CE" if s["side"] == "Long" else "PE", strike_of(s, step),
+            plan = plan_pnl(snapshot, settings, "CE" if s["side"] == "Long" else "PE", strike_of(s, step, otm_steps=otm_steps),
                             s["entry"], {"stop": s["stop"], "target": s["target"]}, lots=lots)  # fmt: skip
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         print(f"option chain unavailable: {exc}")
@@ -284,10 +284,10 @@ def option_plan(s: dict, settings: Settings, lots: int = 2) -> dict | None:
         except (httpx.HTTPError, IndexError, KeyError) as exc:
             print(f"India VIX unavailable: {exc}")
             return None
-        plan = estimated_plan(s, settings, vix, lots=lots) if vix else None
+        plan = estimated_plan(s, settings, vix, lots=lots, otm_steps=otm_steps) if vix else None
     if plan and "spread" not in plan:
         kind = "CE" if s["side"] == "Long" else "PE"
-        strike = strike_of(s, step)
+        strike = strike_of(s, step, otm_steps=otm_steps)
         spread_strike = strike + (2 * step if kind == "CE" else -2 * step)
         entry_buy = plan["entry_premium"]
         entry_sell = entry_buy * 0.45
@@ -312,12 +312,12 @@ def weekly_expiry(day: date, settings: Settings) -> date:
     return exp
 
 
-def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | None = None, lots: int = 2) -> dict:
+def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | None = None, lots: int = 2, otm_steps: int = OTM_STEPS) -> dict:
     """option_plan() without a live chain: the strike_of() option to `expiry` (default: the weekly one) priced by
     Black-76 at `iv_pct` (India VIX, a 30-day ATM IV), forward = spot. Same shape as plan_pnl() with `quote` None."""
     step, lot = settings.strike_step("NIFTY") or 50, settings.lot_size("NIFTY") or 65
     total_qty = lot * lots
-    kind, strike = "CE" if s["side"] == "Long" else "PE", strike_of(s, step)
+    kind, strike = "CE" if s["side"] == "Long" else "PE", strike_of(s, step, otm_steps=otm_steps)
     expiry = expiry or weekly_expiry(date.fromisoformat(s["time"][:10]), settings)
     left = datetime.combine(expiry, dtime.fromisoformat(settings.market_close), IST) - datetime.strptime(
         s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST)  # fmt: skip

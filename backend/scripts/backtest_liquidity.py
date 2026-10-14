@@ -208,7 +208,8 @@ def option_exit(plan: dict, spot: float, at: str, settings: Settings) -> float:
 
 def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict], vix: dict[str, float],
              since: str = "", stop_at: str = "swing", require_trendline: bool = False,
-             include_equal: bool = False, staged: bool = False) -> tuple[list[dict], list[str]]:  # fmt: skip
+             include_equal: bool = False, staged: bool = False,
+             otm_steps: int = OTM_STEPS, stagnation_bars: int = 0) -> tuple[list[dict], list[str]]:  # fmt: skip
     """Every signal from `since` (before today) with its index exit and 1-unit option premiums; and the days."""
     by_day: dict[str, list[dict]] = defaultdict(list)
     for b in bars:
@@ -244,7 +245,7 @@ def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict
                     day_signals.append(eq_s)
         for s in day_signals:
             if staged:
-                res = staged_exit_of(by_day[d], s)
+                res = staged_exit_of(by_day[d], s, stagnation_bars=stagnation_bars)
                 reason, price, at = res["exit_reason"], res["exit_price"], res["exit_time"]
                 points = price - s["entry"] if s["side"] == "Long" else s["entry"] - price
                 r_val = res["r_multiple"]
@@ -252,7 +253,7 @@ def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict
                 reason, price, at = exit_of(by_day[d], s)
                 points = price - s["entry"] if s["side"] == "Long" else s["entry"] - price
                 r_val = round(points / s["risk"], 2)
-            plan = estimated_plan(s, settings, iv, expiry)
+            plan = estimated_plan(s, settings, iv, expiry, otm_steps=otm_steps)
             trades.append({
                 "Date": d, "Pool": s.get("pool", "PDH/PDL"), "Side": s["side"], "Entry time": s["time"][11:], "Entry": s["entry"], "Stop": s["stop"],
                 "Target": s["target"], "Risk pts": s["risk"], "Exit time": at[11:], "Exit reason": reason,
@@ -548,7 +549,19 @@ def main() -> None:
     parser.add_argument(
         "--staged",
         action="store_true",
-        help="use staged exits (50% partial at +2R, +1R trail stop lock, 5m candle close trail)",
+        help="use staged exits (50%% partial at +2R, +1R trail stop lock, 5m candle close trail)",
+    )
+    parser.add_argument(
+        "--otm-steps",
+        type=int,
+        default=2,
+        help="OTM strikes (+2 OTM, 0 ATM, -1 1-ITM)",
+    )
+    parser.add_argument(
+        "--stagnation-bars",
+        type=int,
+        default=0,
+        help="exit if no +0.5R progress after N 5m bars (e.g. 18 = 90m)",
     )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
@@ -583,6 +596,8 @@ def main() -> None:
             require_trendline=args.trendline,
             include_equal=args.include_equal,
             staged=args.staged,
+            otm_steps=args.otm_steps,
+            stagnation_bars=args.stagnation_bars,
         )
         runs[stop_at] = (
             trades,
