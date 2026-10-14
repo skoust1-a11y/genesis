@@ -179,7 +179,7 @@ def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: 
                 mss_tf: int = 5, min_risk: float = MIN_RISK, target_r: float = 2.0,
                 opposing: list[dict] | None = None, min_sweep: float = 2.0,
                 with_open_only: bool = False, min_displacement: float = 0.0,
-                require_trendline: bool = False, skip_lunch: bool = True) -> list[dict]:  # fmt: skip
+                require_trendline: bool = False, skip_lunch: bool = False) -> list[dict]:  # fmt: skip
     """Signals in one session's completed 5m `bars` (vwap/atrs aligned to them) from sweeps of `levels`.
     `mss_tf` 5 or 15: the structure shift's timeframe; 0: no structure shift. `opposing` (default `levels`): pool for
     the opposing-liquidity target `opp` (nearest intact level 1R+ away).

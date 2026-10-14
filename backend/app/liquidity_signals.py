@@ -89,7 +89,7 @@ def pivots(bars: list[dict], key: str) -> list[int]:
 
 def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: float,
          min_risk: float = MIN_RISK, stop_at: str = "swing", min_sweep: float = 2.0,
-         require_trendline: bool = False, skip_lunch: bool = True) -> list[dict]:  # fmt: skip
+         require_trendline: bool = False, skip_lunch: bool = False) -> list[dict]:  # fmt: skip
     """Entries in one session's completed 5m `bars`; `above_vwap[date]` is whether that bar closed above VWAP.
     `stop_at` "sweep" puts every stop 5 pts past the sweep low / raid high instead of at the last swing.
     `min_sweep` requires sweep depth >= min_sweep (default 2.0 pts) past PDH/PDL to filter noise.
