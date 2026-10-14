@@ -176,3 +176,40 @@ def test_no_entry_against_the_day_open_or_vwap():
     assert scan(b, {x["date"]: True for x in b}, pdh=200, pdl=100, min_risk=10) == []
     b = bars()
     assert scan(b, {x["date"]: False for x in b}, pdh=200, pdl=100, min_risk=10) == []
+
+
+def test_staged_exit_candle_close_trail():
+    from app.liquidity_signals import staged_exit_of
+
+    s = {"side": "Short", "time": "2026-10-14 11:30", "entry": 200.0, "stop": 220.0, "target": 140.0, "risk": 20.0}
+
+    def bar(t, o, h, l, c):
+        return {"date": f"2026-10-14 {t}", "open": o, "high": h, "low": l, "close": c}
+
+    # Reaches 165 (more than +1.5R / 170.0), then next bar closes green (166 -> 172)
+    day = [
+        bar("11:30", 200, 201, 195, 196),
+        bar("11:35", 196, 196, 165, 166),  # reached 165 (down 35 pts = +1.75R)
+        bar("11:40", 166, 173, 165, 172),  # closed green -> candle close trail
+    ]
+    res = staged_exit_of(day, s)
+    assert res["exit_reason"] == "Candle Close Trail"
+    assert res["exit_price"] == 172.0
+    assert res["r_multiple"] == 1.4  # (200 - 172) / 20 = 1.4R
+
+
+def test_trendline_confluence_and_pool_tag():
+    b = bars()
+    # Without trendline requirement:
+    res_no_tl = scan(b, {x["date"]: True for x in b}, pdh=200, pdl=100, min_risk=10, require_trendline=False)
+    assert len(res_no_tl) == 1
+    # With trendline requirement (the sample bars have higher highs/breakout or no opposing line):
+    res_tl = scan(b, {x["date"]: True for x in b}, pdh=200, pdl=100, min_risk=10, require_trendline=True)
+    assert len(res_tl) == 1
+
+    # Check pool tag in alert message
+    sig = {**res_tl[0], "pool": "Equal Low (EQL)"}
+    msg = message(sig, get_settings())
+    assert "sell-side sweep of Equal Low (EQL) 100.00" in msg
+
+

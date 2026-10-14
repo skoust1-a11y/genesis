@@ -3,7 +3,18 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
-import { CandleChart, type Level, type Zone } from "@/components/CandleChart";
+import {
+  CandleChart,
+  type Level,
+  type Zone,
+  type SwingPoint,
+  type StructureEvent,
+  type TrendlineData,
+  type LiquiditySweepData,
+} from "@/components/CandleChart";
+import { OptionChainModal, type OptionChainData } from "@/components/OptionChainModal";
+import type { IndicatorData } from "@/components/MomentumPanel";
+import type { DecisionData, RegimeData, MTFReportData } from "@/components/TradingDecisionDashboard";
 import { IndexStrip } from "@/components/IndexStrip";
 import { api, inr, pct } from "@/lib/api";
 import { riskPlan } from "@/lib/risk";
@@ -14,6 +25,25 @@ import {
 type Bar = {
   date: string; open: number | null; high: number | null; low: number | null; close: number;
   volume: number | null; vwap?: number | null;
+};
+
+type OptionContractDetails = {
+  underlying: string;
+  strike: number;
+  option_type: "CE" | "PE";
+  expiry: string;
+  ltp: number;
+  close: number | null;
+  change: number | null;
+  change_pct: number | null;
+  oi: number;
+  iv_pct: number;
+  delta: number | null;
+  theta: number | null;
+  gamma: number | null;
+  vega: number | null;
+  lot_size: number;
+  spot: number;
 };
 
 type Instrument = "EQ" | "FUT" | "CE" | "PE";
@@ -60,14 +90,32 @@ export default function Markets() {
   const [quotes, setQuotes] = useState<Record<string, Quote>>({});
   const [symbol, setSymbol] = useState("NIFTY");
   const [timeframe, setTimeframe] = useState("5m");
+  const [sensitivity, setSensitivity] = useState(2);
   const [bars, setBars] = useState<Bar[]>([]);
   const [levels, setLevels] = useState<Level[]>([]);
   const [zones, setZones] = useState<Zone[]>([]);
+  const [marketStructure, setMarketStructure] = useState<{ swings: SwingPoint[]; events: StructureEvent[] } | undefined>();
+  const [trendlines, setTrendlines] = useState<TrendlineData[]>([]);
+  const [sweeps, setSweeps] = useState<LiquiditySweepData[]>([]);
+  const [indicators, setIndicators] = useState<IndicatorData | undefined>();
+  const [regime, setRegime] = useState<RegimeData | undefined>();
+  const [decision, setDecision] = useState<DecisionData | undefined>();
+  const [mtf, setMtf] = useState<MTFReportData | undefined>();
   const [positions, setPositions] = useState<Position[]>([]);
   const [ticket, setTicket] = useState<Ticket>(blankTicket("index"));
   const [error, setError] = useState<string | null>(null);
   const [placed, setPlaced] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Options State
+  const [chartMode, setChartMode] = useState<"spot" | "option">("spot");
+  const [optionType, setOptionType] = useState<"CE" | "PE">("CE");
+  const [selectedStrike, setSelectedStrike] = useState<number | null>(null);
+  const [selectedExpiry, setSelectedExpiry] = useState<string | null>(null);
+  const [optionChain, setOptionChain] = useState<OptionChainData | null>(null);
+  const [contractInfo, setContractInfo] = useState<OptionContractDetails | null>(null);
+  const [showChainModal, setShowChainModal] = useState(false);
+  const [loadingChain, setLoadingChain] = useState(false);
 
   const segment = segmentOf(symbol);
   const quote = quotes[symbol];
@@ -107,22 +155,84 @@ export default function Markets() {
     return () => clearInterval(timer);
   }, [stocks]);
 
+  // Load option chain for supported index symbols
   useEffect(() => {
+    if (!["NIFTY", "BANKNIFTY", "FINNIFTY"].includes(symbol)) {
+      setOptionChain(null);
+      setChartMode("spot");
+      return;
+    }
+    setLoadingChain(true);
+    api<OptionChainData>(
+      `/api/market/option-chain?underlying=${encodeURIComponent(symbol)}${selectedExpiry ? `&expiry=${encodeURIComponent(selectedExpiry)}` : ""}`,
+    )
+      .then((data) => {
+        setOptionChain(data);
+        if (!selectedStrike || Math.abs(selectedStrike - data.atm_strike) > data.strike_step * 15) {
+          setSelectedStrike(data.atm_strike);
+        }
+        if (!selectedExpiry) {
+          setSelectedExpiry(data.current_expiry);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoadingChain(false));
+  }, [symbol, selectedExpiry]);
+
+  // Load Candles (spot or option strike)
+  useEffect(() => {
+    const isOpt = chartMode === "option" && selectedStrike != null;
+    const url = isOpt
+      ? `/api/market/option-candles?symbol=${encodeURIComponent(symbol)}&strike=${selectedStrike}&option_type=${optionType}&expiry=${encodeURIComponent(selectedExpiry || "")}&interval=${timeframe}&sensitivity=${sensitivity}`
+      : `/api/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}&sensitivity=${sensitivity}`;
+
     const load = () =>
-      api<{ bars: Bar[]; levels: Level[]; zones: Zone[] }>(`/api/market/candles?symbol=${encodeURIComponent(symbol)}&interval=${timeframe}`)
+      api<{
+        bars: Bar[];
+        levels: Level[];
+        zones: Zone[];
+        market_structure?: { swings: SwingPoint[]; events: StructureEvent[] };
+        trendlines?: TrendlineData[];
+        sweeps?: LiquiditySweepData[];
+        indicators?: IndicatorData;
+        regime?: RegimeData;
+        decision?: DecisionData;
+        mtf?: MTFReportData;
+        contract?: OptionContractDetails;
+      }>(url)
         .then((d) => {
           setBars(d.bars);
           setLevels(d.levels ?? []);
           setZones(d.zones ?? []);
+          setMarketStructure(d.market_structure);
+          setTrendlines(d.trendlines ?? []);
+          setSweeps(d.sweeps ?? []);
+          setIndicators(d.indicators);
+          setRegime(d.regime);
+          setDecision(d.decision);
+          setMtf(d.mtf);
+          if (d.contract) {
+            setContractInfo(d.contract);
+          } else {
+            setContractInfo(null);
+          }
         })
         .catch((e) => setError(e instanceof Error ? e.message : "Could not load candles"));
+
     setBars([]);
     setLevels([]);
     setZones([]);
+    setMarketStructure(undefined);
+    setTrendlines([]);
+    setSweeps([]);
+    setIndicators(undefined);
+    setRegime(undefined);
+    setDecision(undefined);
+    setMtf(undefined);
     load();
     const timer = setInterval(load, 60_000);
     return () => clearInterval(timer);
-  }, [symbol, timeframe]);
+  }, [symbol, timeframe, sensitivity, chartMode, optionType, selectedStrike, selectedExpiry]);
 
   const loadPositions = () =>
     api<{ positions: Position[] }>("/api/paper/positions")
@@ -132,11 +242,22 @@ export default function Markets() {
     loadPositions();
   }, []);
 
-  // Option entries are premiums, not prices on this chart, so only shares and futures get an entry line.
-  const onChart = useMemo(
-    () => positions.filter((p) => p.underlying === symbol && p.quantity !== 0 && (p.instrument === "EQ" || p.instrument === "FUT")),
-    [positions, symbol],
-  );
+  // Positions on chart: if option chart mode, show positions for this specific strike & type
+  const onChart = useMemo(() => {
+    if (chartMode === "option" && selectedStrike != null) {
+      return positions.filter(
+        (p) =>
+          p.underlying === symbol &&
+          p.quantity !== 0 &&
+          p.instrument === optionType &&
+          Number(p.strike) === selectedStrike,
+      );
+    }
+    return positions.filter(
+      (p) => p.underlying === symbol && p.quantity !== 0 && (p.instrument === "EQ" || p.instrument === "FUT"),
+    );
+  }, [positions, symbol, chartMode, optionType, selectedStrike]);
+
   const chartLevels = useMemo<Level[]>(
     () => [
       ...levels,
@@ -155,9 +276,21 @@ export default function Markets() {
 
   const lastPrice = bars.at(-1)?.close ?? quote?.price;
   useEffect(() => {
-    if ((ticket.instrument === "FUT" || ticket.instrument === "EQ") && lastPrice)
-      setTicket((t) => ({ ...t, price: lastPrice.toFixed(2) }));
-  }, [lastPrice, ticket.instrument]);
+    if (chartMode === "option" && selectedStrike != null) {
+      const p = contractInfo?.ltp ?? bars.at(-1)?.close;
+      setTicket((t) => ({
+        ...t,
+        instrument: optionType,
+        strike: String(selectedStrike),
+        expiry: selectedExpiry || optionChain?.current_expiry || "",
+        price: p ? p.toFixed(2) : t.price,
+      }));
+    } else if (chartMode === "spot") {
+      if ((ticket.instrument === "FUT" || ticket.instrument === "EQ") && lastPrice) {
+        setTicket((t) => ({ ...t, price: lastPrice.toFixed(2) }));
+      }
+    }
+  }, [chartMode, optionType, selectedStrike, selectedExpiry, contractInfo?.ltp, lastPrice]);
 
   function select(s: string) {
     setSymbol(s);
@@ -300,34 +433,252 @@ export default function Markets() {
         </aside>
 
         <div className="space-y-3 rounded-xl border bg-white p-4 shadow-sm">
-          <div className="flex flex-wrap items-start gap-3">
-            <div className="mr-auto">
-              <h2 className="text-lg font-semibold">
-                {symbol} <span className="text-sm font-normal text-zinc-500">{quote?.name}</span>
-              </h2>
-              <div className="flex items-baseline gap-2">
-                <span className="text-2xl font-semibold">{money(quote?.price, quote?.currency)}</span>
-                <span className={`text-sm ${signed(quote?.change)}`}>
-                  {quote?.change != null && `${quote.change > 0 ? "+" : ""}${quote.change.toFixed(2)} (${pct(quote.change_pct)})`}
-                </span>
+          {/* Top Bar: Title / Price or Option Title / Price + Mode Switcher + Timeframes */}
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Spot or Option Title */}
+                {chartMode === "spot" ? (
+                  <h2 className="text-lg font-bold text-zinc-900">
+                    {symbol} <span className="text-sm font-normal text-zinc-500">{quote?.name}</span>
+                  </h2>
+                ) : (
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg font-bold text-zinc-900">
+                      {symbol} {selectedStrike}{" "}
+                      <span className={optionType === "CE" ? "text-emerald-700 font-extrabold" : "text-rose-700 font-extrabold"}>
+                        {optionType}
+                      </span>
+                    </h2>
+                    <span className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs text-zinc-600 font-medium">
+                      Expiry {selectedExpiry || optionChain?.current_expiry}
+                    </span>
+                  </div>
+                )}
+
+                {/* Spot / Option Mode Switcher (only for index with options) */}
+                {segment === "index" && ["NIFTY", "BANKNIFTY", "FINNIFTY"].includes(symbol) && (
+                  <div className="inline-flex rounded-lg bg-zinc-100 p-0.5 text-xs font-medium ml-2">
+                    <button
+                      onClick={() => setChartMode("spot")}
+                      className={`rounded-md px-2.5 py-1 transition-all ${
+                        chartMode === "spot" ? "bg-white text-zinc-900 shadow-xs font-semibold" : "text-zinc-600 hover:text-zinc-900"
+                      }`}
+                    >
+                      Spot Index
+                    </button>
+                    <button
+                      onClick={() => {
+                        setChartMode("option");
+                        if (!selectedStrike && optionChain?.atm_strike) {
+                          setSelectedStrike(optionChain.atm_strike);
+                        }
+                      }}
+                      className={`rounded-md px-2.5 py-1 transition-all flex items-center gap-1 ${
+                        chartMode === "option"
+                          ? "bg-emerald-600 text-white shadow-xs font-semibold"
+                          : "text-zinc-600 hover:text-zinc-900"
+                      }`}
+                    >
+                      <span>Option Chart</span>
+                      <span className="rounded bg-emerald-800/50 px-1 py-0.2 text-[9px] text-emerald-100">Live</span>
+                    </button>
+                  </div>
+                )}
               </div>
-              <div className="text-[11px] text-zinc-500">
-                {quote?.time ? `Last update ${quote.time} IST` : ""} · Yahoo Finance, delayed · refreshes every minute
-              </div>
+
+              {/* Price display */}
+              {chartMode === "spot" ? (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-bold">{money(quote?.price, quote?.currency)}</span>
+                    <span className={`text-sm ${signed(quote?.change)}`}>
+                      {quote?.change != null && `${quote.change > 0 ? "+" : ""}${quote.change.toFixed(2)} (${pct(quote.change_pct)})`}
+                    </span>
+                  </div>
+                  <div className="text-[11px] text-zinc-500">
+                    {quote?.time ? `Last update ${quote.time} IST` : ""} · Yahoo Finance, delayed · refreshes every minute
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-2xl font-bold">
+                      {money(contractInfo?.ltp ?? bars.at(-1)?.close)}
+                    </span>
+                    <span className={`text-sm font-medium ${signed(contractInfo?.change)}`}>
+                      {contractInfo?.change != null &&
+                        `${contractInfo.change > 0 ? "+" : ""}${contractInfo.change.toFixed(2)} (${pct(contractInfo.change_pct)})`}
+                    </span>
+                    <span className="text-xs text-zinc-500 font-normal">
+                      · Spot: <strong className="text-zinc-700">{money(quote?.price)}</strong>
+                    </span>
+                  </div>
+                  {/* Greeks & Contract Details Badge */}
+                  <div className="flex flex-wrap items-center gap-2 text-[11px] text-zinc-600">
+                    <span className="rounded bg-zinc-100 px-1.5 py-0.5">
+                      Delta: <strong className="text-zinc-900">{contractInfo?.delta != null ? contractInfo.delta.toFixed(2) : "—"}</strong>
+                    </span>
+                    <span className="rounded bg-zinc-100 px-1.5 py-0.5">
+                      Theta: <strong className="text-zinc-900">{contractInfo?.theta != null ? contractInfo.theta.toFixed(1) : "—"}</strong>
+                    </span>
+                    <span className="rounded bg-zinc-100 px-1.5 py-0.5">
+                      IV: <strong className="text-zinc-900">{contractInfo?.iv_pct != null ? `${contractInfo.iv_pct.toFixed(1)}%` : "—"}</strong>
+                    </span>
+                    <span className="rounded bg-zinc-100 px-1.5 py-0.5">
+                      OI: <strong className="text-zinc-900">{contractInfo?.oi != null ? contractInfo.oi.toLocaleString("en-IN") : "—"}</strong>
+                    </span>
+                    <span className="rounded bg-zinc-100 px-1.5 py-0.5">
+                      Lot: <strong className="text-zinc-900">{contractInfo?.lot_size ?? optionChain?.lot_size ?? 65}</strong>
+                    </span>
+                  </div>
+                </>
+              )}
             </div>
+
+            {/* Timeframe Buttons */}
             <div className="flex flex-wrap gap-1">
               {TIMEFRAMES.map(([tf, label]) => (
                 <button
                   key={tf}
                   onClick={() => setTimeframe(tf)}
-                  className={`rounded-md px-2 py-1 text-sm ${timeframe === tf ? "bg-zinc-900 text-white" : "border"}`}
+                  className={`rounded-md px-2.5 py-1 text-sm font-medium transition ${
+                    timeframe === tf ? "bg-zinc-900 text-white shadow-xs" : "border border-zinc-200 bg-white hover:bg-zinc-50"
+                  }`}
                 >
                   {label}
                 </button>
               ))}
             </div>
           </div>
-          <CandleChart bars={bars} levels={chartLevels} zones={zones} plans={plans} />
+
+          {/* Option Selector Bar (when in Option Chart mode) */}
+          {chartMode === "option" && optionChain && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-emerald-100 bg-emerald-50/40 p-2.5 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                {/* CE / PE toggle */}
+                <div className="inline-flex rounded-md bg-white border border-zinc-200 p-0.5">
+                  <button
+                    onClick={() => setOptionType("CE")}
+                    className={`rounded px-3 py-1 font-bold transition-all ${
+                      optionType === "CE"
+                        ? "bg-emerald-600 text-white shadow-xs"
+                        : "text-zinc-600 hover:text-zinc-900"
+                    }`}
+                  >
+                    Call (CE)
+                  </button>
+                  <button
+                    onClick={() => setOptionType("PE")}
+                    className={`rounded px-3 py-1 font-bold transition-all ${
+                      optionType === "PE"
+                        ? "bg-rose-600 text-white shadow-xs"
+                        : "text-zinc-600 hover:text-zinc-900"
+                    }`}
+                  >
+                    Put (PE)
+                  </button>
+                </div>
+
+                {/* Expiry Selector */}
+                <select
+                  value={selectedExpiry || optionChain.current_expiry}
+                  onChange={(e) => setSelectedExpiry(e.target.value)}
+                  className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 font-medium text-zinc-800 shadow-2xs focus:outline-none"
+                >
+                  {optionChain.expiries.map((exp) => (
+                    <option key={exp} value={exp}>
+                      Expiry: {exp} {exp === optionChain.current_expiry ? "(Current)" : ""}
+                    </option>
+                  ))}
+                </select>
+
+                {/* Strike Step Controls & Selector */}
+                <div className="flex items-center gap-1">
+                  <button
+                    title="Previous strike"
+                    onClick={() => {
+                      if (selectedStrike != null) setSelectedStrike(selectedStrike - optionChain.strike_step);
+                    }}
+                    className="rounded border border-zinc-200 bg-white px-2 py-1 font-mono font-bold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    -
+                  </button>
+
+                  <select
+                    value={selectedStrike || optionChain.atm_strike}
+                    onChange={(e) => setSelectedStrike(Number(e.target.value))}
+                    className="rounded-md border border-zinc-200 bg-white px-2.5 py-1 font-mono font-semibold text-zinc-800 shadow-2xs focus:outline-none"
+                  >
+                    {optionChain.strikes.map((s) => {
+                      const opt = optionType === "CE" ? s.ce : s.pe;
+                      const tag = s.is_atm
+                        ? " [ATM]"
+                        : optionType === "CE"
+                        ? optionChain.spot > s.strike
+                          ? " (ITM)"
+                          : " (OTM)"
+                        : optionChain.spot < s.strike
+                        ? " (ITM)"
+                        : " (OTM)";
+                      return (
+                        <option key={s.strike} value={s.strike}>
+                          {s.strike}
+                          {tag}
+                          {opt?.ltp != null ? ` · ₹${opt.ltp.toFixed(2)}` : ""}
+                        </option>
+                      );
+                    })}
+                  </select>
+
+                  <button
+                    title="Next strike"
+                    onClick={() => {
+                      if (selectedStrike != null) setSelectedStrike(selectedStrike + optionChain.strike_step);
+                    }}
+                    className="rounded border border-zinc-200 bg-white px-2 py-1 font-mono font-bold text-zinc-700 hover:bg-zinc-100"
+                  >
+                    +
+                  </button>
+
+                  <button
+                    onClick={() => setSelectedStrike(optionChain.atm_strike)}
+                    className={`rounded px-2 py-1 font-bold text-[11px] transition ${
+                      selectedStrike === optionChain.atm_strike
+                        ? "bg-amber-100 text-amber-900 border border-amber-300"
+                        : "bg-white border border-zinc-200 text-zinc-600 hover:bg-zinc-100"
+                    }`}
+                  >
+                    ATM ({optionChain.atm_strike})
+                  </button>
+                </div>
+              </div>
+
+              {/* Live Option Chain Button */}
+              <button
+                onClick={() => setShowChainModal(true)}
+                className="flex items-center gap-1.5 rounded-lg border border-emerald-300 bg-white px-3 py-1 font-semibold text-emerald-800 shadow-2xs hover:bg-emerald-50 transition"
+              >
+                <span>Option Chain</span>
+                <span>📊</span>
+              </button>
+            </div>
+          )}
+          <CandleChart
+            bars={bars}
+            levels={chartLevels}
+            zones={zones}
+            plans={plans}
+            marketStructure={marketStructure}
+            trendlines={trendlines}
+            sweeps={sweeps}
+            indicators={indicators}
+            regime={regime}
+            decision={decision}
+            mtf={mtf}
+            selectedSensitivity={sensitivity}
+            onSensitivityChange={setSensitivity}
+          />
           <div className="flex flex-wrap gap-2">
             <a
               className="rounded-md border px-3 py-1 text-sm hover:bg-zinc-50"
@@ -476,6 +827,25 @@ export default function Markets() {
           )}
         </div>
       </section>
+
+      {/* Option Chain Modal */}
+      <OptionChainModal
+        isOpen={showChainModal}
+        onClose={() => setShowChainModal(false)}
+        chain={optionChain}
+        symbol={symbol}
+        selectedExpiry={selectedExpiry}
+        onSelectExpiry={(exp) => setSelectedExpiry(exp)}
+        selectedStrike={selectedStrike}
+        selectedOptionType={optionType}
+        onSelectContract={(strike, type) => {
+          setSelectedStrike(strike);
+          setOptionType(type);
+          setChartMode("option");
+        }}
+        loading={loadingChain}
+      />
     </div>
   );
 }
+

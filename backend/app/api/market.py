@@ -12,6 +12,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from collections import defaultdict
+
 from app.audit import current_actor, record_event
 from app.brokers.groww import GrowwQuotes
 from app.config import get_settings
@@ -19,9 +21,10 @@ from app.db.models import PaperOrder, Strategy
 from app.db.serialize import row_to_dict
 from app.db.session import get_db
 from app.db.types import utcnow
+from app.market.chart_analytics import calculate_robust_vwap, enrich_chart_payload
 from app.market.feed import BrokerFeed
 from app.paper import net_positions, order_charges
-from app.trading.option_pnl import plan_pnl
+from app.trading.option_pnl import black76, plan_pnl
 
 router = APIRouter(prefix="/api")
 
@@ -130,7 +133,11 @@ def market_quotes(symbols: str = Query(max_length=1000)):
 
 
 @router.get("/market/candles")
-def market_candles(symbol: str, interval: Literal["1m", "5m", "15m", "60m", "1d"] = "5m"):
+def market_candles(
+    symbol: str,
+    interval: Literal["1m", "5m", "15m", "60m", "1d"] = "5m",
+    sensitivity: int = Query(default=2, ge=1, le=10),
+):
     segment, ticker = resolve(symbol)
     try:
         payload = _chart(ticker, interval, RANGE[interval])
@@ -142,31 +149,24 @@ def market_candles(symbol: str, interval: Literal["1m", "5m", "15m", "60m", "1d"
     session = bars[-1]["date"][:10]
     if interval == "1d":
         bars = [b | {"date": b["date"][:10]} for b in bars]
-        daily, intraday = bars, []
+        daily = bars
     else:
         try:
-            daily = parse_yahoo_chart(_chart(ticker, "1d", "5d"))
+            daily = parse_yahoo_chart(_chart(ticker, "1d", "3mo"))
         except httpx.HTTPError:
             daily = []  # levels are a bonus; the chart still loads without them
         # Yahoo's daily list sometimes lacks the current session, so rebuild it from the intraday bars.
         day = [b for b in bars if b["date"][:10] == session]
-        today = {
-            "date": session, "high": max(b["high"] or b["close"] for b in day),
-            "low": min(b["low"] or b["close"] for b in day), "close": day[-1]["close"],
-        }  # fmt: skip
-        daily = [d for d in daily if d["date"][:10] < session] + [today]
-        minutes = int(interval[:-1])
-        # Commodities trade round the clock, so they have no 09:15 opening range.
-        intraday = intraday_levels(add_vwap(bars), 15 // minutes if segment != "commodity" else 0)
-    now = datetime.now(IST)
-    session_over = segment != "commodity" and (
-        session < now.date().isoformat() or now.strftime("%H:%M") >= get_settings().market_close
-    )  # fmt: skip
-    levels = trading_levels(daily, session_over) + intraday
-    return {
-        "symbol": symbol.upper(), "segment": segment, "interval": interval, "bars": bars, "levels": levels,
-        "zones": trading_zones(levels, bars[-1]["close"]),
-    }  # fmt: skip
+        if day:
+            today = {
+                "date": session, "high": max(b["high"] or b["close"] for b in day),
+                "low": min(b["low"] or b["close"] for b in day), "close": day[-1]["close"],
+            }
+            daily = [d for d in daily if d["date"][:10] < session] + [today]
+
+    enriched = enrich_chart_payload(symbol, segment, interval, bars, daily, sensitivity=sensitivity)
+    zones = trading_zones(enriched["levels"], bars[-1]["close"])
+    return enriched | {"zones": zones}
 
 
 # Option-chain providers by name: any `QuoteSource` (a broker adapter for Kite, Dhan, ... plugs in here too).
@@ -209,6 +209,213 @@ def option_pnl(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return plan | {"provider": provider}
+
+
+@router.get("/market/option-chain")
+def option_chain(
+    underlying: str = Query(default="NIFTY", max_length=20),
+    expiry: str | None = Query(default=None, max_length=15),
+):
+    """Live option chain for NIFTY / BANKNIFTY / FINNIFTY with Greeks, OI, and live prices from Groww."""
+    g = GrowwQuotes()
+    try:
+        page = g._page(underlying, expiry)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Option chain unavailable for {underlying}: {exc}") from exc
+
+    agg = page.get("optionChain", {}).get("aggregatedDetails", {})
+    contracts = page.get("optionChain", {}).get("optionContracts", [])
+    company = page.get("company", {})
+    spot = float(company.get("liveData", {}).get("ltp") or 0.0)
+    current_expiry = agg.get("currentExpiry") or expiry
+    expiries = agg.get("expiryDates", [])
+    lot_size = agg.get("lotSize") or get_settings().lot_size(underlying) or 65
+
+    step = get_settings().strike_step(underlying) or 50
+    atm_strike = round(spot / step) * step if spot > 0 else 0
+
+    strikes = []
+    for r in contracts:
+        strike = r["strikePrice"] / 100
+        # Filter window of strikes around ATM (+/- 15 strikes)
+        if atm_strike == 0 or abs(strike - atm_strike) <= (15 * step):
+            ce = r.get("ce")
+            pe = r.get("pe")
+            ce_live = ce.get("liveData", {}) if ce else {}
+            pe_live = pe.get("liveData", {}) if pe else {}
+            ce_greeks = ce.get("greeks", {}) if ce else {}
+            pe_greeks = pe.get("greeks", {}) if pe else {}
+
+            strikes.append({
+                "strike": strike,
+                "is_atm": strike == atm_strike,
+                "ce": {
+                    "contract_id": ce.get("growwContractId"),
+                    "ltp": ce_live.get("ltp"),
+                    "close": ce_live.get("close"),
+                    "change": ce_live.get("dayChange"),
+                    "change_pct": ce_live.get("dayChangePerc"),
+                    "oi": ce_live.get("oi"),
+                    "iv": ce_greeks.get("iv"),
+                    "delta": ce_greeks.get("delta"),
+                    "theta": ce_greeks.get("theta"),
+                    "gamma": ce_greeks.get("gamma"),
+                    "vega": ce_greeks.get("vega"),
+                } if ce else None,
+                "pe": {
+                    "contract_id": pe.get("growwContractId"),
+                    "ltp": pe_live.get("ltp"),
+                    "close": pe_live.get("close"),
+                    "change": pe_live.get("dayChange"),
+                    "change_pct": pe_live.get("dayChangePerc"),
+                    "oi": pe_live.get("oi"),
+                    "iv": pe_greeks.get("iv"),
+                    "delta": pe_greeks.get("delta"),
+                    "theta": pe_greeks.get("theta"),
+                    "gamma": pe_greeks.get("gamma"),
+                    "vega": pe_greeks.get("vega"),
+                } if pe else None,
+            })
+
+    return {
+        "underlying": underlying.upper(),
+        "spot": spot,
+        "lot_size": lot_size,
+        "current_expiry": current_expiry,
+        "expiries": expiries,
+        "atm_strike": atm_strike,
+        "strike_step": step,
+        "strikes": strikes,
+    }
+
+
+@router.get("/market/option-candles")
+def option_candles(
+    symbol: str = Query(default="NIFTY", max_length=20),
+    strike: float | None = Query(default=None, gt=0),
+    option_type: Literal["CE", "PE"] = "CE",
+    expiry: str | None = Query(default=None, max_length=15),
+    interval: Literal["1m", "5m", "15m", "60m", "1d"] = "5m",
+    sensitivity: int = Query(default=2, ge=1, le=10),
+):
+    """Synthetic Black-76 + Live Greeks candlestick chart for individual option strikes."""
+    segment, ticker = resolve(symbol)
+    if segment != "index":
+        raise HTTPException(status_code=400, detail="Option charts currently supported for indices (NIFTY, BANKNIFTY, FINNIFTY)")
+
+    try:
+        payload = _chart(ticker, interval, RANGE[interval])
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail=f"Market data source unavailable: {exc}") from exc
+    bars = parse_yahoo_chart(payload)
+
+    step = 100 if symbol == "BANKNIFTY" else 50
+    if strike is None:
+        if bars:
+            strike = float(round(bars[-1]["close"] / step) * step)
+        else:
+            strike = 22600.0
+
+    if not bars:
+        return {"symbol": f"{symbol} {int(strike)} {option_type}", "segment": "option", "interval": interval, "bars": [], "levels": [], "zones": []}
+
+    g = GrowwQuotes()
+    contract_info = None
+    iv_pct = 14.0
+    expiry_str = expiry
+    lot_size = get_settings().lot_size(symbol) or 65
+
+    try:
+        page = g._page(symbol, expiry)
+        agg = page.get("optionChain", {}).get("aggregatedDetails", {})
+        if not expiry_str:
+            expiry_str = agg.get("currentExpiry")
+        lot_size = agg.get("lotSize") or lot_size
+
+        target_strike_int = int(round(strike * 100))
+        for r in page.get("optionChain", {}).get("optionContracts", []):
+            if r["strikePrice"] == target_strike_int:
+                c = r.get(option_type.lower())
+                if c:
+                    contract_info = c
+                    greeks = c.get("greeks") or {}
+                    if greeks.get("iv") and greeks["iv"] > 0:
+                        iv_pct = float(greeks["iv"])
+                break
+    except Exception:
+        pass
+
+    if not expiry_str:
+        last_dt = datetime.strptime(bars[-1]["date"][:10], "%Y-%m-%d").date()
+        exp_date = last_dt + timedelta(days=(1 - last_dt.weekday()) % 7)
+        expiry_str = exp_date.isoformat()
+    else:
+        exp_date = datetime.strptime(expiry_str, "%Y-%m-%d").date()
+
+    expires = datetime.combine(exp_date, datetime.strptime("15:30", "%H:%M").time(), IST)
+    iv = iv_pct / 100.0
+
+    opt_bars = []
+    by_day = defaultdict(list)
+    live_ltp = contract_info.get("liveData", {}).get("ltp") if contract_info else None
+    contract_oi = contract_info.get("liveData", {}).get("oi") if contract_info else 1000
+
+    for idx, b in enumerate(bars):
+        dt = datetime.strptime(b["date"], "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+        years = max((expires - dt).total_seconds(), 0) / 86400 / 365
+        p = {k: round(black76(b[k], strike, years, iv, option_type), 2) for k in ("open", "high", "low", "close")}
+
+        if idx == len(bars) - 1 and live_ltp is not None:
+            p["close"] = round(float(live_ltp), 2)
+            p["high"] = max(p["high"], p["close"])
+            p["low"] = min(p["low"], p["close"])
+
+        bar = {
+            "date": b["date"],
+            "open": p["open"],
+            "close": p["close"],
+            "high": max(p["high"], p["low"]),
+            "low": min(p["high"], p["low"]),
+            "volume": b.get("volume") or contract_oi,
+        }
+        opt_bars.append(bar)
+        by_day[b["date"][:10]].append(bar)
+
+    daily = []
+    for d, dbars in sorted(by_day.items()):
+        daily.append({
+            "date": d,
+            "open": dbars[0]["open"],
+            "high": max(x["high"] for x in dbars),
+            "low": min(x["low"] for x in dbars),
+            "close": dbars[-1]["close"],
+            "volume": sum(x["volume"] for x in dbars),
+        })
+
+    opt_symbol = f"{symbol} {int(strike)} {option_type}"
+    enriched = enrich_chart_payload(opt_symbol, "index", interval, opt_bars, daily, sensitivity=sensitivity)
+    zones = trading_zones(enriched["levels"], opt_bars[-1]["close"])
+
+    contract_meta = {
+        "underlying": symbol,
+        "strike": strike,
+        "option_type": option_type,
+        "expiry": expiry_str,
+        "ltp": live_ltp if live_ltp is not None else opt_bars[-1]["close"],
+        "close": contract_info.get("liveData", {}).get("close") if contract_info else None,
+        "change": contract_info.get("liveData", {}).get("dayChange") if contract_info else None,
+        "change_pct": contract_info.get("liveData", {}).get("dayChangePerc") if contract_info else None,
+        "oi": contract_oi,
+        "iv_pct": round(iv_pct, 2),
+        "delta": contract_info.get("greeks", {}).get("delta") if contract_info else None,
+        "theta": contract_info.get("greeks", {}).get("theta") if contract_info else None,
+        "gamma": contract_info.get("greeks", {}).get("gamma") if contract_info else None,
+        "vega": contract_info.get("greeks", {}).get("vega") if contract_info else None,
+        "lot_size": lot_size,
+        "spot": bars[-1]["close"],
+    }
+
+    return enriched | {"zones": zones, "contract": contract_meta}
 
 
 def trading_levels(daily: list[dict], session_over: bool = False) -> list[dict]:

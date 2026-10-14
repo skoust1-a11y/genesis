@@ -46,6 +46,7 @@ from app.liquidity_signals import (
     estimated_plan,
     exit_of,
     scan,
+    staged_exit_of,
 )
 from app.market.hours import holidays
 from app.market.nse import load_lot_sizes, lot_size_on
@@ -206,7 +207,8 @@ def option_exit(plan: dict, spot: float, at: str, settings: Settings) -> float:
 
 
 def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict], vix: dict[str, float],
-             since: str = "", stop_at: str = "swing") -> tuple[list[dict], list[str]]:  # fmt: skip
+             since: str = "", stop_at: str = "swing", require_trendline: bool = False,
+             include_equal: bool = False, staged: bool = False) -> tuple[list[dict], list[str]]:  # fmt: skip
     """Every signal from `since` (before today) with its index exit and 1-unit option premiums; and the days."""
     by_day: dict[str, list[dict]] = defaultdict(list)
     for b in bars:
@@ -224,14 +226,37 @@ def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict
         expiry = expiry_for(date.fromisoformat(d), trading, settings)
         if expiry.isoformat() == d:
             continue  # no trades on expiry day
-        for s in scan(by_day[d], above, prev["high"], prev["low"], stop_at=stop_at):
-            reason, price, at = exit_of(by_day[d], s)
-            points = price - s["entry"] if s["side"] == "Long" else s["entry"] - price
+        day_signals = scan(by_day[d], above, prev["high"], prev["low"], stop_at=stop_at, require_trendline=require_trendline)
+        for s in day_signals:
+            s.setdefault("pool", f"PD{'L' if s['side'] == 'Long' else 'H'}")
+        if include_equal:
+            from app.intraday_liquidity import atr, equal_levels, scan_levels
+            atrs = atr(by_day[d])
+            eq_lvs = equal_levels(by_day[d], atrs)
+            if eq_lvs:
+                tot_p = 0.0
+                v_list = []
+                for n_idx, b_item in enumerate(by_day[d], 1):
+                    tot_p += (b_item["high"] + b_item["low"] + b_item["close"]) / 3.0
+                    v_list.append(tot_p / n_idx)
+                for eq_s in scan_levels(by_day[d], v_list, atrs, eq_lvs, "equal", min_sweep=2.0, with_open_only=True, require_trendline=require_trendline):
+                    eq_s["pool"] = f"Equal {'High (EQH)' if eq_s['side'] == 'Short' else 'Low (EQL)'}"
+                    day_signals.append(eq_s)
+        for s in day_signals:
+            if staged:
+                res = staged_exit_of(by_day[d], s)
+                reason, price, at = res["exit_reason"], res["exit_price"], res["exit_time"]
+                points = price - s["entry"] if s["side"] == "Long" else s["entry"] - price
+                r_val = res["r_multiple"]
+            else:
+                reason, price, at = exit_of(by_day[d], s)
+                points = price - s["entry"] if s["side"] == "Long" else s["entry"] - price
+                r_val = round(points / s["risk"], 2)
             plan = estimated_plan(s, settings, iv, expiry)
             trades.append({
-                "Date": d, "Side": s["side"], "Entry time": s["time"][11:], "Entry": s["entry"], "Stop": s["stop"],
+                "Date": d, "Pool": s.get("pool", "PDH/PDL"), "Side": s["side"], "Entry time": s["time"][11:], "Entry": s["entry"], "Stop": s["stop"],
                 "Target": s["target"], "Risk pts": s["risk"], "Exit time": at[11:], "Exit reason": reason,
-                "Exit": round(price, 2), "Points": round(points, 2), "R": round(points / s["risk"], 2),
+                "Exit": round(price, 2), "Points": round(points, 2), "R": r_val,
                 "Option": plan["option"], "Expiry": plan["expiry"], "VIX": plan["iv_pct"],
                 "Lot size": lot_size_on(lots_table, "NIFTY", d) or 75,  # 75 from Nov 2015 until the table starts
                 "Premium in": plan["entry_premium"], "Premium at stop": plan["exits"][0]["premium"],
@@ -510,6 +535,21 @@ def main() -> None:
         default="swing",
         help="stop for the main sheets",
     )
+    parser.add_argument(
+        "--trendline",
+        action="store_true",
+        help="require trendline breakdown on Short and breakout on Long",
+    )
+    parser.add_argument(
+        "--include-equal",
+        action="store_true",
+        help="include intraday Equal High (EQH) and Equal Low (EQL) sweeps",
+    )
+    parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="use staged exits (50% partial at +2R, +1R trail stop lock, 5m candle close trail)",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     settings = get_settings()
@@ -532,7 +572,18 @@ def main() -> None:
     )
     runs = {}
     for stop_at in (args.stop, "sweep" if args.stop == "swing" else "swing"):
-        trades, days = backtest(settings, bars, above, daily, vix, since, stop_at)
+        trades, days = backtest(
+            settings,
+            bars,
+            above,
+            daily,
+            vix,
+            since,
+            stop_at,
+            require_trendline=args.trendline,
+            include_equal=args.include_equal,
+            staged=args.staged,
+        )
         runs[stop_at] = (
             trades,
             ledger(
@@ -589,7 +640,7 @@ def compare(
             "Signals": len(trades), "Trades taken": len(taken),
             "Win rate %": round(sum(t["Points"] > 0 for t in taken) / len(taken) * 100, 1) if taken else None,
             "Average stop distance (pts)": round(sum(t["Risk pts"] for t in taken) / len(taken), 1) if taken else None,
-            EXITS_LABEL.capitalize(): " / ".join(str(sum(t["Exit reason"] == r for t in taken)) for r in EXITS),
+            EXITS_LABEL.capitalize(): " / ".join(str(sum(r in t["Exit reason"] for t in taken)) for r in EXITS),
             "Total R": round(sum(t["R"] for t in taken), 2),
             "R per trade": round(sum(t["R"] for t in taken) / len(taken), 3) if taken else None,
             "Option Rs": sum(t["Option Rs"] for t in taken),

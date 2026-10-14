@@ -26,6 +26,11 @@ class Settings(BaseSettings):
     huggingface_api_key: str | None = Field(default=None, alias="HF_TOKEN")
     huggingface_model: str = Field(default="meta-llama/Llama-3.3-70B-Instruct", alias="HF_MODEL")
 
+    # Langfuse (LLM tracing)
+    langfuse_secret_key: str | None = Field(default=None, alias="LANGFUSE_SECRET_KEY")
+    langfuse_public_key: str | None = Field(default=None, alias="LANGFUSE_PUBLIC_KEY")
+    langfuse_base_url: str = Field(default="https://cloud.langfuse.com", alias="LANGFUSE_BASE_URL")
+
     data_dir: str = Field(default="data", alias="DATA_DIR")
     database_url: str = Field(default="sqlite:///data/genesis.db", alias="DATABASE_URL")
     live_database_url: str = Field(default="sqlite:///data/genesis_live.db", alias="LIVE_DATABASE_URL")
@@ -146,8 +151,10 @@ class Settings(BaseSettings):
     # Lifetime of a username/password login (users from `python -m app.auth new-user NAME`).
     session_hours: float = Field(default=12, gt=0, alias="SESSION_HOURS")
 
-    backend_port: int = Field(default=8841, alias="BACKEND_PORT")
-    cors_origins: str = Field(default="http://127.0.0.1:8842", alias="CORS_ORIGINS")
+    cors_origins: str = Field(
+        default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:8844,http://127.0.0.1:8844,http://localhost:8842,http://127.0.0.1:8842",
+        alias="CORS_ORIGINS",
+    )
 
     @model_validator(mode="after")
     def _streak_and_cooldown(self) -> "Settings":
@@ -200,6 +207,10 @@ class Settings(BaseSettings):
     @property
     def llm_enabled(self) -> bool:
         return bool(self.llm_providers)
+
+    @property
+    def langfuse_enabled(self) -> bool:
+        return bool(self.langfuse_secret_key and self.langfuse_public_key)
 
     @staticmethod
     def _per_underlying(raw: str) -> dict[str, float]:

@@ -19,3 +19,8 @@ graphify-out/
 .cursor/
 .serena/
 skills-lock.json
+sample telegram data from others/
+.DS_Store
+**/.DS_Store
+backend/*.png
+backend/sample_message.txt

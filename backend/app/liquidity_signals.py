@@ -86,9 +86,12 @@ def pivots(bars: list[dict], key: str) -> list[int]:
 
 
 def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: float,
-         min_risk: float = MIN_RISK, stop_at: str = "swing") -> list[dict]:  # fmt: skip
+         min_risk: float = MIN_RISK, stop_at: str = "swing", min_sweep: float = 2.0,
+         require_trendline: bool = False) -> list[dict]:  # fmt: skip
     """Entries in one session's completed 5m `bars`; `above_vwap[date]` is whether that bar closed above VWAP.
-    `stop_at` "sweep" puts every stop 5 pts past the sweep low / raid high instead of at the last swing."""
+    `stop_at` "sweep" puts every stop 5 pts past the sweep low / raid high instead of at the last swing.
+    `min_sweep` requires sweep depth >= min_sweep (default 2.0 pts) past PDH/PDL to filter noise.
+    `require_trendline` enforces breakdown below ascending trendline (Short) or breakout above descending trendline (Long)."""
     if not bars:
         return []
     day_open, b15, out = bars[0]["open"], to_15m(bars), []
@@ -97,7 +100,7 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
         stage, ext, swept, why = 0, 0.0, "", []
         for i, b in enumerate(bars):
             if stage == 0:
-                if (long and b["low"] < pdl - 1) or (not long and b["high"] > pdh + 1):
+                if (long and b["low"] <= pdl - min_sweep) or (not long and b["high"] >= pdh + min_sweep):
                     stage, ext, swept = 1, b["low"] if long else b["high"], b["date"]
                     swept_level = f"{'below PDL' if long else 'above PDH'} {pdl if long else pdh:,.2f}"
                     why = [f"{_at(b['date'], 5)[11:]} sweep: 5m {'low' if long else 'high'} {ext:,.2f} {swept_level}"]
@@ -131,6 +134,27 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
                 continue
             word, level = ("above", f"PDL {pdl:,.2f}") if long else ("below", f"PDH {pdh:,.2f}")
             why.append(f"{closes_at[11:]} entry: 5m close {c:,.2f} {word} VWAP, {word} {level} and {word} the open {day_open:,.2f}")
+
+            # Trendline Confluence Check
+            tl_key = "high" if long else "low"
+            piv = pivots(bars[: i + 1], tl_key)
+            tl_ok, tl_desc = True, ""
+            if len(piv) >= 2:
+                x1, x2 = piv[-2], piv[-1]
+                y1, y2 = bars[x1][tl_key], bars[x2][tl_key]
+                if x2 != x1:
+                    slope = (y2 - y1) / (x2 - x1)
+                    tl_val = y1 + slope * (i - x1)
+                    if not long and slope >= 0:
+                        tl_ok = c < tl_val
+                        tl_desc = f"{closes_at[11:]} trendline breakdown: 5m close {c:,.2f} below ascending trendline {tl_val:,.2f}"
+                    elif long and slope <= 0:
+                        tl_ok = c > tl_val
+                        tl_desc = f"{closes_at[11:]} trendline breakout: 5m close {c:,.2f} above descending trendline {tl_val:,.2f}"
+            if require_trendline and not tl_ok:
+                continue
+            if tl_desc:
+                why.append(tl_desc)
             if stop_at == "sweep":
                 stop, basis = (ext - 5, f"sweep low {ext:,.2f} - 5") if long else (ext + 5, f"raid high {ext:,.2f} + 5")
             elif long:
@@ -141,11 +165,16 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
                 else:
                     stop, basis = ext - 5, f"sweep low {ext:,.2f} - 5"
             else:
-                highs = [bars[j] for j in pivots(bars[: i + 1], "high") if bars[j]["date"] >= swept]
+                done = [x for x in b15 if _at(x["date"], 15) <= closes_at]
+                highs = [done[j] for j in pivots(done, "high") if done[j]["date"] >= _bucket(swept)]
                 if highs and highs[-1]["high"] + 5 > c:
-                    stop, basis = highs[-1]["high"] + 5, f"5m swing high {highs[-1]['high']:,.2f} ({highs[-1]['date'][11:]}) + 5"
+                    stop, basis = highs[-1]["high"] + 5, f"15m swing high {highs[-1]['high']:,.2f} ({highs[-1]['date'][11:]}) + 5"
                 else:
-                    stop, basis = ext + 15, f"raid high {ext:,.2f} + 15"
+                    highs5 = [bars[j] for j in pivots(bars[: i + 1], "high") if bars[j]["date"] >= swept]
+                    if highs5 and highs5[-1]["high"] + 5 > c:
+                        stop, basis = highs5[-1]["high"] + 5, f"5m swing high {highs5[-1]['high']:,.2f} ({highs5[-1]['date'][11:]}) + 5"
+                    else:
+                        stop, basis = ext + 5, f"raid high {ext:,.2f} + 5"
             risk = abs(c - stop)
             if risk >= min_risk:
                 target = c + R_MULT * risk if long else c - R_MULT * risk
@@ -175,14 +204,16 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
         option = f"{strike_of(s, step):g} {'CE' if long else 'PE'}"
         option_lines = [f"{option}: ~Rs {fut_loss * 0.4:,.0f}/lot at stop (delta ~0.4; option chain unavailable)"]
         option_loss = fut_loss * 0.4
+    pool_tag = f"{s.get('pool')} " if s.get("pool") else ""
     lines = [
-        f"NIFTY {s['side'].upper()} signal at {s['time'][11:]} IST ({'sell-side sweep' if long else 'buy-side raid'} of {s['level']:,.2f})",
+        f"NIFTY {s['side'].upper()} signal at {s['time'][11:]} IST ({'sell-side sweep' if long else 'buy-side raid'} of {pool_tag}{s['level']:,.2f})",
         "",
         "TRADE (index)",
         f"Entry {e:,.2f} (5m close) | Stop {s['stop']:,.2f} | Target {s['target']:,.2f}",
-        f"Risk {s['risk']:.0f} pts ({s['risk'] / e:.2%}) | Reward {abs(s['target'] - e):.0f} pts | R:R 1:{R_MULT:g}",
+        f"Risk {s['risk']:.0f} pts ({s['risk'] / e:.2%}) | Reward {abs(s['target'] - e):.0f} pts | R:R 1:{abs(s['target'] - e) / s['risk']:.3g}",
         *([f"Stop basis: {s['stop_basis']}"] if s.get("stop_basis") else []),
         f"Move the stop to entry {e:,.2f} once price reaches {e + s['risk'] if long else e - s['risk']:,.2f} (+1R)",
+        f"Staged targets: T1 {e + s['risk'] if long else e - s['risk']:,.2f} (+1R: SL to BE) | T2 {e + 2 * s['risk'] if long else e - 2 * s['risk']:,.2f} (+2R: Book 50%, lock +1R) | T3 {s['target']:,.2f} (Runner: trail on 5m candle close reversal)",
         "",
         "OPTION",
         *option_lines,
@@ -209,8 +240,8 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
         "RISK",
         f"At stop: Rs {fut_loss:,.0f}/lot futures | Rs {option_loss:,.0f}/lot option",
         (f"Option lots = {RISK_PCT}% of your trading capital / Rs {option_loss:,.0f}, e.g. Rs 50,000 -> "
-         f"{int(500 * RISK_PCT // option_loss) if option_loss > 0 else 0} (skip if 0; never more than your account can pay,"
-         " never add to a loser)"),
+         f"{int(500 * RISK_PCT // option_loss) if option_loss > 0 else 0} (skip if 0; 2 lots recommended for staged exits; "
+         "if 1 lot, book at T2 or on 5m candle close reversal)"),
         f"Max 1 trade per side (so at most 2 a day), exit {EXIT} if neither stop nor target is hit.",
         f"{LOSS_STREAK} losses in a row = {BREAK_DAYS} trading days off.",
         "Data is a few minutes delayed: check the live price first; skip if it already ran past stop or target.",
@@ -218,7 +249,7 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
     return "\n".join(lines)
 
 
-def option_plan(s: dict, settings: Settings) -> dict | None:
+def option_plan(s: dict, settings: Settings, lots: int = 2) -> dict | None:
     """The strike_of() call (long) or put (short) priced from Groww's live chain at entry, stop and target; estimated
     at India VIX when the chain is unavailable; None if VIX is unavailable too."""
     step = settings.strike_step("NIFTY") or 50
@@ -227,7 +258,7 @@ def option_plan(s: dict, settings: Settings) -> dict | None:
         snapshot = feed.snapshot("NIFTY")
         if snapshot is not None:
             return plan_pnl(snapshot, settings, "CE" if s["side"] == "Long" else "PE", strike_of(s, step),
-                            s["entry"], {"stop": s["stop"], "target": s["target"]})  # fmt: skip
+                            s["entry"], {"stop": s["stop"], "target": s["target"]}, lots=lots)  # fmt: skip
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         print(f"option chain unavailable: {exc}")
     try:
@@ -235,7 +266,7 @@ def option_plan(s: dict, settings: Settings) -> dict | None:
     except (httpx.HTTPError, IndexError, KeyError) as exc:
         print(f"India VIX unavailable: {exc}")
         return None
-    return estimated_plan(s, settings, vix) if vix else None
+    return estimated_plan(s, settings, vix, lots=lots) if vix else None
 
 
 def weekly_expiry(day: date, settings: Settings) -> date:
@@ -246,25 +277,25 @@ def weekly_expiry(day: date, settings: Settings) -> date:
     return exp
 
 
-def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | None = None) -> dict:
+def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | None = None, lots: int = 2) -> dict:
     """option_plan() without a live chain: the strike_of() option to `expiry` (default: the weekly one) priced by
     Black-76 at `iv_pct` (India VIX, a 30-day ATM IV), forward = spot. Same shape as plan_pnl() with `quote` None."""
-    # ponytail: one IV for every strike ignores the skew (OTM puts dearer, OTM calls cheaper); use the live chain's IVs to fix.
     step, lot = settings.strike_step("NIFTY") or 50, settings.lot_size("NIFTY") or 65
+    total_qty = lot * lots
     kind, strike = "CE" if s["side"] == "Long" else "PE", strike_of(s, step)
     expiry = expiry or weekly_expiry(date.fromisoformat(s["time"][:10]), settings)
     left = datetime.combine(expiry, dtime.fromisoformat(settings.market_close), IST) - datetime.strptime(
         s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST)  # fmt: skip
     years = lambda hold: max(left.total_seconds() / 86400 - hold, 0) / 365
     entry = black76(s["entry"], strike, years(0), iv_pct / 100, kind)
-    buy = order_charges(settings, kind, "BUY", entry, lot, s["time"][:10])["total"]
+    buy = order_charges(settings, kind, "BUY", entry, total_qty, s["time"][:10])["total"]
     exits = []
     for spot in (s["stop"], s["target"]):
         premium = black76(spot, strike, years(0.15), iv_pct / 100, kind)
-        charges = buy + order_charges(settings, kind, "SELL", premium, lot, s["time"][:10])["total"]
-        exits.append({"premium": round(premium, 2), "pnl": round((premium - entry) * lot - charges, 2)})
+        charges = buy + order_charges(settings, kind, "SELL", premium, total_qty, s["time"][:10])["total"]
+        exits.append({"premium": round(premium, 2), "pnl": round((premium - entry) * total_qty - charges, 2)})
     return {"option": f"{strike:g} {kind}", "expiry": expiry.isoformat(), "iv_pct": round(iv_pct, 2),
-            "forward_basis": 0.0, "entry_premium": round(entry, 2), "quote": None, "quantity": lot, "exits": exits}  # fmt: skip
+            "forward_basis": 0.0, "entry_premium": round(entry, 2), "quote": None, "quantity": total_qty, "lots": lots, "exits": exits}  # fmt: skip
 
 
 def option_bars(bars: list[dict], plan: dict, settings: Settings) -> list[dict]:
@@ -282,10 +313,11 @@ def option_bars(bars: list[dict], plan: dict, settings: Settings) -> list[dict]:
     return out
 
 
-def chart(bars: list[dict], levels: list[tuple], title: str, entry_time: str, entry: float, stop: float,
-          target: float) -> bytes:  # fmt: skip
-    """PNG of 5m candles, TradingView position style: green reward and red risk boxes from the entry candle,
-    horizontal `levels` (label, price, color, line style) tagged on the right price axis."""
+def chart(bars: list[dict], levels: list[tuple], title: str, entry_time: str = "", entry: float | None = None,
+          stop: float | None = None, target: float | None = None,
+          trendline: tuple[int, float, int, float] | None = None) -> bytes:  # fmt: skip
+    """PNG of 5m candles, TradingView position style: optional green reward and red risk boxes from the entry candle,
+    horizontal `levels` (label, price, color, line style) tagged on the right price axis, and optional trendline."""
     fig = Figure(figsize=(10, 5.5), dpi=110)
     ax = fig.add_subplot()
     for x, b in enumerate(bars):
@@ -294,9 +326,23 @@ def chart(bars: list[dict], levels: list[tuple], title: str, entry_time: str, en
         ax.bar(x, abs(b["close"] - b["open"]) or 0.05, bottom=min(b["open"], b["close"]), color=color, width=0.7)
     entry_x = next((x for x, b in enumerate(bars) if _at(b["date"], 5) == entry_time), len(bars) - 1)
     right = len(bars) + 8
-    ax.fill_between([entry_x - 0.5, right], entry, target, color="#26a69a", alpha=0.18, linewidth=0)
-    ax.fill_between([entry_x - 0.5, right], entry, stop, color="#ef5350", alpha=0.18, linewidth=0)
-    ax.plot(entry_x, entry, marker="^" if target > entry else "v", color="#1e88e5", markersize=11)
+    if entry is not None and stop is not None and target is not None:
+        ax.fill_between([entry_x - 0.5, right], entry, target, color="#26a69a", alpha=0.18, linewidth=0)
+        ax.fill_between([entry_x - 0.5, right], entry, stop, color="#ef5350", alpha=0.18, linewidth=0)
+        ax.plot(entry_x, entry, marker="^" if target > entry else "v", color="#1e88e5", markersize=11)
+    if trendline:
+        x1, y1, x2, y2 = trendline
+        if x2 != x1:
+            slope = (y2 - y1) / (x2 - x1)
+            x_end = min(entry_x + 3, len(bars) - 1)
+            y_end = y1 + slope * (x_end - x1)
+            ax.plot([x1, x_end], [y1, y_end], color="#f57c00", linestyle="-.", linewidth=1.8, zorder=4)
+            if entry is not None and target is not None:
+                offset = 12 if target < entry else -12
+                ax.annotate("Trendline Break", (entry_x, entry), xycoords="data",
+                            xytext=(entry_x - 4, entry + offset), textcoords="data",
+                            fontsize=8, color="#f57c00", fontweight="bold",
+                            arrowprops={"arrowstyle": "->", "color": "#f57c00", "lw": 1.2})
     ax.set_xlim(-1, right)
     for _, price, color, style in levels:
         ax.axhline(price, color=color, linestyle=style, linewidth=1)
@@ -318,26 +364,34 @@ def chart(bars: list[dict], levels: list[tuple], title: str, entry_time: str, en
 
 def charts(day: list[dict], s: dict, levels: list[dict], plan: dict | None, settings: Settings) -> list[bytes]:
     """The option's estimated premium chart (when priced) and the NIFTY chart, each with entry, stop and target;
-    the NIFTY chart also draws the `levels` (as in message()) that fall inside its price range."""
+    the NIFTY chart also draws the `levels` (as in message()) that fall inside its price range and broken trendline."""
     out = []
+    entry_x = next((x for x, b in enumerate(day) if _at(b["date"], 5) == s["time"]), len(day) - 1)
     if plan:
         stop, target = (row["premium"] for row in plan["exits"])
+        ob = option_bars(day, plan, settings)
+        opt_piv = pivots(ob[: entry_x + 1], "high")
+        opt_tl = (opt_piv[-2], ob[opt_piv[-2]]["high"], opt_piv[-1], ob[opt_piv[-1]]["high"]) if len(opt_piv) >= 2 else None
         out.append(chart(
-            option_bars(day, plan, settings),
+            ob,
             [("Entry", plan["entry_premium"], "#1e88e5", "-"), ("Stop", stop, "#e53935", "--"), ("Target", target, "#43a047", "--")],
             f"NIFTY {plan['option']} {plan['expiry']}: estimated premium at IV {plan['iv_pct']:g}% (buy at {s['time'][11:]})",
-            s["time"], plan["entry_premium"], stop, target,
+            s["time"], plan["entry_premium"], stop, target, trendline=opt_tl,
         ))  # fmt: skip
     lo = min(s["stop"], s["target"], *(b["low"] for b in day))
     hi = max(s["stop"], s["target"], *(b["high"] for b in day))
     near = [(lv["label"], lv["price"], "#7e57c2" if lv["label"].startswith("PD") else "#5c6bc0", ":")
             for lv in levels or [] if lo <= lv["price"] <= hi]  # fmt: skip
+    entry_x = next((x for x, b in enumerate(day) if _at(b["date"], 5) == s["time"]), len(day) - 1)
+    key = "low" if s["side"] == "Short" else "high"
+    piv = pivots(day[: entry_x + 1], key)
+    tl = (piv[-2], day[piv[-2]][key], piv[-1], day[piv[-1]][key]) if len(piv) >= 2 else None
     out.append(chart(
         day,
         [*near, ("Open", day[0]["open"], "#9e9e9e", ":"),
          ("Entry", s["entry"], "#1e88e5", "-"), ("Stop", s["stop"], "#e53935", "--"), ("Target", s["target"], "#43a047", "--")],
         f"NIFTY 5m {day[0]['date'][:10]}: {s['side'].upper()} at {s['time'][11:]} IST",
-        s["time"], s["entry"], s["stop"], s["target"],
+        s["time"], s["entry"], s["stop"], s["target"], trendline=tl,
     ))  # fmt: skip
     return out
 
@@ -367,6 +421,125 @@ def exit_of(day: list[dict], s: dict) -> tuple[str, float, str]:
         if b["high"] >= one_r if long else b["low"] <= one_r:
             stop, reason = s["entry"], "Breakeven"
     return "Last bar", day[-1]["close"], _at(day[-1]["date"], 5)
+
+
+def staged_exit_of(
+    day: list[dict],
+    s: dict,
+    partial_r: float = 2.0,
+    partial_pct: float = 0.5,
+    be_r: float = 1.0,
+    trail_on_close: bool = True,
+    trail_trigger_r: float = 1.5,
+) -> dict:
+    """Evaluates staged exits:
+    1. Breakeven: once price reaches +be_r (+1R), SL moves to entry from next bar.
+    2. Partial: books partial_pct (e.g. 50%) at +partial_r (+2R).
+    3. Trailing Stop / Lock-in: once +partial_r (+2R) is reached, SL floor moves to at least +1R.
+    4. Candle Close Trail: once +trail_trigger_r (+1.5R) or partial target is reached, if a 5m candle
+       closes against the trend (or closes beyond the prior candle's extreme), exit on that confirmed candle close.
+    5. Final Target: exits remaining at s['target'] (e.g. +3R).
+    6. Time Exit: exits at 15:10 close if neither hit.
+    Returns a dict with overall weighted R-multiple and exit details.
+    """
+    long, e, risk = s["side"] == "Long", s["entry"], s["risk"]
+    sg = 1 if long else -1
+    stop = s["stop"]
+    be_level = e + sg * be_r * risk
+    partial_level = e + sg * partial_r * risk
+    final_target = s["target"]
+
+    partial_hit = False
+    partial_at = None
+    partial_px = None
+    be_triggered = False
+    trail_active = False
+
+    after = [b for b in day if b["date"] >= s["time"]]
+    if not after:
+        after = [day[-1]]
+
+    reason = "Last bar"
+    final_px = day[-1]["close"]
+    final_at = _at(day[-1]["date"], 5)
+
+    for idx, b in enumerate(after):
+        at = _at(b["date"], 5)
+
+        # 1. Check Stop hit on this bar
+        if (b["low"] <= stop) if long else (b["high"] >= stop):
+            final_px = stop
+            final_at = at
+            if stop == be_level:
+                reason = "Partial + +1R Trail Stop" if partial_hit else "+1R Trail Stop"
+            elif stop == e:
+                reason = "Partial + Breakeven" if partial_hit else "Breakeven"
+            else:
+                reason = "Partial + Stop" if partial_hit else "Stop"
+            break
+
+        # 2. Check Partial Target hit
+        if not partial_hit:
+            if (b["high"] >= partial_level) if long else (b["low"] <= partial_level):
+                partial_hit = True
+                partial_px = partial_level
+                partial_at = at
+                # Guarantee stop is at least at +1R floor for subsequent bars
+                stop = max(stop, be_level) if long else min(stop, be_level)
+                be_triggered = True
+
+        # 3. Check Final Target hit
+        if (b["high"] >= final_target) if long else (b["low"] <= final_target):
+            final_px = final_target
+            final_at = at
+            reason = "Target"
+            break
+
+        # 4. Check Time exit (15:10)
+        if at[11:] >= EXIT:
+            final_px = b["close"]
+            final_at = at
+            reason = "Time (15:10)"
+            break
+
+        # 5. Check if +1R was reached to move stop to Breakeven for subsequent bars
+        if not be_triggered:
+            if (b["high"] >= be_level) if long else (b["low"] <= be_level):
+                stop = max(stop, e) if long else min(stop, e)
+                be_triggered = True
+
+        # 6. Check if price touched trail_trigger_r to enable candle close trailing
+        reached_trail = (b["high"] >= e + sg * trail_trigger_r * risk) if long else (b["low"] <= e - trail_trigger_r * risk)
+        if reached_trail:
+            trail_active = True
+
+        # 7. Once partial or trail threshold is reached, check 5m Candle Close Reversal
+        if (partial_hit or trail_active) and trail_on_close and idx > 0:
+            prev_b = after[idx - 1]
+            reversal = (b["close"] < b["open"] or b["close"] < prev_b["low"]) if long else (b["close"] > b["open"] or b["close"] > prev_b["high"])
+            if reversal:
+                final_px = b["close"]
+                final_at = at
+                reason = "Partial + Candle Close Trail" if partial_hit else "Candle Close Trail"
+                break
+
+    # Calculate overall realized R
+    final_leg_r = (final_px - e) * sg / risk
+    if partial_hit:
+        total_r = partial_pct * partial_r + (1.0 - partial_pct) * final_leg_r
+    else:
+        total_r = final_leg_r
+
+    return {
+        "exit_reason": reason,
+        "exit_price": round(final_px, 2),
+        "exit_time": final_at,
+        "r_multiple": round(total_r, 3),
+        "partial_hit": partial_hit,
+        "partial_price": round(partial_px, 2) if partial_px is not None else None,
+        "partial_time": partial_at,
+        "be_triggered": be_triggered,
+    }
 
 
 def break_until(bars: list[dict], above: dict, daily: list[dict], settings: Settings, today: str) -> date | None:
@@ -431,12 +604,68 @@ def main(argv: list[str] | None = None) -> int:
             pdh, pdl = prev[-1]["high"], prev[-1]["low"]
             if "levels" not in seen:
                 seen.add("levels")
-                levels = f"Watching NIFTY {today}: PDH {pdh:,.2f}, PDL {pdl:,.2f}, open {day[0]['open']:,.2f}. Entries 09:30-14:30."
-                print(levels, "| sent via", alerts.send(settings, "[genesis] liquidity strategy", levels) or "nothing")
-            for s in scan(day, above, pdh, pdl):
-                if s["side"] in seen:
+                levels = (
+                    f"🌅 NIFTY MORNING PLAN ({today})\n\n"
+                    f"📊 Key Reference Levels:\n"
+                    f"• Previous Day High (PDH): {pdh:,.2f}\n"
+                    f"• Previous Day Low (PDL): {pdl:,.2f}\n"
+                    f"• Day Open: {day[0]['open']:,.2f}\n"
+                    f"• Active Entry Window: {FIRST_ENTRY} - {LAST_ENTRY} IST\n\n"
+                    f"🎯 TRIGGERS TO WAIT FOR TODAY:\n\n"
+                    f"🔴 SHORT (Buy PE):\n"
+                    f"1. NIFTY sweeps above PDH ({pdh:,.0f})\n"
+                    f"2. 15m candle rejects & closes back below {pdh:,.0f}\n"
+                    f"3. 5m structure break below swing low + close below VWAP & Open ({day[0]['open']:,.0f})\n"
+                    f"4. Breakdown below ascending trendline (Trendline Break)\n\n"
+                    f"🟢 LONG (Buy CE):\n"
+                    f"1. NIFTY sweeps below PDL ({pdl:,.0f})\n"
+                    f"2. 15m candle closes above last 15m swing high\n"
+                    f"3. 5m close reclaims PDL + close above VWAP & Open ({day[0]['open']:,.0f})\n"
+                    f"4. Breakout above descending trendline (Trendline Break)"
+                )
+                print(levels, "| sent via", alerts.send(settings, "[genesis] NIFTY Morning Plan", levels) or "nothing")
+                lvls = trading_levels([prev[-1]], session_over=True) + intraday_levels(day, 3)
+                near = [
+                    (lv["label"], lv["price"], "#f57c00" if lv["label"].startswith("PD") else "#5c6bc0", ":")
+                    for lv in lvls if min(b["low"] for b in day) - 50 <= lv["price"] <= max(b["high"] for b in day) + 50
+                ]
+                piv = pivots(day, "low")
+                tl = (piv[-2], day[piv[-2]]["low"], piv[-1], day[piv[-1]]["low"]) if len(piv) >= 2 else None
+                chart_png = chart(
+                    day,
+                    [*near, ("Open", day[0]["open"], "#9e9e9e", ":")],
+                    f"NIFTY 5m Structure & Key Levels ({today})",
+                    trendline=tl,
+                )
+                alerts.send_photo(
+                    settings,
+                    f"📊 NIFTY 5m Levels & Structure ({today})\n• PDH: {pdh:,.2f} | PDL: {pdl:,.2f}\n• Day High: {max(b['high'] for b in day):,.2f} | Low: {min(b['low'] for b in day):,.2f}",
+                    chart_png,
+                )
+            # 1. PDH / PDL Liquidity Sweeps with Trendline Breakdown
+            all_signals = scan(day, above, pdh, pdl, require_trendline=True)
+            for s in all_signals:
+                s.setdefault("pool", f"PD{'L' if s['side'] == 'Long' else 'H'}")
+
+            # 2. Equal High / Equal Low (EQH / EQL) Intraday Sweeps
+            from app.intraday_liquidity import atr, equal_levels, scan_levels
+            atrs = atr(day)
+            eq_lvs = equal_levels(day, atrs)
+            if eq_lvs:
+                tot_p = 0.0
+                v_list = []
+                for n_idx, b_item in enumerate(day, 1):
+                    tot_p += (b_item["high"] + b_item["low"] + b_item["close"]) / 3.0
+                    v_list.append(tot_p / n_idx)
+                for eq_s in scan_levels(day, v_list, atrs, eq_lvs, "equal", min_sweep=2.0, with_open_only=True, require_trendline=True):
+                    eq_s["pool"] = f"Equal {'High (EQH)' if eq_s['side'] == 'Short' else 'Low (EQL)'}"
+                    all_signals.append(eq_s)
+
+            for s in all_signals:
+                sig_key = f"{s.get('strategy', 'pd')}_{s['side']}_{s.get('level', '')}"
+                if sig_key in seen:
                     continue
-                seen.add(s["side"])
+                seen.add(sig_key)
                 if now - datetime.strptime(s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST) > FRESH:
                     print(f"missed (over {FRESH.seconds // 60} min old, not sent):\n{message(s, settings)}")
                     continue
@@ -444,8 +673,36 @@ def main(argv: list[str] | None = None) -> int:
                 lvls = trading_levels([prev[-1]], session_over=True) + intraday_levels(day, 3)
                 body = message(s, settings, plan, lvls)
                 print(body, "| sent via", alerts.send(settings, f"[genesis] NIFTY {s['side'].upper()} signal", body) or "nothing")
-                for png in charts(day, s, lvls, plan, settings):
-                    alerts.send_photo(settings, body.splitlines()[0], png)
+                pngs = charts(day, s, lvls, plan, settings)
+                if plan and len(pngs) >= 2:
+                    stop_p, target_p = plan["exits"][0]["premium"], plan["exits"][1]["premium"]
+                    opt_t1 = round(plan["entry_premium"] + (target_p - plan["entry_premium"]) / 3, 2)
+                    opt_t2 = round(plan["entry_premium"] + 2 * (target_p - plan["entry_premium"]) / 3, 2)
+                    opt_caption = (
+                        f"🎯 NIFTY {plan['option']} (Expiry: {plan['expiry']})\n"
+                        f"Action: BUY | CMP: ~{plan['entry_premium']:,.2f}\n"
+                        f"Stop Loss: {stop_p:,.2f} (-20% / Index SL: {s['stop']:,.2f})\n\n"
+                        f"🎯 Staged Targets (2-3 Lots):\n"
+                        f"• T1 ({opt_t1:,.2f}): Move SL to Cost (Risk-Free)\n"
+                        f"• T2 ({opt_t2:,.2f}): Book 50% Lots (Lock Profit)\n"
+                        f"• T3 ({target_p:,.2f}): Book Remaining Runner (3R)\n\n"
+                        f"📊 Risk & Sizing (Rs 50k Capital):\n"
+                        f"• 2 Lots (130 qty): ~Rs {-plan['exits'][0]['pnl']:,.0f} total risk (5.2% risk rule)\n"
+                        f"• 3 Lots (195 qty): ~Rs {-plan['exits'][0]['pnl'] * 1.5:,.0f} total risk (7.8% risk rule)\n"
+                        f"• Time Exit: {EXIT} if neither hit\n\n"
+                        f"💡 Setup: {s['side']} liquidity sweep at {s['time'][11:]} IST"
+                    )
+                    alerts.send_photo(settings, opt_caption[:1024], pngs[0])
+                    nifty_caption = (
+                        f"📊 NIFTY 5m Structure & Levels ({today})\n"
+                        f"• Setup: {s['side'].upper()} at {s['time'][11:]} IST\n"
+                        f"• Index Entry: {s['entry']:,.2f} | Stop: {s['stop']:,.2f} | Target: {s['target']:,.2f}\n"
+                        f"• Risk: {s['risk']:.0f} pts | Reward: {abs(s['target'] - s['entry']):.0f} pts (1:3 R:R)"
+                    )
+                    alerts.send_photo(settings, nifty_caption[:1024], pngs[1])
+                else:
+                    for png in pngs:
+                        alerts.send_photo(settings, body.splitlines()[0], png)
         elif bars is not None and now.strftime("%H:%M") >= "10:00":
             print(f"{now:%H:%M} no NIFTY bars for {today} (holiday or data source down)")
             break

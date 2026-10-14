@@ -64,6 +64,9 @@ export const contract = (o: { underlying: string; instrument: string; strike: nu
 export const signed = (v: number | null | undefined) =>
   v == null || v === 0 ? "text-zinc-700" : v > 0 ? "text-emerald-700" : "text-rose-700";
 
+export const pct = (v: number | null | undefined) =>
+  v == null ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`;
+
 export async function fetchQuotes(symbols: string[]) {
   const d = await api<{ quotes: Quote[] }>(`/api/market/quotes?symbols=${encodeURIComponent(symbols.join(","))}`);
   return Object.fromEntries(d.quotes.map((q) => [q.symbol, q])) as Record<string, Quote>;

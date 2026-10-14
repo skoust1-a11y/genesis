@@ -177,10 +177,16 @@ def nearest_opposing(levels: list[dict], bars: list[dict], i: int, long: bool, e
 
 def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: list[dict], strategy: str,
                 mss_tf: int = 5, min_risk: float = MIN_RISK, target_r: float = 2.0,
-                opposing: list[dict] | None = None) -> list[dict]:  # fmt: skip
+                opposing: list[dict] | None = None, min_sweep: float = 2.0,
+                with_open_only: bool = False, min_displacement: float = 0.0,
+                require_trendline: bool = False) -> list[dict]:  # fmt: skip
     """Signals in one session's completed 5m `bars` (vwap/atrs aligned to them) from sweeps of `levels`.
     `mss_tf` 5 or 15: the structure shift's timeframe; 0: no structure shift. `opposing` (default `levels`): pool for
-    the opposing-liquidity target `opp` (nearest intact level 1R+ away)."""
+    the opposing-liquidity target `opp` (nearest intact level 1R+ away).
+    `min_sweep`: minimum sweep depth past the level (default 2.0 pts to filter noise).
+    `with_open_only`: only take Longs above day open, Shorts below day open.
+    `min_displacement`: minimum real body size (in ATR) for the entry candle.
+    `require_trendline`: enforce breakdown below ascending trendline (Short) or breakout above descending trendline (Long)."""
     if not bars:
         return []
     sh5, sl5, m15, out = _last_pivots(bars, "high"), _last_pivots(bars, "low"), _mss15(bars) if mss_tf == 15 else {}, []
@@ -197,7 +203,7 @@ def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: 
                 if lv["id"] in used or lv["known"] > i or (lv["until"] is not None and i >= lv["until"]):
                     continue
                 p = lv["price"]
-                if (b["low"] < p - TICK) if long else (b["high"] > p + TICK):
+                if (b["low"] <= p - min_sweep) if long else (b["high"] >= p + min_sweep):
                     used.add(lv["id"])
                     if i and (bars[i - 1]["close"] > p if long else bars[i - 1]["close"] < p):
                         setup = setup or {"i": i, "ext": b[key], "levels": []}
@@ -222,6 +228,31 @@ def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: 
                     setup["mss"] = i
             if ("reclaim" in setup and "mss" in setup and beyond and closes_at[11:] >= FIRST_ENTRY
                     and (c > vwap[i]) == long):  # fmt: skip
+                if with_open_only and ((c > day_open) != long):
+                    continue
+                disp = (c - b["open"]) * sign
+                if min_displacement > 0.0 and disp < min_displacement * atrs[i]:
+                    continue
+
+                # Trendline Confluence Check
+                tl_key = "high" if long else "low"
+                piv = pivots(bars[: i + 1], tl_key)
+                tl_ok, tl_desc = True, ""
+                if len(piv) >= 2:
+                    x1, x2 = piv[-2], piv[-1]
+                    y1, y2 = bars[x1][tl_key], bars[x2][tl_key]
+                    if x2 != x1:
+                        slope = (y2 - y1) / (x2 - x1)
+                        tl_val = y1 + slope * (i - x1)
+                        if not long and slope >= 0:
+                            tl_ok = c < tl_val
+                            tl_desc = f"{closes_at[11:]} trendline breakdown: 5m close {c:,.2f} below ascending trendline {tl_val:,.2f}"
+                        elif long and slope <= 0:
+                            tl_ok = c > tl_val
+                            tl_desc = f"{closes_at[11:]} trendline breakout: 5m close {c:,.2f} above descending trendline {tl_val:,.2f}"
+                if require_trendline and not tl_ok:
+                    continue
+
                 a = atrs[i]
                 stop = setup["ext"] - sign * max(2.0, 0.1 * a)
                 risk = abs(c - stop)
@@ -229,6 +260,13 @@ def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: 
                     lvs = setup["levels"]
                     opp = nearest_opposing(opposing if opposing is not None else levels, bars, i, long, c, risk)
                     near = nearest_opposing(opposing if opposing is not None else levels, bars, i, long, c, 0.0)
+                    why_items = [
+                        f"{setup['levels'][0]['id']} {lvl:,.2f} swept to {setup['ext']:,.2f} at {_at(bars[setup['i']]['date'], 5)[11:]}",
+                        (f"reclaim {_at(bars[setup['reclaim']]['date'], 5)[11:]}, {mss_tf or 'no'}m structure shift "
+                         f"{_at(bars[setup['mss']]['date'], 5)[11:]}, entry {closes_at[11:]} {'above' if long else 'below'} VWAP"),
+                    ]
+                    if tl_desc:
+                        why_items.append(tl_desc)
                     out.append({
                         "strategy": strategy, "side": side, "time": closes_at, "entry": c, "stop": round(stop, 2),
                         "target": round(c + sign * target_r * risk, 2), "risk": round(risk, 2), "level": lvl,
@@ -245,9 +283,7 @@ def scan_levels(bars: list[dict], vwap: list[float], atrs: list[float], levels: 
                             "room_r": round(abs(near - c) / risk, 2) if near is not None else None,
                             "with_open": int((c - day_open) * sign > 0), "bars_to_entry": i - setup["i"],
                         },
-                        "why": [f"{setup['levels'][0]['id']} {lvl:,.2f} swept to {setup['ext']:,.2f} at {_at(bars[setup['i']]['date'], 5)[11:]}",
-                                (f"reclaim {_at(bars[setup['reclaim']]['date'], 5)[11:]}, {mss_tf or 'no'}m structure shift "
-                                f"{_at(bars[setup['mss']]['date'], 5)[11:]}, entry {closes_at[11:]} {'above' if long else 'below'} VWAP")],
+                        "why": why_items,
                     })  # fmt: skip
                     break
                 setup = None
