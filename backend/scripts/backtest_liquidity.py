@@ -46,6 +46,8 @@ from app.liquidity_signals import (
     estimated_plan,
     exit_of,
     scan,
+    scan_retest,
+    scan_trendline_reversal,
     staged_exit_of,
 )
 from app.market.hours import holidays
@@ -210,7 +212,8 @@ def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict
              since: str = "", stop_at: str = "swing", require_trendline: bool = False,
              include_equal: bool = False, staged: bool = False,
              otm_steps: int = OTM_STEPS, stagnation_bars: int = 0,
-             skip_lunch: bool = True) -> tuple[list[dict], list[str]]:  # fmt: skip
+             skip_lunch: bool = True, include_retest: bool = True,
+             include_trendline_reversal: bool = True) -> tuple[list[dict], list[str]]:  # fmt: skip
     """Every signal from `since` (before today) with its index exit and 1-unit option premiums; and the days."""
     by_day: dict[str, list[dict]] = defaultdict(list)
     for b in bars:
@@ -231,6 +234,12 @@ def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict
         day_signals = scan(by_day[d], above, prev["high"], prev["low"], stop_at=stop_at, require_trendline=require_trendline, skip_lunch=skip_lunch)
         for s in day_signals:
             s.setdefault("pool", f"PD{'L' if s['side'] == 'Long' else 'H'}")
+        if include_retest:
+            retests = scan_retest(by_day[d], above, prev["high"], prev["low"], skip_lunch=skip_lunch)
+            day_signals.extend(retests)
+        if include_trendline_reversal:
+            tl_reversals = scan_trendline_reversal(by_day[d], skip_lunch=skip_lunch)
+            day_signals.extend(tl_reversals)
         if include_equal:
             from app.intraday_liquidity import atr, equal_levels, scan_levels
             atrs = atr(by_day[d])
@@ -569,6 +578,16 @@ def main() -> None:
         action="store_true",
         help="allow entries during lunch lull (11:30 - 13:00 IST), default is to skip them",
     )
+    parser.add_argument(
+        "--skip-retest",
+        action="store_true",
+        help="skip Breakout & Support/Resistance Retest signals (enabled by default)",
+    )
+    parser.add_argument(
+        "--skip-trendline-reversal",
+        action="store_true",
+        help="skip Standalone Trendline Reversal signals (enabled by default)",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
     settings = get_settings()
@@ -605,6 +624,8 @@ def main() -> None:
             otm_steps=args.otm_steps,
             stagnation_bars=args.stagnation_bars,
             skip_lunch=not args.allow_lunch,
+            include_retest=not args.skip_retest,
+            include_trendline_reversal=not args.skip_trendline_reversal,
         )
         runs[stop_at] = (
             trades,

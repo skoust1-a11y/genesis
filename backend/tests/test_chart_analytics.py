@@ -219,5 +219,117 @@ def test_detect_trendlines_and_channels_hh_hl():
     assert len(trendlines) >= 2
 
     labels = [tl.label for tl in trendlines]
-    assert any("HH1 → HH2" in l for l in labels)
-    assert any("HL1 → HL2" in l for l in labels)
+    assert any("Ascending Resistance" in l for l in labels)
+    assert any("Ascending Support" in l for l in labels)
+
+    # Verify colors and types
+    hh_line = next(tl for tl in trendlines if "Ascending Resistance" in tl.label)
+    assert hh_line.side == "high"
+    assert hh_line.line_type == "ascending_resistance"
+    assert hh_line.color == "#f59e0b"  # Amber Orange
+
+    hl_line = next(tl for tl in trendlines if "Ascending Support" in tl.label)
+    assert hl_line.side == "low"
+    assert hl_line.line_type == "ascending_support"
+    assert hl_line.color == "#10b981"  # Emerald Green
+
+
+def test_trendline_body_penetration_and_touch_validation():
+    # 1. Test 3-Touch Validation
+    # Anchor 1 at idx 0 (low 100), intermediate touch at idx 3 (low 103, bounce), Anchor 2 at idx 6 (low 106)
+    # Slope = 1.0 per bar.
+    # intermediate bar 3 has base_y = 103. low=103.1 (within tolerance), body > 103 -> touch!
+    clean_tuples = [
+        (100.5, 102.0, 100.0, 101.5),  # 0: Swing Low 100
+        (101.5, 105.0, 101.2, 104.5),  # 1
+        (104.5, 107.0, 103.5, 106.0),  # 2
+        (104.0, 105.0, 103.0, 104.2),  # 3: 3rd Touch bounce at 103
+        (104.5, 108.0, 104.2, 107.5),  # 4
+        (107.5, 110.0, 106.5, 109.0),  # 5
+        (107.0, 108.0, 106.0, 107.2),  # 6: Swing Low 106
+        (107.5, 111.0, 107.0, 110.5),  # 7
+    ]
+    bars = make_bars(clean_tuples)
+    swings = detect_swing_points(bars, sensitivity=1)
+    tls = detect_trendlines_and_channels(bars, swings, atr_val=5.0)
+    assert len(tls) >= 1
+    # Check touch_count >= 3 on the clean ascending trendline
+    asc_tls = [tl for tl in tls if tl.kind == "ascending"]
+    assert any(tl.touch_count >= 3 for tl in asc_tls)
+    assert any(f"({tl.touch_count}T)" in tl.label for tl in asc_tls if tl.touch_count >= 3)
+
+    # 2. Test Candle Body Penetration Rejection
+    # Anchor at idx 0 (100) and idx 6 (106).
+    # But intermediate bars (idx 2, 3, 4) plunge with bodies down to 85 (severely slicing through the line)
+    dirty_tuples = [
+        (100.5, 102.0, 100.0, 101.5),  # 0: Low 100
+        (101.5, 103.0, 101.0, 102.0),  # 1
+        (92.0, 93.0, 85.0, 86.0),      # 2: Severe body violation
+        (86.0, 88.0, 84.0, 85.0),      # 3: Severe body violation
+        (85.0, 95.0, 85.0, 94.0),      # 4: Severe body violation
+        (94.0, 105.0, 93.0, 104.0),    # 5
+        (107.0, 108.0, 106.0, 107.2),  # 6: Low 106
+        (107.5, 111.0, 107.0, 110.5),  # 7
+    ]
+    dirty_bars = make_bars(dirty_tuples)
+    dirty_swings = detect_swing_points(dirty_bars, sensitivity=1)
+    dirty_tls = detect_trendlines_and_channels(dirty_bars, dirty_swings, atr_val=5.0)
+    # The line connecting idx 0 to idx 6 should be rejected due to heavy body penetration
+    assert not any(tl.start_index == 0 and tl.end_index == 6 for tl in dirty_tls)
+
+
+def test_trendlines_strictly_require_three_touches():
+    # Construct swings with only 2 touches (no intermediate, no forward)
+    tuples = [
+        (100, 102, 98, 101),   # 0
+        (101, 105, 100, 104),  # 1: High 105
+        (103, 104, 101, 102),  # 2: Low 101
+        (102, 108, 101, 107),  # 3: High 108
+        (105, 106, 103, 104),  # 4: Low 103
+        (104, 105, 103, 104),  # 5
+    ]
+    bars = make_bars(tuples)
+    swings = detect_swing_points(bars, sensitivity=1)
+    tls = detect_trendlines_and_channels(bars, swings, atr_val=2.0)
+    # Every trendline returned MUST strictly have touch_count >= 3
+    for tl in tls:
+        assert tl.touch_count >= 3, f"Trendline {tl.label} only has {tl.touch_count} touches, expected >= 3"
+
+
+def test_trendlines_never_cross_on_same_side():
+    # Long zigzag dataset with multiple swing highs and lows
+    tuples = []
+    base = 22000.0
+    for i in range(80):
+        o = base + (i % 8) * 15 - (i // 8) * 5
+        h = o + 20
+        l = o - 10
+        c = o + 10
+        tuples.append((o, h, l, c))
+    bars = make_bars(tuples)
+    swings = detect_swing_points(bars, sensitivity=1)
+    tls = detect_trendlines_and_channels(bars, swings, atr_val=15.0)
+
+    # All returned lines must have touch_count >= 3
+    for tl in tls:
+        assert tl.touch_count >= 3
+
+    # Verify that NO two lines of the same side cross each other within their active spans
+    for i in range(len(tls)):
+        for j in range(i + 1, len(tls)):
+            t1, t2 = tls[i], tls[j]
+            if t1.side == t2.side:
+                m1, m2 = t1.slope, t2.slope
+                if abs(m1 - m2) > 1e-5:
+                    c1 = t1.start_price - m1 * t1.start_index
+                    c2 = t2.start_price - m2 * t2.start_index
+                    xc = (c2 - c1) / (m1 - m2)
+                    s1 = t1.start_index
+                    e1 = t1.break_index if (t1.is_broken and t1.break_index) else len(bars) + 5
+                    s2 = t2.start_index
+                    e2 = t2.break_index if (t2.is_broken and t2.break_index) else len(bars) + 5
+                    overlap_start = max(s1, s2)
+                    overlap_end = min(e1, e2)
+                    assert not (overlap_start < xc < overlap_end), (
+                        f"Same-side trendlines cross at {xc}: {t1.label} vs {t2.label}"
+                    )

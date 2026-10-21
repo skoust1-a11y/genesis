@@ -109,6 +109,30 @@ def send_signal_photo(settings: Settings, caption: str, png: bytes) -> bool:
     return send_photo(settings, caption, png, chat_id=signal_chat_id(settings))
 
 
+def send_video(settings: Settings, caption: str, video: bytes, filename: str = "video.mp4", chat_id: str | None = None) -> bool:
+    """A video animation / walk-through to Telegram with strategy name in caption."""
+    target_chat = chat_id or settings.alert_telegram_chat_id
+    if not (settings.alert_telegram_bot_token and target_chat):
+        return False
+    try:
+        response = httpx.post(
+            f"https://api.telegram.org/bot{settings.alert_telegram_bot_token}/sendVideo",
+            data={"chat_id": target_chat, "caption": caption[:1024]},
+            files={"video": (filename, video, "video/mp4")},
+            timeout=60,
+        )
+        response.raise_for_status()
+        return True
+    except Exception as exc:
+        log.error("video via telegram failed: %s: %s", type(exc).__name__, exc)
+        return False
+
+
+def send_signal_video(settings: Settings, caption: str, video: bytes, filename: str = "video.mp4") -> bool:
+    """Send a strategy trade video to the dedicated signals channel."""
+    return send_video(settings, caption, video, filename=filename, chat_id=signal_chat_id(settings))
+
+
 def record(
     title: str,
     message: str,

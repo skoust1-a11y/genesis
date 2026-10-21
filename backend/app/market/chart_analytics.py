@@ -54,6 +54,9 @@ class Trendline:
     end_date: str
     end_price: float
     slope: float
+    side: Literal["high", "low"] = "low"
+    line_type: str = "ascending_support"
+    color: str = "#10b981"
     channel_high: float | None = None
     channel_low: float | None = None
     is_broken: bool = False
@@ -61,6 +64,11 @@ class Trendline:
     break_date: str | None = None
     retested: bool = False
     label: str = ""
+    touch_count: int = 3
+    body_violations: int = 0
+    quality_score: float = 1.0
+    apex_index: int | None = None
+    apex_price: float | None = None
 
 
 @dataclass
@@ -596,32 +604,90 @@ def detect_bos_choch(
 
 
 def detect_trendlines_and_channels(
-    bars: list[dict], swings: list[SwingPoint], atr_val: float = 15.0
+    bars: list[dict], swings: list[SwingPoint], atr_val: float | list[float] = 15.0
 ) -> list[Trendline]:
-    """Identify straight trendlines connecting structural swings:
+    """Identify structural 3-point trendlines connecting swings:
     - Higher Highs (HH1 -> HH2 -> HH3)
     - Lower Highs (LH1 -> LH2 -> LH3)
     - Higher Lows (HL1 -> HL2 -> HL3)
     - Lower Lows (LL1 -> LL2 -> LL3)
     - Triangle / Wedge / Channel pattern boundaries
 
-    Detects trendline breaks (candle close across line) and subsequent retests.
+    Enforces:
+    1. Strict 3-Point Validation: Requires at least 3 confirmed touches (touch_count >= 3).
+       A line with only 2 points is unconfirmed and rejected.
+    2. Non-Crossing Constraint (Same Side): Lines of the same side (e.g. Resistance vs Resistance
+       or Support vs Support) are pruned if they cross each other or conflict in the active zone,
+       preserving only the dominant structural trendline.
+    3. Non-Crossing Apex Capping (Opposite Side): When converging Support and Resistance lines
+       intersect, both lines' forward projection is strictly capped at the apex (intersection)
+       so they meet cleanly without crossing into an "X".
     """
-    trendlines: list[Trendline] = []
-    if len(swings) < 2 or len(bars) < 5:
-        return trendlines
+    if isinstance(atr_val, list):
+        atr_val = atr_val[-1] if atr_val else 15.0
+    if len(swings) < 3 or len(bars) < 5:
+        return []
 
     high_swings = [s for s in swings if s.kind == "high"]
     low_swings = [s for s in swings if s.kind == "low"]
 
-    def _build_line(p1: SwingPoint, p2: SwingPoint, kind: Literal["ascending", "descending"], label: str) -> Trendline:
+    def _build_line(
+        p1: SwingPoint,
+        p2: SwingPoint,
+        side: Literal["high", "low"],
+        label: str,
+    ) -> Trendline | None:
         dx = p2.index - p1.index
+        if dx < 2 or dx > 180:
+            return None
         dy = p2.price - p1.price
-        slope = dy / (dx or 1)
+        slope = dy / dx
+        kind: Literal["ascending", "descending"] = "ascending" if p2.price >= p1.price else "descending"
 
+        # ------------------------------------------------------------------
+        # 1. Structural Candle Body Penetration & Cleanliness Filter
+        # ------------------------------------------------------------------
+        body_violations = 0
+        touch_count = 1  # Anchor 1 at p1
+        last_touch_idx = p1.index
+
+        for k in range(p1.index + 1, p2.index):
+            b = bars[k]
+            base_y = p1.price + slope * (k - p1.index)
+            o, c = b.get("open", base_y), b.get("close", base_y)
+            h, l = b.get("high", base_y), b.get("low", base_y)
+            body_top = max(o, c)
+            body_bottom = min(o, c)
+
+            if side == "low":
+                if body_bottom < base_y - 0.25 * atr_val:
+                    body_violations += 1
+                elif abs(l - base_y) <= 0.35 * atr_val and body_bottom >= base_y - 0.1 * atr_val:
+                    if k - last_touch_idx >= 2 and p2.index - k >= 1:
+                        touch_count += 1
+                        last_touch_idx = k
+            else:
+                if body_top > base_y + 0.25 * atr_val:
+                    body_violations += 1
+                elif abs(h - base_y) <= 0.35 * atr_val and body_top <= base_y + 0.1 * atr_val:
+                    if k - last_touch_idx >= 2 and p2.index - k >= 1:
+                        touch_count += 1
+                        last_touch_idx = k
+
+        # Anchor 2 at p2
+        touch_count += 1
+        last_touch_idx = p2.index
+
+        # Reject dirty lines where candle bodies repeatedly slice through the line
+        if body_violations > 1 and (body_violations / max(dx - 1, 1)) > 0.12:
+            return None
+
+        # ------------------------------------------------------------------
+        # 2. Parallel Channel Projection
+        # ------------------------------------------------------------------
         channel_high: float | None = None
         channel_low: float | None = None
-        if kind == "ascending":
+        if side == "low":
             between_highs = [b["high"] for b in bars[p1.index : p2.index + 1] if b.get("high") is not None]
             if between_highs:
                 max_dev = 0.0
@@ -644,7 +710,79 @@ def detect_trendlines_and_channels(
                 if max_dev > 0:
                     channel_low = round(p1.price - max_dev, 2)
 
-        tl = Trendline(
+        # ------------------------------------------------------------------
+        # 3. Forward Touches, Breakout & Retest Detection
+        # ------------------------------------------------------------------
+        is_broken = False
+        break_index: int | None = None
+        break_date: str | None = None
+        retested = False
+
+        for k in range(p2.index + 1, len(bars)):
+            projected = p1.price + slope * (k - p1.index)
+            bk = bars[k]
+            o, c = bk.get("open", projected), bk.get("close", projected)
+            h, l = bk.get("high", projected), bk.get("low", projected)
+            body_top = max(o, c)
+            body_bottom = min(o, c)
+
+            if side == "low":
+                if c < projected - 0.2 * atr_val:
+                    is_broken = True
+                    break_index = k
+                    break_date = bk["date"]
+                    for r in range(k + 1, min(k + 10, len(bars))):
+                        proj_r = p1.price + slope * (r - p1.index)
+                        if abs(bars[r]["high"] - proj_r) <= 0.35 * atr_val:
+                            retested = True
+                            break
+                    break
+                elif abs(l - projected) <= 0.35 * atr_val and body_bottom >= projected - 0.1 * atr_val:
+                    if k - last_touch_idx >= 1:
+                        touch_count += 1
+                        last_touch_idx = k
+            else:
+                if c > projected + 0.2 * atr_val:
+                    is_broken = True
+                    break_index = k
+                    break_date = bk["date"]
+                    for r in range(k + 1, min(k + 10, len(bars))):
+                        proj_r = p1.price + slope * (r - p1.index)
+                        if abs(bars[r]["low"] - proj_r) <= 0.35 * atr_val:
+                            retested = True
+                            break
+                    break
+                elif abs(h - projected) <= 0.35 * atr_val and body_top <= projected + 0.1 * atr_val:
+                    if k - last_touch_idx >= 1:
+                        touch_count += 1
+                        last_touch_idx = k
+
+        # ------------------------------------------------------------------
+        # 4. Strict 3-Point Requirement: Must have at least 3 distinct touches
+        # ------------------------------------------------------------------
+        if touch_count < 3:
+            return None
+
+        # Institutional colors and types
+        if side == "high":
+            if kind == "descending":
+                line_type = "descending_resistance"
+                color = "#f43f5e"  # Rose / Crimson Red (Downtrend Resistance ceiling)
+            else:
+                line_type = "ascending_resistance"
+                color = "#f59e0b"  # Amber Orange (Uptrend Upper Channel / Expansion)
+        else:
+            if kind == "ascending":
+                line_type = "ascending_support"
+                color = "#10b981"  # Emerald Green (Uptrend Support floor)
+            else:
+                line_type = "descending_support"
+                color = "#0284c7"  # Sky Blue (Downtrend Lower Channel / Floor)
+
+        final_label = f"{label} ({touch_count}T)"
+        quality_score = round(touch_count * 2.5 - body_violations * 3.0 + min(dx, 60) / 20.0, 2)
+
+        return Trendline(
             kind=kind,
             start_index=p1.index,
             start_date=p1.date,
@@ -653,84 +791,118 @@ def detect_trendlines_and_channels(
             end_date=p2.date,
             end_price=p2.price,
             slope=round(slope, 4),
+            side=side,
+            line_type=line_type,
+            color=color,
             channel_high=channel_high,
             channel_low=channel_low,
-            label=label,
+            is_broken=is_broken,
+            break_index=break_index,
+            break_date=break_date,
+            retested=retested,
+            label=final_label,
+            touch_count=touch_count,
+            body_violations=body_violations,
+            quality_score=quality_score,
         )
 
-        for k in range(p2.index + 1, len(bars)):
-            projected = p1.price + slope * (k - p1.index)
-            if kind == "ascending" and bars[k]["close"] < projected - 0.2 * atr_val:
-                tl.is_broken = True
-                tl.break_index = k
-                tl.break_date = bars[k]["date"]
-                for r in range(k + 1, min(k + 10, len(bars))):
-                    proj_r = p1.price + slope * (r - p1.index)
-                    if abs(bars[r]["high"] - proj_r) <= 0.3 * atr_val:
-                        tl.retested = True
+    # 1. Check swing pairs across multiple spans (1 to 5 swings apart)
+    candidates: list[Trendline] = []
+    for swings_list, s_side, pos_lbl, neg_lbl in [
+        (high_swings, "high", "Ascending Resistance", "Descending Resistance"),
+        (low_swings, "low", "Ascending Support", "Descending Support"),
+    ]:
+        for i in range(len(swings_list) - 1):
+            for j in range(i + 1, min(i + 6, len(swings_list))):
+                p1, p2 = swings_list[i], swings_list[j]
+                dx = p2.index - p1.index
+                if dx < 2 or dx > 180:
+                    continue
+                lbl = pos_lbl if p2.price >= p1.price else neg_lbl
+                tl = _build_line(p1, p2, s_side, lbl)
+                if tl is not None:
+                    candidates.append(tl)
+
+    if not candidates:
+        return []
+
+    # 2. Sort candidates by priority (unbroken first, then touches, then quality, then span)
+    candidates.sort(
+        key=lambda t: (
+            not t.is_broken,
+            t.touch_count,
+            t.quality_score,
+            (t.end_index - t.start_index),
+        ),
+        reverse=True,
+    )
+
+    # 3. Filter out crossing & redundant same-side lines
+    total_bars = len(bars)
+    kept_tls: list[Trendline] = []
+    for cand in candidates:
+        conflict = False
+        for acc in kept_tls:
+            if cand.side == acc.side:
+                # A. Check span overlap and vertical distance
+                ov_s = max(cand.start_index, acc.start_index)
+                ov_e = min(cand.end_index, acc.end_index)
+                if ov_e > ov_s:
+                    mid_x = (ov_s + ov_e) / 2.0
+                    y_cand = cand.start_price + cand.slope * (mid_x - cand.start_index)
+                    y_acc = acc.start_price + acc.slope * (mid_x - acc.start_index)
+                    if abs(y_cand - y_acc) <= 1.2 * atr_val:
+                        conflict = True
                         break
-                break
-            elif kind == "descending" and bars[k]["close"] > projected + 0.2 * atr_val:
-                tl.is_broken = True
-                tl.break_index = k
-                tl.break_date = bars[k]["date"]
-                for r in range(k + 1, min(k + 10, len(bars))):
-                    proj_r = p1.price + slope * (r - p1.index)
-                    if abs(bars[r]["low"] - proj_r) <= 0.3 * atr_val:
-                        tl.retested = True
-                        break
-                break
 
-        return tl
+                # B. Check if active same-side lines of same kind cross each other with substantial active overlap
+                if cand.kind == acc.kind:
+                    m1, m2 = cand.slope, acc.slope
+                    if abs(m1 - m2) > 1e-5:
+                        c1 = cand.start_price - m1 * cand.start_index
+                        c2 = acc.start_price - m2 * acc.start_index
+                        xc = (c2 - c1) / (m1 - m2)
+                        s1 = cand.start_index
+                        e1 = cand.break_index if (cand.is_broken and cand.break_index) else total_bars + 10
+                        s2 = acc.start_index
+                        e2 = acc.break_index if (acc.is_broken and acc.break_index) else total_bars + 10
+                        if max(s1, s2) + 3 <= xc <= min(e1, e2) - 3:
+                            conflict = True
+                            break
+        if not conflict:
+            kept_tls.append(cand)
 
-    # 1. Straight lines connecting consecutive swing highs (HH1 -> HH2, LH1 -> LH2)
-    for a in range(len(high_swings) - 1):
-        p1, p2 = high_swings[a], high_swings[a + 1]
-        dx = p2.index - p1.index
-        if dx < 2 or dx > 150:
-            continue
-        kind = "ascending" if p2.price >= p1.price else "descending"
-        lbl = f"{p1.label or ('HH' if kind == 'ascending' else 'LH')} → {p2.label or ('HH' if kind == 'ascending' else 'LH')}"
-        trendlines.append(_build_line(p1, p2, kind, lbl))
+    # 4. Opposite-Side Converging Lines (Support vs Resistance) - Calculate Apex
+    for i in range(len(kept_tls)):
+        for j in range(i + 1, len(kept_tls)):
+            t1, t2 = kept_tls[i], kept_tls[j]
+            if t1.side != t2.side:
+                m1, m2 = t1.slope, t2.slope
+                if abs(m1 - m2) > 1e-4:
+                    c1 = t1.start_price - m1 * t1.start_index
+                    c2 = t2.start_price - m2 * t2.start_index
+                    xc = (c2 - c1) / (m1 - m2)
+                    yc = c1 + m1 * xc
+                    if xc >= max(t1.end_index, t2.end_index) and xc <= total_bars + 50:
+                        apex_idx = int(xc)
+                        apex_p = round(yc, 2)
+                        t1.apex_index = min(t1.apex_index or 999999, apex_idx)
+                        t1.apex_price = apex_p
+                        t2.apex_index = min(t2.apex_index or 999999, apex_idx)
+                        t2.apex_price = apex_p
 
-    # 2. Straight lines connecting consecutive swing lows (HL1 -> HL2, LL1 -> LL2)
-    for a in range(len(low_swings) - 1):
-        p1, p2 = low_swings[a], low_swings[a + 1]
-        dx = p2.index - p1.index
-        if dx < 2 or dx > 150:
-            continue
-        kind = "ascending" if p2.price >= p1.price else "descending"
-        lbl = f"{p1.label or ('HL' if kind == 'ascending' else 'LL')} → {p2.label or ('HL' if kind == 'ascending' else 'LL')}"
-        trendlines.append(_build_line(p1, p2, kind, lbl))
+    # Limit to top historical and active non-crossing lines, balanced across top (high) and bottom (low)
+    active_tls = [tl for tl in kept_tls if (total_bars - tl.end_index <= 100) or not tl.is_broken]
+    historical_tls = [tl for tl in kept_tls if tl not in active_tls]
 
-    # 3. Major pattern boundary lines (e.g. triangles spanning across minor swings)
-    if len(high_swings) >= 3:
-        p1, p2 = high_swings[-3], high_swings[-1]
-        dx = p2.index - p1.index
-        if 4 <= dx <= 150:
-            kind = "ascending" if p2.price >= p1.price else "descending"
-            lbl = f"{p1.label or ('HH' if kind == 'ascending' else 'LH')} → {p2.label or ('HH' if kind == 'ascending' else 'LH')}"
-            trendlines.append(_build_line(p1, p2, kind, lbl))
+    active_highs = [tl for tl in active_tls if tl.side == "high"][:8]
+    active_lows = [tl for tl in active_tls if tl.side == "low"][:8]
+    hist_highs = [tl for tl in historical_tls if tl.side == "high"][:14]
+    hist_lows = [tl for tl in historical_tls if tl.side == "low"][:14]
 
-    if len(low_swings) >= 3:
-        p1, p2 = low_swings[-3], low_swings[-1]
-        dx = p2.index - p1.index
-        if 4 <= dx <= 150:
-            kind = "ascending" if p2.price >= p1.price else "descending"
-            lbl = f"{p1.label or ('HL' if kind == 'ascending' else 'LL')} → {p2.label or ('HL' if kind == 'ascending' else 'LL')}"
-            trendlines.append(_build_line(p1, p2, kind, lbl))
-
-    # Keep active or recently broken trendlines (filter out lines broken > 25 bars ago)
-    curr_len = len(bars)
-    active_tls = [
-        tl for tl in trendlines
-        if not tl.is_broken or (tl.break_index is not None and curr_len - tl.break_index <= 25)
-    ]
-    if len(active_tls) < 2:
-        active_tls = trendlines
-
-    active_tls.sort(key=lambda t: t.end_index)
-    return active_tls[-8:]
+    selected = active_highs + active_lows + hist_highs + hist_lows
+    selected.sort(key=lambda t: t.start_index)
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -741,40 +913,52 @@ def calculate_liquidity_levels(
     daily_bars: list[dict],
     intraday_bars: list[dict],
     weekly_bars: list[dict] | None = None,
+    swings: list[SwingPoint] | None = None,
 ) -> list[LiquidityLevel]:
     """Compute institutional liquidity levels:
 
     1. PDH, PDL, PDC (Previous Day High, Low, Close)
-    2. PWH, PWL (Previous Week High, Low)
-    3. Floor Pivots (P, R1, R2, S1, S2)
-    4. Session High (DH) and Low (DL)
-    5. Opening Range High and Low (ORH / ORL for 15m and 30m)
-    6. Equal Highs (EQH) and Equal Lows (EQL)
-    7. Intraday Swing Liquidity (BSL, SSL)
+    2. Multi-Level Floor Pivots (P, R1, R2, R3, R4, S1, S2, S3, S4)
+    3. Previous Week High & Low (PWH, PWL)
+    4. Previous Month High & Low (PMH, PML)
+    5. 52-Week / Major Range High & Low (52WH, 52WL)
+    6. Historical Swing Support & Resistance levels across different price tiers (Res, Sup, Flip Sup, Flip Res)
+    7. Session High (DH) and Low (DL)
+    8. Opening Range High and Low (ORH / ORL for 15m and 30m)
+    9. Equal Highs (EQH) and Equal Lows (EQL)
     """
     levels: list[LiquidityLevel] = []
 
-    # 1. Previous Day High, Low, Close & Floor Pivots
+    # 1. Previous Day High, Low, Close & Extended Floor Pivots (R1-R4, S1-S4)
     if len(daily_bars) >= 2:
         prev = daily_bars[-2]
         c = prev["close"]
         h = prev["high"] or c
         l = prev["low"] or c
+        diff = h - l
         p = (h + l + c) / 3.0
         r1 = 2 * p - l
         s1 = 2 * p - h
-        r2 = p + (h - l)
-        s2 = p - (h - l)
+        r2 = p + diff
+        s2 = p - diff
+        r3 = r1 + diff
+        r4 = r3 + diff
+        s3 = s1 - diff
+        s4 = s3 - diff
 
         levels.extend([
-            LiquidityLevel("PDH", round(h, 2), "PDH", "#f59e0b", "dashed", "high"),
-            LiquidityLevel("PDL", round(l, 2), "PDL", "#f59e0b", "dashed", "high"),
+            LiquidityLevel("PDH", round(h, 2), "PDH", "#f43f5e", "dashed", "high"),
+            LiquidityLevel("PDL", round(l, 2), "PDL", "#10b981", "dashed", "high"),
             LiquidityLevel("PDC", round(c, 2), "PDC", "#71717a", "dotted", "medium"),
+            LiquidityLevel("R4", round(r4, 2), "PIVOT", "#991b1b", "dotted", "standard"),
+            LiquidityLevel("R3", round(r3, 2), "PIVOT", "#dc2626", "dotted", "standard"),
             LiquidityLevel("R2", round(r2, 2), "PIVOT", "#ef4444", "dotted", "standard"),
-            LiquidityLevel("R1", round(r1, 2), "PIVOT", "#ef4444", "dotted", "standard"),
+            LiquidityLevel("R1", round(r1, 2), "PIVOT", "#f43f5e", "dotted", "standard"),
             LiquidityLevel("P", round(p, 2), "PIVOT", "#6366f1", "dotted", "medium"),
             LiquidityLevel("S1", round(s1, 2), "PIVOT", "#10b981", "dotted", "standard"),
-            LiquidityLevel("S2", round(s2, 2), "PIVOT", "#10b981", "dotted", "standard"),
+            LiquidityLevel("S2", round(s2, 2), "PIVOT", "#059669", "dotted", "standard"),
+            LiquidityLevel("S3", round(s3, 2), "PIVOT", "#047857", "dotted", "standard"),
+            LiquidityLevel("S4", round(s4, 2), "PIVOT", "#065f46", "dotted", "standard"),
         ])
 
     # 2. Previous Week High & Low (PWH, PWL)
@@ -783,35 +967,147 @@ def calculate_liquidity_levels(
         wh = prev_w.get("high") or prev_w["close"]
         wl = prev_w.get("low") or prev_w["close"]
         levels.extend([
-            LiquidityLevel("PWH", round(wh, 2), "PWH", "#8b5cf6", "dashed", "high"),
-            LiquidityLevel("PWL", round(wl, 2), "PWL", "#8b5cf6", "dashed", "high"),
+            LiquidityLevel("PWH", round(wh, 2), "PWH", "#f43f5e", "dashed", "high"),
+            LiquidityLevel("PWL", round(wl, 2), "PWL", "#10b981", "dashed", "high"),
         ])
 
-    # 3. Session High (DH), Session Low (DL), Opening Range (ORH, ORL)
+    # 3. Previous Month High & Low (PMH, PML)
+    if daily_bars:
+        months_dict: dict[str, list[dict]] = {}
+        for b in daily_bars:
+            m_key = b["date"][:7]
+            months_dict.setdefault(m_key, []).append(b)
+        sorted_m_keys = sorted(months_dict.keys())
+        if len(sorted_m_keys) >= 2:
+            prev_m_bars = months_dict[sorted_m_keys[-2]]
+            pmh = max((b["high"] or b["close"]) for b in prev_m_bars)
+            pml = min((b["low"] or b["close"]) for b in prev_m_bars)
+            levels.extend([
+                LiquidityLevel("PMH", round(pmh, 2), "PMH", "#dc2626", "dashed", "high"),
+                LiquidityLevel("PML", round(pml, 2), "PML", "#059669", "dashed", "high"),
+            ])
+
+    # 4. 52-Week / Major Range High & Low (52WH, 52WL)
+    if len(daily_bars) >= 20:
+        lookback_bars = daily_bars[-252:]
+        yh = max((b["high"] or b["close"]) for b in lookback_bars)
+        yl = min((b["low"] or b["close"]) for b in lookback_bars)
+        levels.extend([
+            LiquidityLevel("52WH", round(yh, 2), "52WH", "#991b1b", "solid", "high"),
+            LiquidityLevel("52WL", round(yl, 2), "52WL", "#047857", "solid", "high"),
+        ])
+
+    # 5. Major Previous Support & Resistance Levels as per Price Range
+    active_bars = intraday_bars or daily_bars
+    cur_price = active_bars[-1]["close"] if active_bars else 0.0
+
+    all_swings = list(swings or [])
+    if not all_swings and daily_bars:
+        all_swings = detect_swing_points(daily_bars, sensitivity=2)
+    elif daily_bars and len(daily_bars) > len(all_swings):
+        d_swings = detect_swing_points(daily_bars, sensitivity=2)
+        all_swings.extend(d_swings)
+
+    # Dynamic spacing scaled to the visible price range (at least 1.5% of price or 4% of span)
+    all_prices = [b["close"] for b in active_bars if b.get("close")] if active_bars else [cur_price]
+    min_chart_p = min(all_prices) if all_prices else cur_price * 0.95
+    max_chart_p = max(all_prices) if all_prices else cur_price * 1.05
+    chart_span = max(max_chart_p - min_chart_p, cur_price * 0.05)
+    major_spacing = max(cur_price * 0.015, chart_span * 0.04)
+
+    # Filter for significant structural swings (major extremes or prominent multi-bar reversals)
+    major_swings = [
+        s for s in all_swings
+        if s.is_major or (s.label and s.label in ("HH1", "HH2", "LL1", "LL2", "LH1", "HL1"))
+    ]
+
+    # Cluster swing highs (Major Previous Resistance levels)
+    swing_highs = sorted([s for s in major_swings if s.kind == "high"], key=lambda s: s.price)
+    high_clusters: list[list[SwingPoint]] = []
+    for sh in swing_highs:
+        if high_clusters and (sh.price - high_clusters[-1][0].price) < major_spacing:
+            high_clusters[-1].append(sh)
+        else:
+            high_clusters.append([sh])
+
+    major_res_added = 0
+    for cluster in high_clusters:
+        if major_res_added >= 4:
+            break
+        avg_p = round(max(s.price for s in cluster), 2)
+        # Skip if already represented by a benchmark level (PDH, PWH, PMH, 52WH, R1-R4)
+        if any(abs(lv.price - avg_p) < major_spacing * 0.8 for lv in levels):
+            continue
+        cnt = len(cluster)
+        if avg_p >= cur_price:
+            lbl = f"Res ({cnt}x)" if cnt >= 2 else "Major Res"
+            kind = "RESISTANCE"
+            col = "#f43f5e"
+            major_res_added += 1
+            levels.append(LiquidityLevel(lbl, avg_p, kind, col, "dashed", "high"))
+        elif major_res_added < 2:
+            lbl = "Flip Sup"
+            kind = "SUPPORT"
+            col = "#10b981"
+            major_res_added += 1
+            levels.append(LiquidityLevel(lbl, avg_p, kind, col, "dashed", "standard"))
+
+    # Cluster swing lows (Major Previous Support levels)
+    swing_lows = sorted([s for s in major_swings if s.kind == "low"], key=lambda s: s.price)
+    low_clusters: list[list[SwingPoint]] = []
+    for sl in swing_lows:
+        if low_clusters and (sl.price - low_clusters[-1][0].price) < major_spacing:
+            low_clusters[-1].append(sl)
+        else:
+            low_clusters.append([sl])
+
+    major_sup_added = 0
+    for cluster in low_clusters:
+        if major_sup_added >= 4:
+            break
+        avg_p = round(min(s.price for s in cluster), 2)
+        # Skip if already represented by a benchmark level (PDL, PWL, PML, 52WL, S1-S4)
+        if any(abs(lv.price - avg_p) < major_spacing * 0.8 for lv in levels):
+            continue
+        cnt = len(cluster)
+        if avg_p <= cur_price:
+            lbl = f"Sup ({cnt}x)" if cnt >= 2 else "Major Sup"
+            kind = "SUPPORT"
+            col = "#10b981"
+            major_sup_added += 1
+            levels.append(LiquidityLevel(lbl, avg_p, kind, col, "dashed", "high"))
+        elif major_sup_added < 2:
+            lbl = "Flip Res"
+            kind = "RESISTANCE"
+            col = "#f43f5e"
+            major_sup_added += 1
+            levels.append(LiquidityLevel(lbl, avg_p, kind, col, "dashed", "standard"))
+
+    # 6. Session High (DH), Session Low (DL), Opening Range (ORH, ORL), Equal Highs/Lows
     if intraday_bars:
         latest_day = intraday_bars[-1]["date"][:10]
         today_bars = [b for b in intraday_bars if b["date"][:10] == latest_day]
-        if today_bars:
+        if len(today_bars) > 1:
             dh = max(b["high"] or b["close"] for b in today_bars)
             dl = min(b["low"] or b["close"] for b in today_bars)
-            levels.append(LiquidityLevel("DH", round(dh, 2), "DH", "#f97316", "solid", "high"))
-            levels.append(LiquidityLevel("DL", round(dl, 2), "DL", "#f97316", "solid", "high"))
+            levels.append(LiquidityLevel("DH", round(dh, 2), "DH", "#f43f5e", "solid", "high"))
+            levels.append(LiquidityLevel("DL", round(dl, 2), "DL", "#10b981", "solid", "high"))
 
             # 15m Opening Range (first 3 bars of 5m)
             or15_bars = [b for b in today_bars if b["date"][11:16] < "09:30"]
             if or15_bars:
                 orh15 = max(b["high"] for b in or15_bars)
                 orl15 = min(b["low"] for b in or15_bars)
-                levels.append(LiquidityLevel("ORH-15", round(orh15, 2), "ORH", "#d97706", "dashed", "medium"))
-                levels.append(LiquidityLevel("ORL-15", round(orl15, 2), "ORL", "#d97706", "dashed", "medium"))
+                levels.append(LiquidityLevel("ORH-15", round(orh15, 2), "ORH", "#f59e0b", "dashed", "medium"))
+                levels.append(LiquidityLevel("ORL-15", round(orl15, 2), "ORL", "#f59e0b", "dashed", "medium"))
 
             # Equal Highs (EQH) and Equal Lows (EQL)
             atr_val = calculate_atr(intraday_bars, 14)[-1] if len(intraday_bars) >= 14 else 15.0
             eq_tolerance = 0.15 * atr_val
 
-            swings = detect_swing_points(today_bars, sensitivity=2)
-            highs = [s for s in swings if s.kind == "high"]
-            lows = [s for s in swings if s.kind == "low"]
+            i_swings = detect_swing_points(today_bars, sensitivity=2)
+            highs = [s for s in i_swings if s.kind == "high"]
+            lows = [s for s in i_swings if s.kind == "low"]
 
             for a in range(len(highs) - 1):
                 h1, h2 = highs[a], highs[a + 1]
@@ -1373,12 +1669,17 @@ def weekly_bars_from_daily(daily: list[dict]) -> list[dict]:
     out: list[dict] = []
     for w in sorted(weeks):
         w_bars = weeks[w]
+        first_bar = w_bars[0]
+        first_open = first_bar.get("open")
+        if first_open is None:
+            first_open = first_bar["close"]
         out.append({
-            "date": w_bars[0]["date"],
-            "open": w_bars[0]["open"],
-            "high": max(b["high"] or b["close"] for b in w_bars),
-            "low": min(b["low"] or b["close"] for b in w_bars),
+            "date": first_bar["date"],
+            "open": first_open,
+            "high": max(b.get("high") or b["close"] for b in w_bars),
+            "low": min(b.get("low") or b["close"] for b in w_bars),
             "close": w_bars[-1]["close"],
+            "volume": sum(b.get("volume") or 0 for b in w_bars),
         })
     return out
 
@@ -1400,16 +1701,16 @@ def aggregate_bars(bars: list[dict], minutes: int) -> list[dict]:
             start = b["date"]
 
         if out and out[-1]["date"] == start:
-            out[-1]["high"] = max(out[-1]["high"], b["high"])
-            out[-1]["low"] = min(out[-1]["low"], b["low"])
+            out[-1]["high"] = max(out[-1]["high"], b.get("high") or b["close"])
+            out[-1]["low"] = min(out[-1]["low"], b.get("low") or b["close"])
             out[-1]["close"] = b["close"]
             out[-1]["volume"] = (out[-1].get("volume") or 0) + (b.get("volume") or 0)
         else:
             out.append({
                 "date": start,
-                "open": b["open"],
-                "high": b["high"],
-                "low": b["low"],
+                "open": b.get("open") if b.get("open") is not None else b["close"],
+                "high": b.get("high") or b["close"],
+                "low": b.get("low") or b["close"],
                 "close": b["close"],
                 "volume": b.get("volume") or 0,
             })
@@ -1489,7 +1790,7 @@ def enrich_chart_payload(
 
     # 4. Liquidity Levels & Sweeps
     weekly_bars = weekly_bars_from_daily(daily_bars)
-    liquidity_levels = calculate_liquidity_levels(daily_bars, bars, weekly_bars)
+    liquidity_levels = calculate_liquidity_levels(daily_bars, bars, weekly_bars, swings=swings)
     sweeps = detect_liquidity_sweeps(bars, liquidity_levels)
 
     # 5. Trend Classification Engine

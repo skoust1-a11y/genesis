@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 
 import { AuthNav } from "@/components/AuthNav";
+import { ErrorHandler } from "@/components/ErrorHandler";
 import "./globals.css";
 
 const geistSans = Geist({
@@ -23,6 +24,7 @@ export const metadata: Metadata = {
 const NAV = [
   { href: "/", label: "Dashboard" },
   { href: "/markets", label: "Markets" },
+  { href: "/strategies", label: "Strategies & Analyzer" },
   { href: "/lab", label: "Strategy Lab" },
   { href: "/deploy", label: "Deploy" },
   { href: "/deployments", label: "Deployments" },
@@ -38,6 +40,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} antialiased bg-zinc-50 text-zinc-900`}
       >
+        <ErrorHandler />
         <nav className="sticky top-0 z-10 border-b bg-white/90 backdrop-blur">
           <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-3 text-sm">
             <Link href="/" className="flex items-center gap-2 font-semibold">

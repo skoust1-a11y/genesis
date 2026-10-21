@@ -25,6 +25,7 @@ from app.ingest.store import IngestRunStore
 from app.ingest.youtube import fetch_youtube_transcript
 from app.provenance import report_inputs
 from app.reports.store import ReportStore
+from app.strategies.analyzer import analyze_trading_strategy, get_full_strategy_catalog
 from app.strategies.clarify import answers_as_hints, clarifying_questions
 from app.strategies.schema import StrategyDocument, parse_strategy_markdown
 from app.strategies.store import StrategyStore
@@ -280,6 +281,28 @@ def _strategy_summary(strategy) -> dict:
         "created_at": strategy.created_at,
         "archived_at": strategy.archived_at,
     }
+
+
+class AnalyzeStrategyRequest(BaseModel):
+    strategy_id: str | None = None
+    text: str | None = None
+
+
+@router.get("/strategies/catalog")
+def get_catalog(db: Session = Depends(get_db)):
+    return {"catalog": get_full_strategy_catalog(db)}
+
+
+@router.post("/strategies/analyze")
+def analyze_strategy_endpoint(body: AnalyzeStrategyRequest, db: Session = Depends(get_db)):
+    text = body.text or ""
+    if not text and body.strategy_id:
+        store = StrategyStore(db)
+        version = store.latest_version(body.strategy_id)
+        text = version.markdown
+    if not text:
+        raise HTTPException(status_code=400, detail="Strategy text or strategy_id required")
+    return analyze_trading_strategy(text, strategy_id=body.strategy_id, db=db)
 
 
 @router.get("/strategies")

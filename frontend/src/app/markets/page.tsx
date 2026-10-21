@@ -14,7 +14,7 @@ import {
 } from "@/components/CandleChart";
 import { OptionChainModal, type OptionChainData } from "@/components/OptionChainModal";
 import type { IndicatorData } from "@/components/MomentumPanel";
-import type { DecisionData, RegimeData, MTFReportData } from "@/components/TradingDecisionDashboard";
+import { TradingDecisionDashboard, type DecisionData, type RegimeData, type MTFReportData } from "@/components/TradingDecisionDashboard";
 import { IndexStrip } from "@/components/IndexStrip";
 import { api, inr, pct } from "@/lib/api";
 import { riskPlan } from "@/lib/risk";
@@ -673,11 +673,20 @@ export default function Markets() {
             trendlines={trendlines}
             sweeps={sweeps}
             indicators={indicators}
-            regime={regime}
-            decision={decision}
-            mtf={mtf}
+            symbol={chartMode === "spot" ? symbol : `${symbol} ${selectedStrike} ${optionType}`}
+            timeframe={timeframe}
+            onTimeframeChange={setTimeframe}
             selectedSensitivity={sensitivity}
             onSensitivityChange={setSensitivity}
+          />
+
+          {/* Strategic Analysis & Intelligence Dashboard (Separated cleanly below the chart) */}
+          <TradingDecisionDashboard
+            decision={decision}
+            regime={regime}
+            mtf={mtf}
+            symbol={symbol}
+            currentPrice={bars.at(-1)?.close ?? quote?.price}
           />
           <div className="flex flex-wrap gap-2">
             <a

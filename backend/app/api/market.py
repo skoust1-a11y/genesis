@@ -158,9 +158,16 @@ def market_candles(
         # Yahoo's daily list sometimes lacks the current session, so rebuild it from the intraday bars.
         day = [b for b in bars if b["date"][:10] == session]
         if day:
+            first_open = day[0].get("open")
+            if first_open is None:
+                first_open = day[0]["close"]
             today = {
-                "date": session, "high": max(b["high"] or b["close"] for b in day),
-                "low": min(b["low"] or b["close"] for b in day), "close": day[-1]["close"],
+                "date": session,
+                "open": first_open,
+                "high": max(b.get("high") or b["close"] for b in day),
+                "low": min(b.get("low") or b["close"] for b in day),
+                "close": day[-1]["close"],
+                "volume": sum(b.get("volume") or 0 for b in day),
             }
             daily = [d for d in daily if d["date"][:10] < session] + [today]
 
@@ -455,22 +462,38 @@ def intraday_levels(bars: list[dict], or_bars: int, swing: int = 2, keep: int = 
 
 
 def trading_zones(levels: list[dict], last: float, width: float = 0.003) -> list[dict]:
-    """Bands where 2+ distinct level prices sit within `width` (a fraction of `last`) of the band's lowest level;
-    price tends to react where levels pile up. `side` is relative to `last`."""
+    """Bands where 2+ distinct levels cluster or major benchmark levels sit;
+    returns all structural zones covering the market trading range."""
     groups: list[list[dict]] = []
     for lv in sorted(levels, key=lambda lv: lv["price"]):
         if groups and lv["price"] - groups[-1][0]["price"] <= width * last:
             groups[-1].append(lv)
         else:
             groups.append([lv])
-    zones = []
+    raw_zones = []
+    buffer = max(2.0, round(last * 0.0012, 2))
+    major_keys = (
+        "DH", "DL", "PDH", "PDL", "PWH", "PWL", "PMH", "PML",
+        "52WH", "52WL", "P", "R1", "R2", "R3", "S1", "S2", "S3",
+        "ORH", "ORL", "EQH", "EQL", "Res", "Sup", "BSL", "SSL",
+    )
     for g in groups:
         low, high = g[0]["price"], g[-1]["price"]
+        labels = [lv["label"] for lv in g]
+        is_confluent = len(g) >= 2
+        is_major = any(any(lbl.startswith(k) for k in major_keys) for lbl in labels)
+        if not (is_confluent or is_major):
+            continue
         if low == high:
-            continue  # one price, however many labels share it
-        side = "resistance" if low > last else "support" if high < last else "at price"
-        zones.append({"low": low, "high": high, "labels": [lv["label"] for lv in g], "side": side})
-    return zones
+            low = round(low - buffer, 2)
+            high = round(high + buffer, 2)
+        else:
+            low = round(low - buffer * 0.4, 2)
+            high = round(high + buffer * 0.4, 2)
+        side = "resistance" if low >= last else "support" if high <= last else ("resistance" if (last - low) < (high - last) else "support")
+        raw_zones.append({"low": low, "high": high, "labels": labels, "side": side})
+
+    return sorted(raw_zones, key=lambda z: z["low"])
 
 
 def add_vwap(bars: list[dict]) -> list[dict]:

@@ -18,9 +18,7 @@
   <array>
     <string>/usr/bin/caffeinate</string>
     <string>-i</string>
-    <string>/opt/homebrew/bin/uv</string>
-    <string>run</string>
-    <string>python</string>
+    <string>/Users/skoust/Documents/MyProjects/genesis/backend/.venv/bin/python</string>
     <string>-m</string>
     <string>app.equal_signals</string>
   </array>

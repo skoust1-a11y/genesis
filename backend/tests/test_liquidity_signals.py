@@ -216,3 +216,63 @@ def test_trendline_confluence_and_pool_tag():
     assert "sell-side sweep of Equal Low (EQL) 100.00" in msg
 
 
+def test_scan_retest_bullish_and_bearish():
+    from app.liquidity_signals import scan_retest
+
+    def bar(t, o, h, l, c):
+        return {"date": f"2026-10-14 {t}", "open": o, "high": h, "low": l, "close": c}
+
+    # Bullish PDH Breakout & Retest:
+    # PDH is 200. Open is 150.
+    # 09:30: opens 190, breaks out high 205, closes 202
+    # 09:35: pulls back, low 198 (tests PDH 200 within tolerance), closes 199
+    # 09:40: confirms bounce, low 198, high 210, closes 208 (above PDH 200, green, above VWAP)
+    day_bull = [
+        bar("09:15", 150, 160, 148, 158),
+        bar("09:20", 158, 175, 155, 172),
+        bar("09:25", 172, 192, 170, 190),
+        bar("09:30", 190, 205, 188, 202),
+        bar("09:35", 202, 203, 198, 199),
+        bar("09:40", 199, 210, 198, 208),
+    ]
+    above = {x["date"]: True for x in day_bull}
+    bull_sigs = scan_retest(day_bull, above, pdh=200.0, pdl=100.0, min_risk=10.0)
+    assert len(bull_sigs) == 1
+    assert bull_sigs[0]["side"] == "Long"
+    assert bull_sigs[0]["entry"] == 208.0
+    assert bull_sigs[0]["stop"] == 193.0  # retest low 198 - 5
+    assert bull_sigs[0]["strategy"] == "retest"
+    assert "breakout & retest of PDH Support Flip 200.00" in message(bull_sigs[0], get_settings())
+
+
+def test_scan_trendline_reversal():
+    from app.liquidity_signals import scan_trendline_reversal
+
+    def bar(t, o, h, l, c):
+        return {"date": f"2026-10-14 {t}", "open": o, "high": h, "low": l, "close": c}
+
+    # Ascending trendline with swing lows at idx 2 (low 100) and idx 6 (low 110)
+    # slope = (110 - 100) / (6 - 2) = +2.5 pts/bar
+    # at idx 9: tl_val = 117.5. Breakdown candle closes at 108 (< 117.5 and red).
+    bars_short = [
+        bar("09:15", 105, 108, 103, 106),
+        bar("09:20", 106, 107, 102, 104),
+        bar("09:25", 104, 105, 100, 103),  # low pivot 1 at idx 2: low=100
+        bar("09:30", 103, 112, 104, 110),
+        bar("09:35", 110, 116, 114, 115),
+        bar("09:40", 115, 117, 112, 114),
+        bar("09:45", 114, 118, 110, 117),  # low pivot 2 at idx 6: low=110
+        bar("09:50", 117, 120, 115, 119),
+        bar("09:55", 119, 120, 116, 118),
+        bar("10:00", 118, 118, 106, 108),  # breakdown candle closes 108 (red)
+    ]
+    sigs = scan_trendline_reversal(bars_short, min_risk=5.0, skip_lunch=False)
+    assert len(sigs) == 1
+    assert sigs[0]["side"] == "Short"
+    assert sigs[0]["entry"] == 108.0
+    assert sigs[0]["strategy"] == "trendline_reversal"
+    assert "Trendline Breakdown" in sigs[0]["pool"]
+    assert "trendline breakdown" in message(sigs[0], get_settings())
+
+
+

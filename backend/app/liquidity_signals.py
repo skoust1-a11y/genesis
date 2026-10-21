@@ -38,6 +38,12 @@ from app.api.market import (
 )
 from app.brokers.groww import GrowwQuotes
 from app.config import Settings, get_settings
+from app.loss_analyzer import (
+    analyze_losing_trade,
+    ask_expert_on_streak,
+    format_expert_alert,
+    format_loss_alert,
+)
 from app.market.feed import BrokerFeed
 from app.market.hours import holidays
 from app.paper import order_charges
@@ -190,6 +196,234 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
     return out
 
 
+def scan_retest(
+    bars: list[dict],
+    above_vwap: dict[str, bool | None],
+    pdh: float,
+    pdl: float,
+    min_risk: float = MIN_RISK,
+    min_breakout: float = 2.0,
+    max_retest_depth: float = 25.0,
+    skip_lunch: bool = True,
+) -> list[dict]:
+    """Entries for Breakout & Support/Resistance Retests past PDH/PDL:
+    - Long (Buy CE): 5m breaks above PDH + min_breakout -> subsequent 5m pullback tests PDH zone (within max_retest_depth)
+      and holds -> 5m candle closes green above PDH, above VWAP and above Open.
+      Stop: 5 pts below the retest pullback low.
+    - Short (Buy PE): 5m breaks below PDL - min_breakout -> subsequent 5m pullback tests PDL zone (from below)
+      and holds -> 5m candle closes red below PDL, below VWAP and below Open.
+      Stop: 5 pts above the retest pullback high.
+    Target: 3R."""
+    if not bars:
+        return []
+    day_open, out = bars[0]["open"], []
+    for side in ("Long", "Short"):
+        long = side == "Long"
+        level = pdh if long else pdl
+        stage, retest_extreme, why = 0, 0.0, []
+        for i, b in enumerate(bars):
+            c = b["close"]
+            closes_at = _at(b["date"], 5)
+            if closes_at[11:] > LAST_ENTRY:
+                break
+
+            if stage == 0:
+                if (long and b["high"] >= level + min_breakout and c > day_open) or (
+                    not long and b["low"] <= level - min_breakout and c < day_open
+                ):
+                    stage = 1
+                    why = [
+                        f"{closes_at[11:]} breakout: 5m high {b['high']:,.2f} cleared PDH {level:,.2f}"
+                        if long
+                        else f"{closes_at[11:]} breakdown: 5m low {b['low']:,.2f} breached PDL {level:,.2f}"
+                    ]
+                continue
+
+            if stage == 1:
+                # Track retest / pullback near level
+                is_pullback = (long and b["low"] <= level + 15.0 and b["low"] >= level - max_retest_depth) or (
+                    not long and b["high"] >= level - 15.0 and b["high"] <= level + max_retest_depth
+                )
+                if is_pullback:
+                    stage = 2
+                    retest_extreme = b["low"] if long else b["high"]
+                    why.append(
+                        f"{closes_at[11:]} retest: 5m {'low' if long else 'high'} {retest_extreme:,.2f} tested {'PDH' if long else 'PDL'} {level:,.2f} as {'support' if long else 'resistance'}"
+                    )
+                continue
+
+            if stage == 2:
+                retest_extreme = min(retest_extreme, b["low"]) if long else max(retest_extreme, b["high"])
+                confirmed = (
+                    long and c > level and c > b["open"] and above_vwap.get(b["date"]) is True and c > day_open
+                ) or (
+                    not long and c < level and c < b["open"] and above_vwap.get(b["date"]) is False and c < day_open
+                )
+                if not confirmed:
+                    continue
+                if closes_at[11:] < FIRST_ENTRY:
+                    continue
+                if skip_lunch and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
+                    continue
+
+                stop = (retest_extreme - 5.0) if long else (retest_extreme + 5.0)
+                risk = abs(c - stop)
+                if risk >= min_risk:
+                    target = c + R_MULT * risk if long else c - R_MULT * risk
+                    why.append(
+                        f"{closes_at[11:]} confirmation: 5m close {c:,.2f} held {'above PDH' if long else 'below PDL'} and VWAP"
+                    )
+                    out.append(
+                        {
+                            "side": side,
+                            "strategy": "retest",
+                            "pool": f"PD{'H Support' if long else 'L Resistance'} Flip",
+                            "time": closes_at,
+                            "entry": c,
+                            "stop": round(stop, 2),
+                            "target": round(target, 2),
+                            "risk": round(risk, 2),
+                            "level": level,
+                            "why": why,
+                            "stop_basis": f"retest {'low' if long else 'high'} {retest_extreme:,.2f} {'-' if long else '+'} 5",
+                            "candle": b,
+                            "day_open": day_open,
+                        }
+                    )
+                    break
+    return out
+
+
+def scan_trendline_reversal(
+    bars: list[dict],
+    min_slope: float = 0.5,
+    skip_lunch: bool = True,
+    min_risk: float = MIN_RISK,
+    max_risk: float = 65.0,
+) -> list[dict]:
+    """Entries for Clean Trendline Reversals (Breakdowns below Ascending Support & Breakouts above Descending Resistance):
+    - Short (Buy PE): Ascending trendline (slope >= min_slope). 5m candle closes below trendline with a red close (c < open).
+      Stop: 5 pts above the recent breakdown swing high.
+    - Long (Buy CE): Descending trendline (slope <= -min_slope). 5m candle closes above trendline with a green close (c > open).
+      Stop: 5 pts below the recent breakout swing low.
+    Target: 3R."""
+    if len(bars) < 10:
+        return []
+    day_open, out = bars[0]["open"], []
+
+    for side in ("Short", "Long"):
+        long = side == "Long"
+        key = "high" if long else "low"
+        triggered = False
+
+        for i in range(5, len(bars)):
+            b = bars[i]
+            closes_at = _at(b["date"], 5)
+            time_str = closes_at[11:]
+            if time_str > LAST_ENTRY:
+                break
+            if time_str < FIRST_ENTRY:
+                continue
+            if skip_lunch and BLACKOUT_START <= time_str <= BLACKOUT_END:
+                continue
+
+            c = b["close"]
+            piv = pivots(bars[: i + 1], key)
+            if len(piv) < 2:
+                continue
+
+            candidate_pairs = [(piv[-2], piv[-1])]
+            if len(piv) >= 3:
+                candidate_pairs.append((piv[-3], piv[-1]))
+
+            for x1, x2 in candidate_pairs:
+                if x2 - x1 < 4:
+                    continue
+                y1, y2 = bars[x1][key], bars[x2][key]
+                slope = (y2 - y1) / (x2 - x1)
+
+                # Short: ascending trendline
+                if not long and slope >= min_slope:
+                    tl_val = y1 + slope * (i - x1)
+                    tl_prev = y1 + slope * (i - 1 - x1)
+                    if c < tl_val and bars[i - 1]["close"] >= tl_prev - 2.0 and c < b["open"]:
+                        violations = sum(
+                            1 for k in range(x1 + 1, x2) if bars[k]["close"] < y1 + slope * (k - x1) - 3.0
+                        )
+                        if violations > 1:
+                            continue
+                        stop = max(b["high"], max(bars[k]["high"] for k in range(max(0, i - 2), i + 1))) + 5.0
+                        risk = stop - c
+                        if min_risk <= risk <= max_risk:
+                            target = c - R_MULT * risk
+                            why = [
+                                f"{time_str} trendline breakdown: 5m close {c:,.2f} below ascending line {tl_val:,.2f} (slope {slope:+.2f})",
+                                f"Anchored by swing lows at {bars[x1]['date'][11:]} ({y1:,.2f}) and {bars[x2]['date'][11:]} ({y2:,.2f})",
+                            ]
+                            out.append(
+                                {
+                                    "side": "Short",
+                                    "strategy": "trendline_reversal",
+                                    "pool": "Trendline Breakdown",
+                                    "time": closes_at,
+                                    "entry": c,
+                                    "stop": round(stop, 2),
+                                    "target": round(target, 2),
+                                    "risk": round(risk, 2),
+                                    "level": round(tl_val, 2),
+                                    "why": why,
+                                    "stop_basis": f"breakdown swing high {stop - 5:,.2f} + 5",
+                                    "candle": b,
+                                    "day_open": day_open,
+                                    "trendline": (x1, y1, x2, y2),
+                                }
+                            )
+                            triggered = True
+                            break
+
+                # Long: descending trendline
+                elif long and slope <= -min_slope:
+                    tl_val = y1 + slope * (i - x1)
+                    tl_prev = y1 + slope * (i - 1 - x1)
+                    if c > tl_val and bars[i - 1]["close"] <= tl_prev + 2.0 and c > b["open"]:
+                        violations = sum(
+                            1 for k in range(x1 + 1, x2) if bars[k]["close"] > y1 + slope * (k - x1) + 3.0
+                        )
+                        if violations > 1:
+                            continue
+                        stop = min(b["low"], min(bars[k]["low"] for k in range(max(0, i - 2), i + 1))) - 5.0
+                        risk = c - stop
+                        if min_risk <= risk <= max_risk:
+                            target = c + R_MULT * risk
+                            why = [
+                                f"{time_str} trendline breakout: 5m close {c:,.2f} above descending line {tl_val:,.2f} (slope {slope:+.2f})",
+                                f"Anchored by swing highs at {bars[x1]['date'][11:]} ({y1:,.2f}) and {bars[x2]['date'][11:]} ({y2:,.2f})",
+                            ]
+                            out.append(
+                                {
+                                    "side": "Long",
+                                    "strategy": "trendline_reversal",
+                                    "pool": "Trendline Breakout",
+                                    "time": closes_at,
+                                    "entry": c,
+                                    "stop": round(stop, 2),
+                                    "target": round(target, 2),
+                                    "risk": round(risk, 2),
+                                    "level": round(tl_val, 2),
+                                    "why": why,
+                                    "stop_basis": f"breakout swing low {stop + 5:,.2f} - 5",
+                                    "candle": b,
+                                    "day_open": day_open,
+                                    "trendline": (x1, y1, x2, y2),
+                                }
+                            )
+                            triggered = True
+                            break
+            if triggered:
+                break
+    return out
+
+
 def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[dict] | None = None) -> str:
     """The signal as text: trade, option, why it fired, trigger candle, nearby levels and risk."""
     lot, step = settings.lot_size("NIFTY") or 65, settings.strike_step("NIFTY") or 50
@@ -225,8 +459,27 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
         option_lines = [f"{option}: ~Rs {fut_loss * 0.4:,.0f}/lot at stop (delta ~0.4; option chain unavailable)"]
         option_loss = fut_loss * 0.4
     pool_tag = f"{s.get('pool')} " if s.get("pool") else ""
+    strat = s.get("strategy")
+    if strat == "trendline_reversal":
+        badge = "📈 TRENDLINE REVERSAL"
+        strat_name = "Trendline Reversal"
+        setup_desc = f"trendline {'breakout' if long else 'breakdown'} @ {s['level']:,.2f}"
+    elif strat == "retest":
+        badge = "🚀 BREAKOUT & RETEST"
+        strat_name = "PDH/PDL Breakout & Retest"
+        setup_desc = f"breakout & retest of {pool_tag}{s['level']:,.2f}"
+    elif "Equal" in s.get("pool", ""):
+        badge = "🎯 EQUAL HIGHS/LOWS SWEEP"
+        strat_name = "Intraday EQH/EQL Sweep"
+        setup_desc = f"{'sell-side sweep' if long else 'buy-side raid'} of {pool_tag}{s['level']:,.2f}"
+    else:
+        badge = "⚡ LIQUIDITY SWEEP"
+        strat_name = "PDH/PDL Liquidity Sweep"
+        setup_desc = f"{'sell-side sweep' if long else 'buy-side raid'} of {pool_tag}{s['level']:,.2f}"
     lines = [
-        f"NIFTY {s['side'].upper()} signal at {s['time'][11:]} IST ({'sell-side sweep' if long else 'buy-side raid'} of {pool_tag}{s['level']:,.2f})",
+        f"🚨 [{badge}]",
+        f"Strategy: {strat_name}",
+        f"NIFTY {s['side'].upper()} signal at {s['time'][11:]} IST ({setup_desc})",
         "",
         "TRADE (index)",
         f"Entry {e:,.2f} (5m close) | Stop {s['stop']:,.2f} | Target {s['target']:,.2f}",
@@ -283,12 +536,12 @@ def option_plan(s: dict, settings: Settings, lots: int = 2, otm_steps: int = OTM
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         print(f"option chain unavailable: {exc}")
     if plan is None:
+        vix = 13.5
         try:
             vix = parse_yahoo_chart(_chart("^INDIAVIX", "1d", "5d"))[-1]["close"]
         except (httpx.HTTPError, IndexError, KeyError) as exc:
-            print(f"India VIX unavailable: {exc}")
-            return None
-        plan = estimated_plan(s, settings, vix, lots=lots, otm_steps=otm_steps) if vix else None
+            print(f"India VIX unavailable, using fallback 13.5%: {exc}")
+        plan = estimated_plan(s, settings, vix, lots=lots, otm_steps=otm_steps)
     if plan and "spread" not in plan:
         kind = "CE" if s["side"] == "Long" else "PE"
         strike = strike_of(s, step, otm_steps=otm_steps)
@@ -654,6 +907,10 @@ def main(argv: list[str] | None = None) -> int:
         print(note, "| sent via", alerts.send_signal(settings, "[genesis] liquidity strategy", note) or "nothing")
         return 0
     seen: set[str] = set()
+    active_trades: list[dict] = []
+    recent_losses: list[dict] = []
+    consecutive_losses: int = 0
+    paused_until: date | None = until
     while True:
         now = datetime.now(IST)
         today = now.strftime("%Y-%m-%d")
@@ -667,6 +924,53 @@ def main(argv: list[str] | None = None) -> int:
         prev = [d for d in daily if d["date"][:10] < today]
         if day and prev:
             pdh, pdl = prev[-1]["high"], prev[-1]["low"]
+
+            # Monitor active trades for exits, post-mortems and losing streaks
+            for s in list(active_trades):
+                exit_reason, exit_px, exit_time = exit_of(day, s)
+                if exit_reason != "Last bar":
+                    active_trades.remove(s)
+                    long = s["side"] == "Long"
+                    pts = (exit_px - s["entry"]) if long else (s["entry"] - exit_px)
+                    if pts > 0:
+                        consecutive_losses = 0
+                        tgt_msg = (
+                            f"🎉 NIFTY TARGET REACHED ({s['side'].upper()})\n\n"
+                            f"• Setup: {s.get('pool', 'Liquidity Signal')}\n"
+                            f"• Entry: {s['entry']:,.2f} at {s['time'][11:]}\n"
+                            f"• Exit: {exit_px:,.2f} at {exit_time[11:]} ({exit_reason})\n"
+                            f"• Realized Profit: +{pts:,.1f} pts (+{pts / s['risk']:.2f}R)"
+                        )
+                        alerts.send_signal(settings, "[genesis] Target Reached", tgt_msg)
+                    elif pts < 0:
+                        s["exit_price"] = exit_px
+                        s["exit_time"] = exit_time
+                        s["exit_reason"] = exit_reason
+                        analysis = analyze_losing_trade(s, day, pdh, pdl, daily)
+                        s["analysis"] = analysis
+                        recent_losses.append(s)
+                        consecutive_losses += 1
+
+                        # 1. Immediate post-mortem on every loss
+                        loss_alert = format_loss_alert(analysis)
+                        print(loss_alert)
+                        alerts.send_signal(settings, "[genesis] Trade Post-Mortem", loss_alert)
+
+                        # 2. On 3 consecutive losses: ask Expert to analyze & trigger circuit breaker
+                        if consecutive_losses >= LOSS_STREAK:
+                            pause_date = now.date()
+                            off = holidays(settings)
+                            left = BREAK_DAYS
+                            while left:
+                                pause_date += timedelta(days=1)
+                                left -= pause_date.weekday() < 5 and pause_date.isoformat() not in off
+                            paused_until = pause_date
+
+                            expert_report = ask_expert_on_streak(recent_losses, day, settings)
+                            expert_alert = format_expert_alert(expert_report, pause_date.isoformat())
+                            print(expert_alert)
+                            alerts.send_signal(settings, "[genesis] QUANT EXPERT REVIEW", expert_alert)
+
             if "levels" not in seen:
                 seen.add("levels")
                 levels = (
@@ -678,15 +982,13 @@ def main(argv: list[str] | None = None) -> int:
                     f"• Active Entry Window: {FIRST_ENTRY} - {LAST_ENTRY} IST\n\n"
                     f"🎯 TRIGGERS TO WAIT FOR TODAY:\n\n"
                     f"🔴 SHORT (Buy PE):\n"
-                    f"1. NIFTY sweeps above PDH ({pdh:,.0f})\n"
-                    f"2. 15m candle rejects & closes back below {pdh:,.0f}\n"
-                    f"3. 5m structure break below swing low + close below VWAP & Open ({day[0]['open']:,.0f})\n"
-                    f"4. Breakdown below ascending trendline (Trendline Break)\n\n"
+                    f"1. Sweep above PDH ({pdh:,.0f}) & 15m candle rejects back below (Sweep Reversal)\n"
+                    f"2. Breakdown below PDL ({pdl:,.0f}) + 5m retest rejection below VWAP & Open (Trend Breakdown)\n"
+                    f"3. Trendline Breakdown: 5m candle closes below ascending support line (Trend Reversal)\n\n"
                     f"🟢 LONG (Buy CE):\n"
-                    f"1. NIFTY sweeps below PDL ({pdl:,.0f})\n"
-                    f"2. 15m candle closes above last 15m swing high\n"
-                    f"3. 5m close reclaims PDL + close above VWAP & Open ({day[0]['open']:,.0f})\n"
-                    f"4. Breakout above descending trendline (Trendline Break)"
+                    f"1. Sweep below PDL ({pdl:,.0f}) & 15m candle reclaims above (Sweep Reversal)\n"
+                    f"2. Breakout above PDH ({pdh:,.0f}) + 5m retest bounce holding PDH & VWAP (Trend Breakout)\n"
+                    f"3. Trendline Breakout: 5m candle closes above descending resistance line (Trend Reversal)"
                 )
                 print(levels, "| sent via", alerts.send_signal(settings, "[genesis] NIFTY Morning Plan", levels) or "nothing")
                 lvls = trading_levels([prev[-1]], session_over=True) + intraday_levels(day, 3)
@@ -707,67 +1009,92 @@ def main(argv: list[str] | None = None) -> int:
                     f"📊 NIFTY 5m Levels & Structure ({today})\n• PDH: {pdh:,.2f} | PDL: {pdl:,.2f}\n• Day High: {max(b['high'] for b in day):,.2f} | Low: {min(b['low'] for b in day):,.2f}",
                     chart_png,
                 )
-            # 1. PDH / PDL Liquidity Sweeps with Trendline Breakdown
-            all_signals = scan(day, above, pdh, pdl, require_trendline=True)
-            for s in all_signals:
-                s.setdefault("pool", f"PD{'L' if s['side'] == 'Long' else 'H'}")
 
-            # 2. Equal High / Equal Low (EQH / EQL) Intraday Sweeps
-            from app.intraday_liquidity import atr, equal_levels, scan_levels
-            atrs = atr(day)
-            eq_lvs = equal_levels(day, atrs)
-            if eq_lvs:
-                tot_p = 0.0
-                v_list = []
-                for n_idx, b_item in enumerate(day, 1):
-                    tot_p += (b_item["high"] + b_item["low"] + b_item["close"]) / 3.0
-                    v_list.append(tot_p / n_idx)
-                for eq_s in scan_levels(day, v_list, atrs, eq_lvs, "equal", min_sweep=2.0, with_open_only=True, require_trendline=True):
-                    eq_s["pool"] = f"Equal {'High (EQH)' if eq_s['side'] == 'Short' else 'Low (EQL)'}"
-                    all_signals.append(eq_s)
+            if paused_until and now.date() <= paused_until:
+                pass
+            else:
+                # 1. PDH / PDL Liquidity Sweeps with Trendline Breakdown
+                all_signals = scan(day, above, pdh, pdl, require_trendline=True)
+                for s in all_signals:
+                    s.setdefault("pool", f"PD{'L' if s['side'] == 'Long' else 'H'}")
 
-            for s in all_signals:
-                sig_key = f"{s.get('strategy', 'pd')}_{s['side']}_{s.get('level', '')}"
-                if sig_key in seen:
-                    continue
-                seen.add(sig_key)
-                if now - datetime.strptime(s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST) > FRESH:
-                    print(f"missed (over {FRESH.seconds // 60} min old, not sent):\n{message(s, settings)}")
-                    continue
-                plan = option_plan(s, settings)
-                lvls = trading_levels([prev[-1]], session_over=True) + intraday_levels(day, 3)
-                body = message(s, settings, plan, lvls)
-                print(body, "| sent via", alerts.send_signal(settings, f"[genesis] NIFTY {s['side'].upper()} signal", body) or "nothing")
-                pngs = charts(day, s, lvls, plan, settings)
-                if plan and len(pngs) >= 2:
-                    stop_p, target_p = plan["exits"][0]["premium"], plan["exits"][1]["premium"]
-                    opt_t1 = round(plan["entry_premium"] + (target_p - plan["entry_premium"]) / 3, 2)
-                    opt_t2 = round(plan["entry_premium"] + 2 * (target_p - plan["entry_premium"]) / 3, 2)
-                    opt_caption = (
-                        f"🎯 NIFTY {plan['option']} (Expiry: {plan['expiry']})\n"
-                        f"Action: BUY | CMP: ~{plan['entry_premium']:,.2f}\n"
-                        f"Stop Loss: {stop_p:,.2f} (-20% / Index SL: {s['stop']:,.2f})\n\n"
-                        f"🎯 Staged Targets (2-3 Lots):\n"
-                        f"• T1 ({opt_t1:,.2f}): Move SL to Cost (Risk-Free)\n"
-                        f"• T2 ({opt_t2:,.2f}): Book 50% Lots (Lock Profit)\n"
-                        f"• T3 ({target_p:,.2f}): Book Remaining Runner (3R)\n\n"
-                        f"📊 Risk & Sizing (Rs 50k Capital):\n"
-                        f"• 2 Lots (130 qty): ~Rs {-plan['exits'][0]['pnl']:,.0f} total risk (5.2% risk rule)\n"
-                        f"• 3 Lots (195 qty): ~Rs {-plan['exits'][0]['pnl'] * 1.5:,.0f} total risk (7.8% risk rule)\n"
-                        f"• Time Exit: {EXIT} if neither hit\n\n"
-                        f"💡 Setup: {s['side']} liquidity sweep at {s['time'][11:]} IST"
-                    )
-                    alerts.send_signal_photo(settings, opt_caption[:1024], pngs[0])
-                    nifty_caption = (
-                        f"📊 NIFTY 5m Structure & Levels ({today})\n"
-                        f"• Setup: {s['side'].upper()} at {s['time'][11:]} IST\n"
-                        f"• Index Entry: {s['entry']:,.2f} | Stop: {s['stop']:,.2f} | Target: {s['target']:,.2f}\n"
-                        f"• Risk: {s['risk']:.0f} pts | Reward: {abs(s['target'] - s['entry']):.0f} pts (1:3 R:R)"
-                    )
-                    alerts.send_signal_photo(settings, nifty_caption[:1024], pngs[1])
-                else:
-                    for png in pngs:
-                        alerts.send_signal_photo(settings, body.splitlines()[0], png)
+                # 2. PDH / PDL Breakout & Support/Resistance Retests (Trend-Ride)
+                all_signals.extend(scan_retest(day, above, pdh, pdl))
+
+                # 3. Standalone Trendline Reversals (Breakdowns below Support & Breakouts above Resistance)
+                all_signals.extend(scan_trendline_reversal(day))
+
+                # 4. Equal High / Equal Low (EQH / EQL) Intraday Sweeps
+                from app.intraday_liquidity import atr, equal_levels, scan_levels
+                atrs = atr(day)
+                eq_lvs = equal_levels(day, atrs)
+                if eq_lvs:
+                    tot_p = 0.0
+                    v_list = []
+                    for n_idx, b_item in enumerate(day, 1):
+                        tot_p += (b_item["high"] + b_item["low"] + b_item["close"]) / 3.0
+                        v_list.append(tot_p / n_idx)
+                    for eq_s in scan_levels(day, v_list, atrs, eq_lvs, "equal", min_sweep=2.0, with_open_only=True, require_trendline=True):
+                        eq_s["pool"] = f"Equal {'High (EQH)' if eq_s['side'] == 'Short' else 'Low (EQL)'}"
+                        all_signals.append(eq_s)
+
+                for s in all_signals:
+                    sig_key = f"{s.get('strategy', 'pd')}_{s['side']}_{s.get('level', '')}"
+                    if sig_key in seen:
+                        continue
+                    seen.add(sig_key)
+                    if not any(t.get("time") == s["time"] and t.get("side") == s["side"] for t in active_trades):
+                        active_trades.append(s)
+                    if now - datetime.strptime(s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST) > FRESH:
+                        print(f"missed (over {FRESH.seconds // 60} min old, not sent):\n{message(s, settings)}")
+                        continue
+                    plan = option_plan(s, settings)
+                    lvls = trading_levels([prev[-1]], session_over=True) + intraday_levels(day, 3)
+                    body = message(s, settings, plan, lvls)
+                    print(body, "| sent via", alerts.send_signal(settings, f"[genesis] NIFTY {s['side'].upper()} signal", body) or "nothing")
+                    pngs = charts(day, s, lvls, plan, settings)
+                    if plan and len(pngs) >= 2:
+                        stop_p, target_p = plan["exits"][0]["premium"], plan["exits"][1]["premium"]
+                        opt_t1 = round(plan["entry_premium"] + (target_p - plan["entry_premium"]) / 3, 2)
+                        opt_t2 = round(plan["entry_premium"] + 2 * (target_p - plan["entry_premium"]) / 3, 2)
+                        strat_name = (
+                            "Trendline Reversal" if s.get("strategy") == "trendline_reversal"
+                            else "Breakout & Retest" if s.get("strategy") == "retest"
+                            else "Equal Highs/Lows Sweep" if "Equal" in s.get("pool", "")
+                            else "Liquidity Sweep"
+                        )
+                        opt_caption = (
+                            f"🎯 [{strat_name.upper()}] NIFTY {plan['option']} ({plan['expiry']})\n"
+                            f"Strategy: {strat_name} | Action: BUY\n"
+                            f"CMP: ~{plan['entry_premium']:,.2f} | Stop Loss: {stop_p:,.2f} (-20%)\n\n"
+                            f"🎯 Staged Targets (2-3 Lots):\n"
+                            f"• T1 ({opt_t1:,.2f}): Move SL to Cost (Risk-Free)\n"
+                            f"• T2 ({opt_t2:,.2f}): Book 50% Lots (Lock Profit)\n"
+                            f"• T3 ({target_p:,.2f}): Book Remaining Runner (3R)\n\n"
+                            f"📊 Risk & Sizing (Rs 50k Capital):\n"
+                            f"• 2 Lots (130 qty): ~Rs {-plan['exits'][0]['pnl']:,.0f} total risk (5.2% risk rule)\n"
+                            f"• 3 Lots (195 qty): ~Rs {-plan['exits'][0]['pnl'] * 1.5:,.0f} total risk (7.8% risk rule)\n"
+                            f"• Time Exit: {EXIT} if neither hit\n\n"
+                            f"💡 Setup: {s['side']} {s.get('pool', strat_name)} at {s['time'][11:]} IST"
+                        )
+                        alerts.send_signal_photo(settings, opt_caption[:1024], pngs[0])
+                        nifty_caption = (
+                            f"📊 [{strat_name.upper()}] NIFTY 5m Structure & Levels ({today})\n"
+                            f"• Strategy: {strat_name} ({s['side'].upper()})\n"
+                            f"• Setup: {s.get('pool', strat_name)} at {s['time'][11:]} IST\n"
+                            f"• Index Entry: {s['entry']:,.2f} | Stop: {s['stop']:,.2f} | Target: {s['target']:,.2f}\n"
+                            f"• Risk: {s['risk']:.0f} pts | Reward: {abs(s['target'] - s['entry']):.0f} pts (1:3 R:R)"
+                        )
+                        alerts.send_signal_photo(settings, nifty_caption[:1024], pngs[1])
+                    else:
+                        strat_name = (
+                            "Trendline Reversal" if s.get("strategy") == "trendline_reversal"
+                            else "Breakout & Retest" if s.get("strategy") == "retest"
+                            else "Equal Highs/Lows Sweep" if "Equal" in s.get("pool", "")
+                            else "Liquidity Sweep"
+                        )
+                        for png in pngs:
+                            alerts.send_signal_photo(settings, f"[{strat_name.upper()}] {body.splitlines()[0]}", png)
         elif bars is not None and now.strftime("%H:%M") >= "10:00":
             print(f"{now:%H:%M} no NIFTY bars for {today} (holiday or data source down)")
             break

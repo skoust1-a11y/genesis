@@ -191,6 +191,12 @@ def extract_strategy(source: dict, hints: str = "") -> ExtractionResult:
         m = re.search(r"```(?:markdown|md)?\s*(---[\s\S]+?)```", content)
         if m:
             content = m.group(1).strip()
+        else:
+            idx = content.find("---")
+            if idx != -1:
+                content = content[idx:].strip()
+                if content.endswith("```"):
+                    content = content[:-3].strip()
     if not content.startswith("---"):
         raise ExtractionError("Extractor did not return valid strategy markdown", raw, model)
     return ExtractionResult(content, "llm", model, raw)

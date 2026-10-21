@@ -59,7 +59,8 @@ def parse_strategy_markdown(text: str) -> StrategyDocument:
     parts = text.split("---", 2)
     if len(parts) < 3:
         raise ValueError("Invalid frontmatter block")
-    frontmatter = yaml.safe_load(parts[1]) or {}
+    raw_yaml = re.sub(r'(\bop:\s*)([><!=]=?)(\s|$)', r'\1"\2"\3', parts[1])
+    frontmatter = yaml.safe_load(raw_yaml) or {}
     body = parts[2].strip()
     thesis_match = re.search(r"^#\s+Thesis\s*$([\s\S]*?)(?=^##\s+|\Z)", body, flags=re.MULTILINE | re.IGNORECASE)
     thesis = thesis_match.group(1).strip() if thesis_match else ""
