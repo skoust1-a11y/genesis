@@ -4,7 +4,6 @@ uv run python -m app.live supervise [--interval 60] [--feed replay|broker] [--po
 from __future__ import annotations
 
 import argparse
-import logging
 
 from dotenv import load_dotenv
 
@@ -26,9 +25,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "supervise":
         from app.live.supervisor import Supervisor
+        from app.logger import configure_logging
 
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
-        Supervisor(get_settings(), get_live_sessionmaker(), interval=args.interval, feed=args.feed).run(args.poll)
+        settings = get_settings()
+        configure_logging(settings)
+        Supervisor(settings, get_live_sessionmaker(), interval=args.interval, feed=args.feed).run(args.poll)
         return 0
 
     research, live = get_sessionmaker()(), get_live_sessionmaker()()

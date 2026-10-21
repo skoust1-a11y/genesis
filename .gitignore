@@ -5,6 +5,10 @@ backend/data/reports/
 backend/data/*.db*
 backend/data/sandbox/
 backend/data/logs/
+backend/logs/
+logs/
+*.log
+**/*.log
 backend/data/intraday/
 backend/data/nse/raw/
 backend/research/

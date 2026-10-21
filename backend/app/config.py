@@ -152,10 +152,22 @@ class Settings(BaseSettings):
     # Lifetime of a username/password login (users from `python -m app.auth new-user NAME`).
     session_hours: float = Field(default=12, gt=0, alias="SESSION_HOURS")
 
+    # Logging configuration
+    log_level: str = Field(default="INFO", alias="LOG_LEVEL")
+    log_file: str | None = Field(default="logs/app.log", alias="LOG_FILE")
+
     cors_origins: str = Field(
         default="http://localhost:3000,http://127.0.0.1:3000,http://localhost:8844,http://127.0.0.1:8844,http://localhost:8842,http://127.0.0.1:8842",
         alias="CORS_ORIGINS",
     )
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _validate_log_level(cls, value: str | None) -> str:
+        if not value or not isinstance(value, str):
+            return "INFO"
+        v = value.strip().upper()
+        return v if v in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"} else "INFO"
 
     @model_validator(mode="after")
     def _streak_and_cooldown(self) -> "Settings":
