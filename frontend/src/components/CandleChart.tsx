@@ -342,10 +342,8 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
         // 2. Draw 3-point Non-Crossing Trendlines (Active & Historical)
         if (this.showTrendlines && this.trendlines.length > 0) {
           const linesToDraw = this.trendlines.filter(
-            (tl) => (tl.touch_count ?? 3) >= 3
+            (tl) => (tl.touch_count ?? 0) >= 3
           );
-
-          const totalBars = this.dates.length;
 
           const getXCoord = (index?: number | null, dateStr?: string | null): number | null => {
             if (index !== undefined && index !== null && index >= 0) {
@@ -383,18 +381,18 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
             const y2 = series.priceToCoordinate(tl.end_price);
             if (x1 === null || x2 === null || y1 === null || y2 === null) continue;
 
-            const isLiveActive = !tl.is_broken && (totalBars - tl.end_index <= 80 || tl.end_index >= totalBars - 15);
+            const isLiveActive = !tl.is_broken;
             const xBreak = (tl.break_index != null || tl.break_date)
               ? getXCoord(tl.break_index, tl.break_date)
               : null;
 
+            const avgBarPx = Math.abs(x2 - x1) / Math.max(tl.end_index - tl.start_index, 1);
             let extX: number;
             if (isLiveActive) {
               extX = bitmapSize.width;
             } else if (tl.is_broken && xBreak !== null && xBreak > x2) {
-              extX = xBreak * hr + 4 * hr;
+              extX = xBreak * hr + 8 * hr;
             } else {
-              const avgBarPx = Math.abs(x2 - x1) / Math.max(tl.end_index - tl.start_index, 1);
               extX = x2 * hr + 16 * avgBarPx * hr;
             }
 
@@ -424,27 +422,29 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
             });
           }
 
-          // Enforce non-crossing forward rays on active forward lines (same-side only)
+          // Enforce non-crossing rays on forward lines (strictly forward of BOTH anchor points)
           for (let i = 0; i < preparedLines.length; i++) {
             const pA = preparedLines[i];
             for (let j = i + 1; j < preparedLines.length; j++) {
               const pB = preparedLines[j];
-              // Top trendlines (resistance ceiling) and bottom trendlines (support floor) must NEVER truncate each other!
-              if (pA.tl.side !== pB.tl.side) continue;
-
               const mDiff = pA.slopePx - pB.slopePx;
               if (Math.abs(mDiff) > 1e-4) {
                 const cA = pA.y2 - pA.slopePx * pA.x2;
                 const cB = pB.y2 - pB.slopePx * pB.x2;
                 const xCross = (cB - cA) / mDiff;
-                if (xCross > Math.max(pA.x2, pB.x2)) {
-                  if (xCross < pA.extX) {
-                    pA.extX = xCross;
-                    pA.extY = pA.y2 + pA.slopePx * (pA.extX - pA.x2);
-                  }
-                  if (xCross < pB.extX) {
-                    pB.extX = xCross;
-                    pB.extY = pB.y2 + pB.slopePx * (pB.extX - pB.x2);
+                // Only consider intersections strictly forward of BOTH lines' anchors
+                const maxAnchorX = Math.max(pA.x2, pB.x2);
+                if (xCross > maxAnchorX + 5 * hr) {
+                  // For same-side lines (or converging opposite-side lines approaching apex)
+                  if (pA.tl.side === pB.tl.side || (pA.slopePx * pB.slopePx <= 0)) {
+                    if (xCross < pA.extX) {
+                      pA.extX = xCross;
+                      pA.extY = pA.y2 + pA.slopePx * (pA.extX - pA.x2);
+                    }
+                    if (xCross < pB.extX) {
+                      pB.extX = xCross;
+                      pB.extY = pB.y2 + pB.slopePx * (pB.extX - pB.x2);
+                    }
                   }
                 }
               }
@@ -457,52 +457,17 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
             const style = getTrendlineStyle(tl);
             const tlColor = style.color;
 
-            // 1. Draw Primary Trendline
-            ctx.save();
-            ctx.strokeStyle = tl.is_broken ? `${tlColor}77` : tlColor;
-            ctx.lineWidth = (tl.is_broken ? 1.2 : 1.8) * hr;
-            if (tl.is_broken) {
-              ctx.setLineDash([5 * hr, 3 * hr]);
-            }
-            ctx.beginPath();
-            ctx.moveTo(x1, y1);
-            ctx.lineTo(x2, y2);
-            ctx.stroke();
-            ctx.restore();
-
-            if (extX > x2) {
-              ctx.save();
-              ctx.strokeStyle = tl.is_broken ? `${tlColor}44` : `${tlColor}99`;
-              ctx.lineWidth = 1.1 * hr;
-              ctx.setLineDash([3 * hr, 3 * hr]);
-              ctx.beginPath();
-              ctx.moveTo(x2, y2);
-              ctx.lineTo(extX, extY);
-              ctx.stroke();
-              ctx.restore();
-
-              if (tl.is_broken && xBreakPx !== null && xBreakPx > x2) {
-                const breakY = y2 + p.slopePx * (xBreakPx - x2);
-                ctx.save();
-                ctx.fillStyle = tlColor;
-                ctx.beginPath();
-                ctx.arc(xBreakPx, breakY, 3 * hr, 0, Math.PI * 2);
-                ctx.fill();
-                ctx.restore();
-              }
-            }
-
-            // 2. Draw Accompanying Parallel Companion Trendline (Bottom floor for Top line, or Top ceiling for Bottom line)
+            // 1. Draw Parallel Companion Channel & Corridor Shading
             if (tl.side === "high" && tl.channel_low != null) {
-              const yChanCoord = series.priceToCoordinate(tl.channel_low);
-              if (yChanCoord !== null) {
-                const botY1 = yChanCoord * vr;
+              const yChan = series.priceToCoordinate(tl.channel_low);
+              if (yChan !== null) {
+                const botY1 = yChan * vr;
                 const dy = botY1 - y1;
                 const botY2 = y2 + dy;
                 const botExtY = extY + dy;
                 const botColor = tl.kind === "ascending" ? "#10b981" : "#0284c7";
 
-                // Channel corridor shading
+                // Channel corridor fill
                 ctx.save();
                 ctx.fillStyle = this.isDark ? "rgba(56, 189, 248, 0.04)" : "rgba(14, 165, 233, 0.04)";
                 ctx.beginPath();
@@ -512,45 +477,32 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
                 ctx.lineTo(x1, botY1);
                 ctx.closePath();
                 ctx.fill();
-                ctx.restore();
 
-                // Bottom Trendline Floor
-                ctx.save();
-                ctx.strokeStyle = tl.is_broken ? `${botColor}77` : botColor;
-                ctx.lineWidth = (tl.is_broken ? 1.2 : 1.8) * hr;
-                if (tl.is_broken) {
-                  ctx.setLineDash([5 * hr, 3 * hr]);
-                }
+                // Companion bottom line
+                ctx.strokeStyle = tl.is_broken ? `${botColor}55` : `${botColor}aa`;
+                ctx.lineWidth = (tl.is_broken ? 1.0 : 1.5) * hr;
+                ctx.setLineDash(tl.is_broken ? [4 * hr, 3 * hr] : [5 * hr, 3 * hr]);
                 ctx.beginPath();
                 ctx.moveTo(x1, botY1);
                 ctx.lineTo(x2, botY2);
+                if (extX > x2) {
+                  ctx.lineTo(extX, botExtY);
+                }
                 ctx.stroke();
                 ctx.restore();
-
-                if (extX > x2) {
-                  ctx.save();
-                  ctx.strokeStyle = tl.is_broken ? `${botColor}44` : `${botColor}99`;
-                  ctx.lineWidth = 1.1 * hr;
-                  ctx.setLineDash([3 * hr, 3 * hr]);
-                  ctx.beginPath();
-                  ctx.moveTo(x2, botY2);
-                  ctx.lineTo(extX, botExtY);
-                  ctx.stroke();
-                  ctx.restore();
-                }
               }
             } else if (tl.side === "low" && tl.channel_high != null) {
-              const yChanCoord = series.priceToCoordinate(tl.channel_high);
-              if (yChanCoord !== null) {
-                const topY1 = yChanCoord * vr;
+              const yChan = series.priceToCoordinate(tl.channel_high);
+              if (yChan !== null) {
+                const topY1 = yChan * vr;
                 const dy = topY1 - y1;
                 const topY2 = y2 + dy;
                 const topExtY = extY + dy;
-                const topColor = tl.kind === "descending" ? "#f43f5e" : "#f59e0b";
+                const topColor = tl.kind === "ascending" ? "#f59e0b" : "#f43f5e";
 
-                // Channel corridor shading
+                // Channel corridor fill
                 ctx.save();
-                ctx.fillStyle = this.isDark ? "rgba(245, 158, 11, 0.04)" : "rgba(245, 158, 11, 0.04)";
+                ctx.fillStyle = this.isDark ? "rgba(16, 185, 129, 0.04)" : "rgba(16, 185, 129, 0.04)";
                 ctx.beginPath();
                 ctx.moveTo(x1, y1);
                 ctx.lineTo(Math.max(x2, extX), extY);
@@ -558,34 +510,116 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
                 ctx.lineTo(x1, topY1);
                 ctx.closePath();
                 ctx.fill();
-                ctx.restore();
 
-                // Top Trendline Ceiling
-                ctx.save();
-                ctx.strokeStyle = tl.is_broken ? `${topColor}77` : topColor;
-                ctx.lineWidth = (tl.is_broken ? 1.2 : 1.8) * hr;
-                if (tl.is_broken) {
-                  ctx.setLineDash([5 * hr, 3 * hr]);
-                }
+                // Companion top line
+                ctx.strokeStyle = tl.is_broken ? `${topColor}55` : `${topColor}aa`;
+                ctx.lineWidth = (tl.is_broken ? 1.0 : 1.5) * hr;
+                ctx.setLineDash(tl.is_broken ? [4 * hr, 3 * hr] : [5 * hr, 3 * hr]);
                 ctx.beginPath();
                 ctx.moveTo(x1, topY1);
                 ctx.lineTo(x2, topY2);
+                if (extX > x2) {
+                  ctx.lineTo(extX, topExtY);
+                }
                 ctx.stroke();
                 ctx.restore();
-
-                if (extX > x2) {
-                  ctx.save();
-                  ctx.strokeStyle = tl.is_broken ? `${topColor}44` : `${topColor}99`;
-                  ctx.lineWidth = 1.1 * hr;
-                  ctx.setLineDash([3 * hr, 3 * hr]);
-                  ctx.beginPath();
-                  ctx.moveTo(x2, topY2);
-                  ctx.lineTo(extX, topExtY);
-                  ctx.stroke();
-                  ctx.restore();
-                }
               }
             }
+
+            // 2. Draw Primary Confirmed Trendline Anchor Segment
+            ctx.save();
+            ctx.strokeStyle = tl.is_broken ? `${tlColor}88` : tlColor;
+            ctx.lineWidth = (tl.is_broken ? 1.5 : 2.2) * hr;
+            if (tl.is_broken) {
+              ctx.setLineDash([6 * hr, 3 * hr]);
+            }
+            ctx.beginPath();
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+            ctx.stroke();
+            ctx.restore();
+
+            // 3. Confirmed Touch Nodes (Anchor 1 & Anchor 2)
+            for (const [ptX, ptY] of [[x1, y1], [x2, y2]]) {
+              ctx.save();
+              ctx.fillStyle = tlColor;
+              ctx.beginPath();
+              ctx.arc(ptX, ptY, 3.2 * hr, 0, Math.PI * 2);
+              ctx.fill();
+              ctx.strokeStyle = this.isDark ? "#121418" : "#ffffff";
+              ctx.lineWidth = 1.2 * hr;
+              ctx.stroke();
+              ctx.restore();
+            }
+
+            // 4. Forward Dynamic Projection Ray
+            if (extX > x2) {
+              ctx.save();
+              ctx.strokeStyle = tl.is_broken ? `${tlColor}44` : `${tlColor}cc`;
+              ctx.lineWidth = (tl.is_broken ? 1.2 : 1.8) * hr;
+              ctx.setLineDash([4 * hr, 3 * hr]);
+              ctx.beginPath();
+              ctx.moveTo(x2, y2);
+              ctx.lineTo(extX, extY);
+              ctx.stroke();
+              ctx.restore();
+
+              // Break marker badge if line was violated
+              if (tl.is_broken && xBreakPx !== null && xBreakPx > x2) {
+                const breakY = y2 + p.slopePx * (xBreakPx - x2);
+                ctx.save();
+                ctx.fillStyle = "#ef4444";
+                ctx.beginPath();
+                ctx.arc(xBreakPx, breakY, 3.5 * hr, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.strokeStyle = "#ffffff";
+                ctx.lineWidth = 1 * hr;
+                ctx.stroke();
+
+                ctx.font = `bold ${8 * vr}px ui-sans-serif, system-ui, sans-serif`;
+                const breakTag = "✕ BREAK";
+                const btw = ctx.measureText(breakTag).width + 6 * hr;
+                const bth = 12 * vr;
+                const btx = xBreakPx - btw / 2;
+                const bty = tl.side === "high" ? breakY - bth - 4 * vr : breakY + 4 * vr;
+
+                ctx.fillStyle = this.isDark ? "#7f1d1d" : "#fee2e2";
+                ctx.strokeStyle = "#ef4444";
+                ctx.lineWidth = 1 * hr;
+                ctx.beginPath();
+                ctx.roundRect?.(btx, bty, btw, bth, 2.5 * hr);
+                ctx.fill();
+                ctx.stroke();
+
+                ctx.fillStyle = this.isDark ? "#fca5a5" : "#b91c1c";
+                ctx.textBaseline = "middle";
+                ctx.fillText(breakTag, btx + 3 * hr, bty + bth / 2);
+                ctx.restore();
+              }
+            }
+
+            // 5. Trendline Label Pill Badge (Placed cleanly along the line near x2)
+            ctx.save();
+            ctx.font = `600 ${8.5 * vr}px ui-sans-serif, system-ui, sans-serif`;
+            const badgeText = tl.label || `${style.label} (${tl.touch_count ?? 3}T)`;
+            const bw = ctx.measureText(badgeText).width + 8 * hr;
+            const bh = 13 * vr;
+            const badgeX = Math.max(x1 + 10 * hr, Math.min(x2 - bw / 2, extX - bw - 10 * hr));
+            const badgeBaseY = y1 + p.slopePx * (badgeX + bw / 2 - x1);
+            const badgeY = tl.side === "high" ? badgeBaseY - bh - 4 * vr : badgeBaseY + 4 * vr;
+
+            ctx.fillStyle = this.isDark ? `${tlColor}22` : style.badgeBg;
+            ctx.strokeStyle = tlColor;
+            ctx.lineWidth = 1 * hr;
+            ctx.beginPath();
+            ctx.roundRect?.(badgeX, badgeY, bw, bh, 3 * hr);
+            ctx.fill();
+            ctx.stroke();
+
+            ctx.fillStyle = this.isDark ? "#ffffff" : style.badgeText;
+            ctx.textBaseline = "middle";
+            ctx.fillText(badgeText, badgeX + 4 * hr, badgeY + bh / 2);
+            ctx.restore();
           }
         }
 

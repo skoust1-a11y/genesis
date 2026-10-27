@@ -275,4 +275,38 @@ def test_scan_trendline_reversal():
     assert "trendline breakdown" in message(sigs[0], get_settings())
 
 
+def test_reentry_suggestion_conditions():
+    from app.liquidity_signals import scan_retest
+
+    def bar(t, o, h, l, c):
+        return {"date": f"2026-10-14 {t}", "open": o, "high": h, "low": l, "close": c}
+
+    # Setup 1 triggers and then stops out.
+    # Later, Setup 2 forms after cooldown and higher low -> triggers Re-entry
+    day = [
+        bar("09:15", 150, 160, 148, 158),
+        bar("09:20", 158, 175, 155, 172),
+        bar("09:25", 172, 192, 170, 190),
+        bar("09:30", 190, 205, 188, 202), # Breakout
+        bar("09:35", 202, 203, 198, 199), # Retest
+        bar("09:40", 199, 210, 198, 208), # Attempt 1 Entry: entry=208, stop=193
+        bar("09:45", 208, 209, 190, 191), # Stops out (low 190 < stop 193)
+        bar("09:50", 191, 195, 190, 194), # Cooldown bar 1
+        bar("09:55", 194, 198, 192, 197), # Cooldown bar 2
+        bar("10:00", 197, 201, 195, 200), # Cooldown bar 3
+        bar("10:05", 200, 204, 198, 201), # Pullback tests 200 with higher low (198 > 190)
+        bar("10:10", 201, 212, 200, 210), # Attempt 2 (Re-entry) triggers: c=210 > 200
+    ]
+    above = {x["date"]: True for x in day}
+    sigs = scan_retest(day, above, pdh=200.0, pdl=100.0, min_risk=10.0, allow_reentry=True, skip_lunch=False)
+    assert len(sigs) == 2
+    assert sigs[0]["attempt"] == 1
+    assert sigs[0]["is_reentry"] is False
+    assert sigs[1]["attempt"] == 2
+    assert sigs[1]["is_reentry"] is True
+    assert "(Re-Entry)" in sigs[1]["pool"]
+    assert "RE-ENTRY SUGGESTION (Attempt 2)" in message(sigs[1], get_settings())
+
+
+
 

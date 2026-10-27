@@ -33,6 +33,21 @@ type StrategyCatalogItem = {
   gaps?: string[];
   created_at?: string | null;
   latest_report_id?: string | null;
+  video_details?: VideoDetails | null;
+};
+
+type VideoTimestamp = {
+  time: string;
+  label: string;
+};
+
+type VideoDetails = {
+  title: string;
+  channel_or_speaker?: string;
+  url?: string;
+  duration?: string;
+  timestamps?: VideoTimestamp[];
+  notes?: string[];
 };
 
 type ForensicWeakness = {
@@ -111,6 +126,26 @@ type ReviewReport = {
   };
 };
 
+function cleanStrategySpecification(raw?: string | null): string {
+  if (!raw) return "";
+  let text = raw;
+  // Remove HTML source comment tags like <!-- source: [93:30] -->
+  text = text.replace(/<!--\s*source:[^>]*-->/gi, "");
+  // Remove [xx:xx] or [xx:xx:xx] timestamps
+  text = text.replace(/\[\d{1,3}:\d{2}(?::\d{2})?\]/g, "");
+  // Remove YAML frontmatter fields related to videos
+  text = text.replace(/^\s*source_youtube:.*$/gim, "");
+  text = text.replace(/^\s*source_title:.*$/gim, "");
+  text = text.replace(/^\s*instruments_in_source:\s*\n(?:\s*-\s*.*\n?)*/gim, "");
+  text = text.replace(/^\s*instruments_in_source:.*$/gim, "");
+  // Remove inline mentions like (from the video) or video [...]
+  text = text.replace(/\s*\((?:from the video|as the video)\)/gi, "");
+  text = text.replace(/\bvideo\s*\[\d+:\d+\]/gi, "");
+  // Clean up empty lines
+  text = text.replace(/\n{3,}/g, "\n\n");
+  return text.trim();
+}
+
 export default function StrategiesPage() {
   const [catalog, setCatalog] = useState<StrategyCatalogItem[]>([]);
   const [loadingCatalog, setLoadingCatalog] = useState(true);
@@ -143,7 +178,7 @@ export default function StrategiesPage() {
         if (res.catalog?.length > 0) {
           setSelectedStrategy(res.catalog[0]);
           setAnalyzerStrategyId(res.catalog[0].id);
-          setStrategyInputText(res.catalog[0].markdown || "");
+          setStrategyInputText(cleanStrategySpecification(res.catalog[0].markdown || ""));
         }
       } catch (err) {
         console.error("Failed to load strategy catalog:", err);
@@ -183,7 +218,7 @@ export default function StrategiesPage() {
   function handleSelectForAnalysis(strat: StrategyCatalogItem) {
     setSelectedStrategy(strat);
     setAnalyzerStrategyId(strat.id);
-    setStrategyInputText(strat.markdown || "");
+    setStrategyInputText(cleanStrategySpecification(strat.markdown || ""));
     setActiveTab("analyzer");
     setAnalysisResult(null);
     setReviewReport(null);
@@ -483,16 +518,14 @@ export default function StrategiesPage() {
                       <span className="text-xs text-zinc-500">Version {selectedStrategy.current_version}</span>
                     </div>
                     <h2 className="text-xl font-semibold text-zinc-900 mt-1">{selectedStrategy.name}</h2>
-                    {selectedStrategy.source_url && (
-                      <a
-                        href={selectedStrategy.source_url}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="text-xs text-emerald-700 hover:underline mt-0.5 inline-block"
-                      >
-                        Source: {selectedStrategy.source}
-                      </a>
-                    )}
+                    {selectedStrategy.source &&
+                      !selectedStrategy.source_url?.includes("youtu") &&
+                      !selectedStrategy.source.toLowerCase().includes("video") &&
+                      !selectedStrategy.source.toLowerCase().includes("masterclass") && (
+                        <span className="text-xs text-zinc-500 mt-0.5 inline-block">
+                          Source: {selectedStrategy.source}
+                        </span>
+                      )}
                   </div>
 
                   <button
@@ -551,6 +584,68 @@ export default function StrategiesPage() {
                         </ul>
                       </div>
                     )}
+
+                    {/* Separate Video Details Section */}
+                    {selectedStrategy.video_details && (
+                      <div className="rounded-lg border bg-zinc-50 p-4 space-y-3">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-zinc-200/80 pb-2.5">
+                          <div className="flex items-center gap-2">
+                            <span className="flex h-5 w-5 items-center justify-center rounded bg-rose-600 text-white text-[10px] font-bold">
+                              ▶
+                            </span>
+                            <h4 className="text-xs font-semibold uppercase tracking-wider text-zinc-800">
+                              Source Video & Reference Details
+                            </h4>
+                          </div>
+                          {selectedStrategy.video_details.url && (
+                            <a
+                              href={selectedStrategy.video_details.url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="inline-flex items-center gap-1 self-start sm:self-auto rounded-md bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-700 hover:bg-rose-100 hover:text-rose-900 border border-rose-200 transition-colors"
+                            >
+                              <span>Watch Video on YouTube</span>
+                              <span>↗</span>
+                            </a>
+                          )}
+                        </div>
+
+                        <div className="text-xs text-zinc-700 flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <span className="font-semibold text-zinc-900">{selectedStrategy.video_details.title}</span>
+                          {selectedStrategy.video_details.channel_or_speaker && (
+                            <span className="text-zinc-500">
+                              Presenter: <strong className="text-zinc-700">{selectedStrategy.video_details.channel_or_speaker}</strong>
+                            </span>
+                          )}
+                          {selectedStrategy.video_details.duration && (
+                            <span className="text-zinc-500">
+                              Duration: <strong className="text-zinc-700">{selectedStrategy.video_details.duration}</strong>
+                            </span>
+                          )}
+                        </div>
+
+                        {selectedStrategy.video_details.timestamps && selectedStrategy.video_details.timestamps.length > 0 && (
+                          <div className="space-y-1.5 pt-1">
+                            <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">
+                              Key Video Timestamps & Rule References:
+                            </div>
+                            <div className="grid sm:grid-cols-2 gap-2">
+                              {selectedStrategy.video_details.timestamps.map((t, idx) => (
+                                <div
+                                  key={idx}
+                                  className="flex items-start gap-2 bg-white p-2 rounded border border-zinc-200 text-xs text-zinc-700"
+                                >
+                                  <span className="font-mono font-semibold text-rose-700 bg-rose-50 border border-rose-200/60 px-1.5 py-0.5 rounded text-[11px] whitespace-nowrap">
+                                    {t.time}
+                                  </span>
+                                  <span className="text-[11px] leading-tight text-zinc-700">{t.label}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
                   </div>
 
                   {/* Sidebar Metadata & Markdown */}
@@ -584,7 +679,7 @@ export default function StrategiesPage() {
                           <span className="text-[10px] text-zinc-500 font-mono">YAML + Markdown</span>
                         </div>
                         <pre className="text-[11px] font-mono text-zinc-700 bg-white p-3 rounded border overflow-x-auto max-h-48 scrollbar-thin">
-                          {selectedStrategy.markdown}
+                          {cleanStrategySpecification(selectedStrategy.markdown)}
                         </pre>
                       </div>
                     )}
@@ -617,7 +712,7 @@ export default function StrategiesPage() {
                       const id = e.target.value;
                       setAnalyzerStrategyId(id);
                       const found = catalog.find((c) => c.id === id);
-                      if (found && found.markdown) setStrategyInputText(found.markdown);
+                      if (found && found.markdown) setStrategyInputText(cleanStrategySpecification(found.markdown));
                     }}
                     className="rounded-md border border-zinc-300 bg-white px-3 py-1.5 text-xs text-zinc-900 focus:outline-none focus:ring-1 focus:ring-emerald-600"
                   >

@@ -21,10 +21,26 @@ RESEARCH_CATALOG: list[dict[str, Any]] = [
     {
         "id": "builtin-liquidity-sweep",
         "slug": "liquidity-sweep",
-        "name": "Liquidity Sweep Masterclass",
+        "name": "Liquidity Sweep Strategy",
         "category": "Liquidity Sweep / Reversal",
-        "source": "Gautam (163m Hindi Masterclass)",
-        "source_url": "https://youtu.be/8XNqCSiRZg4",
+        "source": "Institutional Price Action",
+        "source_url": "",
+        "video_details": {
+            "title": "Liquidity Masterclass (Hindi Live Session, 163 min)",
+            "channel_or_speaker": "Gautam",
+            "url": "https://youtu.be/8XNqCSiRZg4",
+            "duration": "163 min",
+            "timestamps": [
+                {"time": "75:45", "label": "Sweep Rule: Don't buy break of level, wait for sweep beyond"},
+                {"time": "76:18", "label": "Reversal Confirmation: Strong opposite absorption candle"},
+                {"time": "77:33", "label": "Entry Trigger: Close of confirmation candle or break of its high/low"},
+                {"time": "77:40", "label": "Stop Placement: 0.1% behind confirmation candle / sweep extreme"},
+                {"time": "93:30", "label": "Liquidity Concept: Retail panic stops cluster beyond swing highs/lows"},
+                {"time": "95:44", "label": "Timeframe Hierarchy: Higher timeframe levels yield higher accuracy"},
+                {"time": "115:15", "label": "Session Timing: Avoid 9:15 AM Indian market open chop"},
+                {"time": "136:26", "label": "Event-Level Reversals: 1H / 4H / Daily swing setups on 5m chart"},
+            ],
+        },
         "instruments": ["NIFTY Options", "BANKNIFTY", "Gold", "BTC"],
         "primary_instrument": "NIFTY Weekly Options (ATM Call/Put)",
         "timeframe": "Levels: 1H / 4H / Daily; Triggers: 1m / 5m",
@@ -58,8 +74,21 @@ RESEARCH_CATALOG: list[dict[str, Any]] = [
         "slug": "previous-day-breakout",
         "name": "Previous Day Breakout (5-Rule Framework)",
         "category": "Breakout / Trend Following",
-        "source": "Siddharth (Claude 5 Rules, Rs 10L BTC Futures)",
-        "source_url": "https://youtu.be/M8QHS7l69eQ",
+        "source": "5-Rule Breakout Framework",
+        "source_url": "",
+        "video_details": {
+            "title": "5 Rules I Gave Claude (30 Days of Bitcoin Futures, Rs 10 Lakh)",
+            "channel_or_speaker": "Siddharth",
+            "url": "https://youtu.be/M8QHS7l69eQ",
+            "duration": "Recorded Case Study",
+            "timestamps": [
+                {"time": "02:15", "label": "Core Level: Previous day's high & low (PDH/PDL)"},
+                {"time": "05:40", "label": "Strict Limit: At most 1 trade per day"},
+                {"time": "08:10", "label": "Pre-trade Discipline: Write down entry, SL, and target before executing"},
+                {"time": "12:30", "label": "Fixed Risk: Never move stops after entry; max 0.5% risk"},
+                {"time": "18:45", "label": "Psychological Circuit Breaker: 3-day mandatory cooldown after 3 consecutive losses"},
+            ],
+        },
         "instruments": ["NIFTY Weekly Options", "BTC Futures"],
         "primary_instrument": "NIFTY Weekly Options (ATM)",
         "timeframe": "Daily levels, 1m execution",
@@ -93,7 +122,18 @@ RESEARCH_CATALOG: list[dict[str, Any]] = [
         "name": "Liquidity Sweep Short Setup",
         "category": "Liquidity Sweep",
         "source": "Institutional Research Model",
-        "source_url": "https://youtu.be/8XNqCSiRZg4",
+        "source_url": "",
+        "video_details": {
+            "title": "Liquidity Sweep Short Setup (Gautam Masterclass)",
+            "channel_or_speaker": "Gautam",
+            "url": "https://youtu.be/8XNqCSiRZg4",
+            "duration": "163 min",
+            "timestamps": [
+                {"time": "76:18", "label": "Bear trap & panic absorption candle confirmation"},
+                {"time": "115:15", "label": "Skip 9:15 open"},
+                {"time": "128:51", "label": "Short entry trigger on confirmation low break"},
+            ],
+        },
         "instruments": ["NIFTY Weekly Options (Long Put)"],
         "primary_instrument": "NIFTY Weekly Long Put",
         "timeframe": "15m / 5m",
@@ -126,7 +166,18 @@ RESEARCH_CATALOG: list[dict[str, Any]] = [
         "name": "Liquidity Sweep Long Setup",
         "category": "Liquidity Sweep",
         "source": "Institutional Research Model",
-        "source_url": "https://youtu.be/8XNqCSiRZg4",
+        "source_url": "",
+        "video_details": {
+            "title": "Liquidity Sweep Long Setup (Gautam Masterclass)",
+            "channel_or_speaker": "Gautam",
+            "url": "https://youtu.be/8XNqCSiRZg4",
+            "duration": "163 min",
+            "timestamps": [
+                {"time": "76:18", "label": "Bull trap / panic flush absorption candle confirmation"},
+                {"time": "115:15", "label": "Skip 9:15 open"},
+                {"time": "136:26", "label": "Event-level reversals on 5m chart"},
+            ],
+        },
         "instruments": ["NIFTY Weekly Options (Long Call)"],
         "primary_instrument": "NIFTY Weekly Long Call",
         "timeframe": "15m / 5m",
@@ -219,7 +270,65 @@ RESEARCH_CATALOG: list[dict[str, Any]] = [
             "Filtering with low ADX (<20) significantly boosted profit factor.",
         ],
     },
+    {
+        "id": "builtin-trendline-breakout",
+        "slug": "trendline-breakout",
+        "name": "3rd-Point Trendline Breakout (Higher Timeframe)",
+        "category": "Trendline Reversal / Liquidity Trap",
+        "source": "Genesis Liquidity Research Lab",
+        "source_url": "",
+        "video_details": None,
+        "instruments": ["NIFTY Weekly Options (ATM CE/PE)"],
+        "primary_instrument": "NIFTY Weekly Options (ATM CE/PE)",
+        "timeframe": "5m structure, optional 1m execution",
+        "status": "Backtested & Live",
+        "verdict_badge": "High Edge (PF 3.32)",
+        "file_name": "trendline-breakout.md",
+        "win_rate": 0.479,
+        "net_pnl_inr": 169412,
+        "profit_factor": 3.32,
+        "max_drawdown_inr": 28500,
+        "trades_count": 71,
+        "risk_reward": "1:2.5 to 1:3.0",
+        "thesis": (
+            "At the 3rd point of a mature 5m trendline, retail orders cluster to play the continuation bounce. "
+            "A clean breakout/breakdown beyond the line triggers massive stop-loss cascades. "
+            "Entering on the 5m close (or 1m micro-trigger at the line) captures asymmetric trend reversals."
+        ),
+        "key_rules": {
+            "entry": "5m candle closes strictly outside trendline (slope >= 0.5) with color alignment (Red for short, Green for long).",
+            "exit": "Staged exits: +1R move SL to Breakeven, +2R book 50% lots, +3R exit runner; intraday square-off at 15:10 IST.",
+            "risk": "Risk capped at 15-65 index points; max 5% capital per trade; max 1 trade per direction per day; 3-day cooldown on 3 losses.",
+        },
+        "tested_findings": [
+            "Generated +807.8 index points (+21.12 R) across 60 days of 5m NIFTY data.",
+            "Adding RSI trendline or overbought filters destroys edge (dropping profit to -116 pts).",
+            "Waiting for a 2nd confirmation candle (C2) collapsed win rate to 25% (-314 pts); C1 close IS the confirmation.",
+            "1m micro-trigger at the 5m line reduces stop loss risk by up to 66% (e.g. 15 pts vs 45 pts).",
+        ],
+    },
 ]
+
+
+def sanitize_strategy_specification(text: str) -> str:
+    """Strip all video details, YouTube links, and video timestamps so only strategy rules/thesis remain."""
+    if not text:
+        return ""
+    # Strip HTML comment tags referencing source / timestamps
+    text = re.sub(r'<!--\s*source:[^>]*-->', '', text, flags=re.IGNORECASE)
+    # Strip video timestamps like [93:30] or [1:23:45]
+    text = re.sub(r'\[\d{1,3}:\d{2}(?::\d{2})?\]', '', text)
+    # Strip YAML frontmatter fields for video / youtube
+    text = re.sub(r'^\s*source_youtube:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^\s*source_title:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^\s*instruments_in_source:\s*\n(?:\s*-\s*.*\n?)*', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    text = re.sub(r'^\s*instruments_in_source:.*$', '', text, flags=re.MULTILINE | re.IGNORECASE)
+    # Strip inline video references
+    text = re.sub(r'\s*\((?:from the video|as the video)\)', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\bvideo\s*\[\d+:\d+\]', '', text, flags=re.IGNORECASE)
+    # Clean excessive empty lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 def load_markdown_content(file_name: str) -> str:
@@ -238,17 +347,28 @@ def load_markdown_content(file_name: str) -> str:
 
 def seed_research_catalog(db: Session) -> None:
     store = StrategyStore(db)
-    existing_names = {s.name for s in store.list()}
+    strategies_by_name = {s.name: s for s in store.list()}
     for item in RESEARCH_CATALOG:
         slug = item["slug"]
-        if slug in existing_names:
-            continue
         md = load_markdown_content(item["file_name"])
-        if md and md.strip().startswith("---"):
+        if not md or not md.strip().startswith("---"):
+            continue
+        clean_md = sanitize_strategy_specification(md)
+        if slug not in strategies_by_name:
             try:
-                store.save(md)
+                store.save(clean_md)
+                db.commit()
             except Exception:
-                pass
+                db.rollback()
+        else:
+            strat = strategies_by_name[slug]
+            latest = store.latest_version(strat.id)
+            if latest and ("source_youtube" in latest.markdown or "<!-- source:" in latest.markdown):
+                try:
+                    store.save(clean_md, strategy_id=strat.id)
+                    db.commit()
+                except Exception:
+                    db.rollback()
 
 
 def get_full_strategy_catalog(db: Session) -> list[dict[str, Any]]:
@@ -284,8 +404,9 @@ def get_full_strategy_catalog(db: Session) -> list[dict[str, Any]]:
             "slug": slug,
             "name": builtin_info.get("name") or (doc.name if doc else strat.name),
             "category": builtin_info.get("category") or "Strategy",
-            "source": builtin_info.get("source") or (doc.frontmatter.get("source_title") if doc else "Custom"),
-            "source_url": builtin_info.get("source_url") or (doc.frontmatter.get("source_youtube") if doc else ""),
+            "source": builtin_info.get("source") or "Institutional Model",
+            "source_url": builtin_info.get("source_url") or "",
+            "video_details": builtin_info.get("video_details"),
             "primary_instrument": builtin_info.get("primary_instrument")
             or (doc.frontmatter.get("underlying", "NIFTY") if doc else "NIFTY"),
             "timeframe": builtin_info.get("timeframe") or "Intraday / Multi-day",
@@ -310,7 +431,7 @@ def get_full_strategy_catalog(db: Session) -> list[dict[str, Any]]:
                 "risk": doc.risk[0] if doc and doc.risk else "Defined in markdown",
             },
             "tested_findings": builtin_info.get("tested_findings", []),
-            "markdown": version.markdown if version else "",
+            "markdown": sanitize_strategy_specification(version.markdown) if version else "",
             "has_rules": bool(doc and doc.rules) if doc else False,
             "gaps": doc.gaps if doc else [],
             "created_at": strat.created_at.isoformat() if strat.created_at else None,
@@ -322,7 +443,8 @@ def get_full_strategy_catalog(db: Session) -> list[dict[str, Any]]:
     for item in RESEARCH_CATALOG:
         if not any(x["slug"] == item["slug"] for x in out):
             md = load_markdown_content(item["file_name"])
-            out.append({**item, "markdown": md, "current_version": 1, "has_rules": False, "gaps": []})
+            clean_md = sanitize_strategy_specification(md)
+            out.append({**item, "markdown": clean_md, "current_version": 1, "has_rules": False, "gaps": []})
 
     return out
 

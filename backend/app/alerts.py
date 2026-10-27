@@ -85,11 +85,32 @@ def send_signal(settings: Settings, subject: str, body: str) -> list[str]:
     return send(settings, subject, body, chat_id=signal_chat_id(settings))
 
 
-def send_photo(settings: Settings, caption: str, png: bytes, chat_id: str | None = None) -> bool:
-    """A chart to Telegram (email gets only the text alert); like `send`, a failure is logged, never raised."""
+def send_telegram_signal(settings: Settings, text: str, reply_to_message_id: int | None = None) -> int | None:
+    """Delivers a formatted Markdown message to Telegram signals channel and returns the message_id for threading."""
+    target_chat = signal_chat_id(settings)
+    if not (settings.alert_telegram_bot_token and target_chat):
+        return None
+    try:
+        payload: dict[str, object] = {"chat_id": target_chat, "text": text[:4000], "parse_mode": "Markdown"}
+        if reply_to_message_id:
+            payload["reply_to_message_id"] = reply_to_message_id
+        res = httpx.post(
+            f"https://api.telegram.org/bot{settings.alert_telegram_bot_token}/sendMessage",
+            json=payload,
+            timeout=10,
+        )
+        if res.status_code == 200:
+            return res.json().get("result", {}).get("message_id")
+    except Exception as exc:
+        log.error("send_telegram_signal failed: %s: %s", type(exc).__name__, exc)
+    return None
+
+
+def send_photo(settings: Settings, caption: str, png: bytes, chat_id: str | None = None) -> int | None:
+    """A chart to Telegram; returns message_id if sent successfully, None otherwise."""
     target_chat = chat_id or settings.alert_telegram_chat_id
     if not (settings.alert_telegram_bot_token and target_chat):
-        return False
+        return None
     try:
         response = httpx.post(
             f"https://api.telegram.org/bot{settings.alert_telegram_bot_token}/sendPhoto",
@@ -97,15 +118,20 @@ def send_photo(settings: Settings, caption: str, png: bytes, chat_id: str | None
             files={"photo": ("chart.png", png, "image/png")},
             timeout=30,
         )
-        response.raise_for_status()
-        return True
+        if hasattr(response, "raise_for_status"):
+            response.raise_for_status()
+        status = getattr(response, "status_code", 200)
+        if status == 200:
+            result = response.json().get("result", {}) if hasattr(response, "json") else {}
+            msg_id = result.get("message_id") if isinstance(result, dict) else None
+            return msg_id if msg_id is not None else True
     except Exception as exc:
         log.error("photo via telegram failed: %s: %s", type(exc).__name__, exc)
-        return False
+    return None
 
 
-def send_signal_photo(settings: Settings, caption: str, png: bytes) -> bool:
-    """Send a trade signal chart to the dedicated signals channel."""
+def send_signal_photo(settings: Settings, caption: str, png: bytes) -> int | None:
+    """Send a trade signal chart to the dedicated signals channel, returning message_id."""
     return send_photo(settings, caption, png, chat_id=signal_chat_id(settings))
 
 

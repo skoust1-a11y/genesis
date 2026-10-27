@@ -106,9 +106,11 @@ def days_between(start: str, end: str) -> int:
     return (date.fromisoformat(end) - date.fromisoformat(start)).days
 
 
-def choose_expiry(day: str, expiries: Iterable[str], dte_window: tuple[int, int] | None) -> str | None:
+def choose_expiry(day: str, expiries: Iterable[str], dte_window: tuple[int, int] | None, min_dte: int = 1) -> str | None:
     """The nearest expiry inside the strategy's DTE window, else the nearest one after today."""
-    ahead = sorted(e for e in expiries if days_between(day, e) >= 1)
+    if dte_window and dte_window[0] < min_dte:
+        min_dte = dte_window[0]
+    ahead = sorted(e for e in expiries if days_between(day, e) >= min_dte)
     if not ahead:
         return None
     if dte_window:
@@ -116,7 +118,8 @@ def choose_expiry(day: str, expiries: Iterable[str], dte_window: tuple[int, int]
         inside = [e for e in ahead if lo <= days_between(day, e) <= hi]
         if inside:
             return inside[0]
-    return ahead[0]
+    fallback = [e for e in ahead if days_between(day, e) >= 1]
+    return fallback[0] if fallback else ahead[0]
 
 
 def snapshot_age_seconds(snapshot: MarketSnapshot, now: datetime) -> float:

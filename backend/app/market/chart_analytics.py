@@ -855,20 +855,19 @@ def detect_trendlines_and_channels(
                         conflict = True
                         break
 
-                # B. Check if active same-side lines of same kind cross each other with substantial active overlap
-                if cand.kind == acc.kind:
-                    m1, m2 = cand.slope, acc.slope
-                    if abs(m1 - m2) > 1e-5:
-                        c1 = cand.start_price - m1 * cand.start_index
-                        c2 = acc.start_price - m2 * acc.start_index
-                        xc = (c2 - c1) / (m1 - m2)
-                        s1 = cand.start_index
-                        e1 = cand.break_index if (cand.is_broken and cand.break_index) else total_bars + 10
-                        s2 = acc.start_index
-                        e2 = acc.break_index if (acc.is_broken and acc.break_index) else total_bars + 10
-                        if max(s1, s2) + 3 <= xc <= min(e1, e2) - 3:
-                            conflict = True
-                            break
+                # B. Check if same-side lines cross each other within their active span
+                m1, m2 = cand.slope, acc.slope
+                if abs(m1 - m2) > 1e-5:
+                    c1 = cand.start_price - m1 * cand.start_index
+                    c2 = acc.start_price - m2 * acc.start_index
+                    xc = (c2 - c1) / (m1 - m2)
+                    s1 = cand.start_index
+                    e1 = cand.break_index if (cand.is_broken and cand.break_index) else total_bars + 10
+                    s2 = acc.start_index
+                    e2 = acc.break_index if (acc.is_broken and acc.break_index) else total_bars + 10
+                    if max(s1, s2) <= xc <= min(e1, e2):
+                        conflict = True
+                        break
         if not conflict:
             kept_tls.append(cand)
 
@@ -883,7 +882,7 @@ def detect_trendlines_and_channels(
                     c2 = t2.start_price - m2 * t2.start_index
                     xc = (c2 - c1) / (m1 - m2)
                     yc = c1 + m1 * xc
-                    if xc >= max(t1.end_index, t2.end_index) and xc <= total_bars + 50:
+                    if xc >= min(t1.end_index, t2.end_index) and xc <= total_bars + 100:
                         apex_idx = int(xc)
                         apex_p = round(yc, 2)
                         t1.apex_index = min(t1.apex_index or 999999, apex_idx)

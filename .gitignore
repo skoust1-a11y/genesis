@@ -9,6 +9,7 @@ backend/logs/
 logs/
 *.log
 **/*.log
+*.pid
 backend/data/intraday/
 backend/data/nse/raw/
 backend/research/
@@ -35,3 +36,5 @@ sample telegram data from others/
 **/.DS_Store
 backend/*.png
 backend/sample_message.txt
+trades/.*
+*_backup.py

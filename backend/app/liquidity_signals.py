@@ -58,6 +58,7 @@ MIN_RISK = 30  # pts: over 2016-2026 setups with a closer stop earned nothing af
 RISK_PCT, LOSS_STREAK, BREAK_DAYS, EXIT = 5, 3, 3, "15:10"
 MIN_VIX, MAX_VIX, STAGNATION_BARS = 11.5, 22.0, 18  # 18 bars = 90 min max stagnation before cutting midday chop
 BLACKOUT_START, BLACKOUT_END = "11:30", "13:00"  # Midday lunch lull blackout window to avoid chop
+REENTRY_BLACKOUT_START, REENTRY_BLACKOUT_END = "13:00", "13:30"  # Transition fakeout zone that causes double stop-outs
 
 
 def _at(date: str, minutes: int) -> str:
@@ -205,6 +206,9 @@ def scan_retest(
     min_breakout: float = 2.0,
     max_retest_depth: float = 25.0,
     skip_lunch: bool = True,
+    candle_confirmation: bool = False,
+    allow_reentry: bool = False,
+    bar_minutes: int = 5,
 ) -> list[dict]:
     """Entries for Breakout & Support/Resistance Retests past PDH/PDL:
     - Long (Buy CE): 5m breaks above PDH + min_breakout -> subsequent 5m pullback tests PDH zone (within max_retest_depth)
@@ -213,19 +217,40 @@ def scan_retest(
     - Short (Buy PE): 5m breaks below PDL - min_breakout -> subsequent 5m pullback tests PDL zone (from below)
       and holds -> 5m candle closes red below PDL, below VWAP and below Open.
       Stop: 5 pts above the retest pullback high.
+    - candle_confirmation: Enforces Ross Cameron candle-over-candle breakout & wick rejection filter.
+    - allow_reentry: Allows a single condition-matched re-entry (Attempt 2) if first trade stopped out.
+    - bar_minutes: Candle duration in minutes (e.g. 5 for 5m, 1 for 1m).
     Target: 3R."""
     if not bars:
         return []
+    if bar_minutes <= 2 and min_risk == MIN_RISK:
+        min_risk = 10.0
     day_open, out = bars[0]["open"], []
     for side in ("Long", "Short"):
         long = side == "Long"
         level = pdh if long else pdl
         stage, retest_extreme, why = 0, 0.0, []
+        entries_taken = 0
+        active_stop_time = ""
+        stop_extreme = 0.0
+        stop_bar_idx = -1
+        max_entries = 2 if allow_reentry else 1
+
         for i, b in enumerate(bars):
+            if entries_taken >= max_entries:
+                break
             c = b["close"]
-            closes_at = _at(b["date"], 5)
+            closes_at = _at(b["date"], bar_minutes)
             if closes_at[11:] > LAST_ENTRY:
                 break
+
+            # Enforce cooldown of at least 15 mins after stop-out before re-entry
+            cooldown_bars = max(1, 15 // bar_minutes)
+            if active_stop_time:
+                if b["date"] <= active_stop_time or (i - stop_bar_idx) < cooldown_bars:
+                    continue
+                if REENTRY_BLACKOUT_START <= closes_at[11:] <= REENTRY_BLACKOUT_END:
+                    continue
 
             if stage == 0:
                 if (long and b["high"] >= level + min_breakout and c > day_open) or (
@@ -261,37 +286,82 @@ def scan_retest(
                 )
                 if not confirmed:
                     continue
+
+                prev_b = bars[i - 1] if i > 0 else b
+
+                # Ross Cameron Candle-Over-Candle Confirmation Trigger
+                if candle_confirmation:
+                    candle_break = (long and b["high"] > prev_b["high"]) or (not long and b["low"] < prev_b["low"])
+                    if not candle_break:
+                        continue
+                    body = abs(c - b["open"])
+                    if long:
+                        upper_wick = b["high"] - max(b["open"], c)
+                        if upper_wick > max(body * 1.5, 4.0):
+                            continue
+                    else:
+                        lower_wick = min(b["open"], c) - b["low"]
+                        if lower_wick > max(body * 1.5, 4.0):
+                            continue
+
+                is_reentry = entries_taken > 0
+                if is_reentry:
+                    # Strict Re-entry Condition: Must form higher low (Long) or lower high (Short) vs shakeout
+                    if long and b["low"] <= stop_extreme:
+                        continue
+                    if not long and b["high"] >= stop_extreme:
+                        continue
+
                 if closes_at[11:] < FIRST_ENTRY:
                     continue
                 if skip_lunch and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
                     continue
 
                 stop = (retest_extreme - 5.0) if long else (retest_extreme + 5.0)
+                stop_basis = f"retest {'low' if long else 'high'} {retest_extreme:,.2f} {'-' if long else '+'} 5"
                 risk = abs(c - stop)
                 if risk >= min_risk:
                     target = c + R_MULT * risk if long else c - R_MULT * risk
-                    why.append(
-                        f"{closes_at[11:]} confirmation: 5m close {c:,.2f} held {'above PDH' if long else 'below PDL'} and VWAP"
-                    )
-                    out.append(
-                        {
-                            "side": side,
-                            "strategy": "retest",
-                            "pool": f"PD{'H Support' if long else 'L Resistance'} Flip",
-                            "time": closes_at,
-                            "entry": c,
-                            "stop": round(stop, 2),
-                            "target": round(target, 2),
-                            "risk": round(risk, 2),
-                            "level": level,
-                            "why": why,
-                            "stop_basis": f"retest {'low' if long else 'high'} {retest_extreme:,.2f} {'-' if long else '+'} 5",
-                            "candle": b,
-                            "day_open": day_open,
-                        }
-                    )
-                    break
+                    reentry_label = " (Re-Entry)" if is_reentry else ""
+                    why_msg = f"{closes_at[11:]} confirmation: 5m close {c:,.2f} held {'above PDH' if long else 'below PDL'} and VWAP"
+                    if is_reentry:
+                        why_msg += f" (Re-entry after shakeout; higher {'low' if long else 'high'} held)"
+                    why.append(why_msg)
+                    sig = {
+                        "side": side,
+                        "strategy": "retest",
+                        "pool": f"PD{'H Support' if long else 'L Resistance'} Flip{reentry_label}",
+                        "time": closes_at,
+                        "entry": c,
+                        "stop": round(stop, 2),
+                        "target": round(target, 2),
+                        "risk": round(risk, 2),
+                        "level": level,
+                        "why": why,
+                        "stop_basis": stop_basis,
+                        "candle": b,
+                        "day_open": day_open,
+                        "is_reentry": is_reentry,
+                        "attempt": entries_taken + 1,
+                    }
+                    out.append(sig)
+                    entries_taken += 1
+
+                    if allow_reentry and entries_taken < max_entries:
+                        res = staged_exit_of(bars, sig, bar_minutes=bar_minutes)
+                        if res["r_multiple"] <= 0:
+                            active_stop_time = res["exit_time"]
+                            stop_bar_idx = next((k for k, x in enumerate(bars) if x["date"] >= active_stop_time), i)
+                            stop_extreme = min(x["low"] for x in bars[i : stop_bar_idx + 1]) if long else max(x["high"] for x in bars[i : stop_bar_idx + 1])
+                            stage = 1
+                        else:
+                            entries_taken = max_entries
+                            break
+                    else:
+                        entries_taken = max_entries
+                        break
     return out
+
 
 
 def scan_trendline_reversal(
@@ -300,30 +370,53 @@ def scan_trendline_reversal(
     skip_lunch: bool = True,
     min_risk: float = MIN_RISK,
     max_risk: float = 65.0,
+    candle_confirmation: bool = False,
+    allow_reentry: bool = False,
+    bar_minutes: int = 5,
 ) -> list[dict]:
     """Entries for Clean Trendline Reversals (Breakdowns below Ascending Support & Breakouts above Descending Resistance):
     - Short (Buy PE): Ascending trendline (slope >= min_slope). 5m candle closes below trendline with a red close (c < open).
       Stop: 5 pts above the recent breakdown swing high.
     - Long (Buy CE): Descending trendline (slope <= -min_slope). 5m candle closes above trendline with a green close (c > open).
       Stop: 5 pts below the recent breakout swing low.
+    - candle_confirmation: Enforces Ross Cameron candle-over-candle breakout & wick rejection filter.
+    - allow_reentry: Allows a single condition-matched re-entry (Attempt 2) if first trade stopped out.
+    - bar_minutes: Candle duration in minutes (e.g. 5 for 5m, 1 for 1m).
     Target: 3R."""
-    if len(bars) < 10:
+    if bar_minutes <= 2 and min_risk == MIN_RISK:
+        min_risk = 15.0
+    if len(bars) < max(10, 20 // bar_minutes):
         return []
     day_open, out = bars[0]["open"], []
 
     for side in ("Short", "Long"):
         long = side == "Long"
         key = "high" if long else "low"
-        triggered = False
+        entries_taken = 0
+        active_stop_time = ""
+        stop_extreme = 0.0
+        stop_bar_idx = -1
+        max_entries = 2 if allow_reentry else 1
 
-        for i in range(5, len(bars)):
+        for i in range(max(5, 10 // bar_minutes), len(bars)):
+            if entries_taken >= max_entries:
+                break
             b = bars[i]
-            closes_at = _at(b["date"], 5)
+            closes_at = _at(b["date"], bar_minutes)
             time_str = closes_at[11:]
             if time_str > LAST_ENTRY:
                 break
             if time_str < FIRST_ENTRY:
                 continue
+
+            # Enforce cooldown of at least 15 mins after stop-out before re-entry
+            cooldown_bars = max(1, 15 // bar_minutes)
+            if active_stop_time:
+                if b["date"] <= active_stop_time or (i - stop_bar_idx) < cooldown_bars:
+                    continue
+                if REENTRY_BLACKOUT_START <= time_str <= REENTRY_BLACKOUT_END:
+                    continue
+
             if skip_lunch and BLACKOUT_START <= time_str <= BLACKOUT_END:
                 continue
 
@@ -336,8 +429,9 @@ def scan_trendline_reversal(
             if len(piv) >= 3:
                 candidate_pairs.append((piv[-3], piv[-1]))
 
+            min_pivot_spacing = max(2, 15 // bar_minutes)
             for x1, x2 in candidate_pairs:
-                if x2 - x1 < 4:
+                if x2 - x1 < min_pivot_spacing:
                     continue
                 y1, y2 = bars[x1][key], bars[x2][key]
                 slope = (y2 - y1) / (x2 - x1)
@@ -347,6 +441,20 @@ def scan_trendline_reversal(
                     tl_val = y1 + slope * (i - x1)
                     tl_prev = y1 + slope * (i - 1 - x1)
                     if c < tl_val and bars[i - 1]["close"] >= tl_prev - 2.0 and c < b["open"]:
+                        prev_b = bars[i - 1] if i > 0 else b
+
+                        # Ross Cameron Confirmation Trigger
+                        if candle_confirmation:
+                            if b["low"] >= prev_b["low"]:
+                                continue
+                            body = abs(c - b["open"])
+                            if (min(b["open"], c) - b["low"]) > max(body * 1.5, 4.0):
+                                continue
+
+                        is_reentry = entries_taken > 0
+                        if is_reentry and b["high"] >= stop_extreme:
+                            continue  # Must form lower high!
+
                         violations = sum(
                             1 for k in range(x1 + 1, x2) if bars[k]["close"] < y1 + slope * (k - x1) - 3.0
                         )
@@ -356,36 +464,65 @@ def scan_trendline_reversal(
                         risk = stop - c
                         if min_risk <= risk <= max_risk:
                             target = c - R_MULT * risk
+                            reentry_label = " (Re-Entry)" if is_reentry else ""
                             why = [
-                                f"{time_str} trendline breakdown: 5m close {c:,.2f} below ascending line {tl_val:,.2f} (slope {slope:+.2f})",
+                                f"{time_str} trendline breakdown: 5m close {c:,.2f} below ascending line {tl_val:,.2f} (slope {slope:+.2f})"
+                                + (f" (Re-entry after shakeout; lower high held)" if is_reentry else ""),
                                 f"Anchored by swing lows at {bars[x1]['date'][11:]} ({y1:,.2f}) and {bars[x2]['date'][11:]} ({y2:,.2f})",
                             ]
-                            out.append(
-                                {
-                                    "side": "Short",
-                                    "strategy": "trendline_reversal",
-                                    "pool": "Trendline Breakdown",
-                                    "time": closes_at,
-                                    "entry": c,
-                                    "stop": round(stop, 2),
-                                    "target": round(target, 2),
-                                    "risk": round(risk, 2),
-                                    "level": round(tl_val, 2),
-                                    "why": why,
-                                    "stop_basis": f"breakdown swing high {stop - 5:,.2f} + 5",
-                                    "candle": b,
-                                    "day_open": day_open,
-                                    "trendline": (x1, y1, x2, y2),
-                                }
-                            )
-                            triggered = True
-                            break
+                            sig = {
+                                "side": "Short",
+                                "strategy": "trendline_reversal",
+                                "pool": f"Trendline Breakdown{reentry_label}",
+                                "time": closes_at,
+                                "entry": c,
+                                "stop": round(stop, 2),
+                                "target": round(target, 2),
+                                "risk": round(risk, 2),
+                                "level": round(tl_val, 2),
+                                "why": why,
+                                "stop_basis": f"breakdown swing high {stop - 5:,.2f} + 5",
+                                "candle": b,
+                                "day_open": day_open,
+                                "trendline": (x1, y1, x2, y2),
+                                "is_reentry": is_reentry,
+                                "attempt": entries_taken + 1,
+                            }
+                            out.append(sig)
+                            entries_taken += 1
+                            if allow_reentry and entries_taken < max_entries:
+                                res = staged_exit_of(bars, sig, bar_minutes=bar_minutes)
+                                if res["r_multiple"] <= 0:
+                                    active_stop_time = res["exit_time"]
+                                    stop_bar_idx = next((k for k, x in enumerate(bars) if x["date"] >= active_stop_time), i)
+                                    stop_extreme = max(x["high"] for x in bars[i : stop_bar_idx + 1])
+                                    break
+                                else:
+                                    entries_taken = max_entries
+                                    break
+                            else:
+                                entries_taken = max_entries
+                                break
 
                 # Long: descending trendline
                 elif long and slope <= -min_slope:
                     tl_val = y1 + slope * (i - x1)
                     tl_prev = y1 + slope * (i - 1 - x1)
                     if c > tl_val and bars[i - 1]["close"] <= tl_prev + 2.0 and c > b["open"]:
+                        prev_b = bars[i - 1] if i > 0 else b
+
+                        # Ross Cameron Confirmation Trigger
+                        if candle_confirmation:
+                            if b["high"] <= prev_b["high"]:
+                                continue
+                            body = abs(c - b["open"])
+                            if (b["high"] - max(b["open"], c)) > max(body * 1.5, 4.0):
+                                continue
+
+                        is_reentry = entries_taken > 0
+                        if is_reentry and b["low"] <= stop_extreme:
+                            continue  # Must form higher low!
+
                         violations = sum(
                             1 for k in range(x1 + 1, x2) if bars[k]["close"] > y1 + slope * (k - x1) + 3.0
                         )
@@ -395,33 +532,49 @@ def scan_trendline_reversal(
                         risk = c - stop
                         if min_risk <= risk <= max_risk:
                             target = c + R_MULT * risk
+                            reentry_label = " (Re-Entry)" if is_reentry else ""
                             why = [
-                                f"{time_str} trendline breakout: 5m close {c:,.2f} above descending line {tl_val:,.2f} (slope {slope:+.2f})",
+                                f"{time_str} trendline breakout: 5m close {c:,.2f} above descending line {tl_val:,.2f} (slope {slope:+.2f})"
+                                + (f" (Re-entry after shakeout; higher low held)" if is_reentry else ""),
                                 f"Anchored by swing highs at {bars[x1]['date'][11:]} ({y1:,.2f}) and {bars[x2]['date'][11:]} ({y2:,.2f})",
                             ]
-                            out.append(
-                                {
-                                    "side": "Long",
-                                    "strategy": "trendline_reversal",
-                                    "pool": "Trendline Breakout",
-                                    "time": closes_at,
-                                    "entry": c,
-                                    "stop": round(stop, 2),
-                                    "target": round(target, 2),
-                                    "risk": round(risk, 2),
-                                    "level": round(tl_val, 2),
-                                    "why": why,
-                                    "stop_basis": f"breakout swing low {stop + 5:,.2f} - 5",
-                                    "candle": b,
-                                    "day_open": day_open,
-                                    "trendline": (x1, y1, x2, y2),
-                                }
-                            )
-                            triggered = True
-                            break
-            if triggered:
+                            sig = {
+                                "side": "Long",
+                                "strategy": "trendline_reversal",
+                                "pool": f"Trendline Breakout{reentry_label}",
+                                "time": closes_at,
+                                "entry": c,
+                                "stop": round(stop, 2),
+                                "target": round(target, 2),
+                                "risk": round(risk, 2),
+                                "level": round(tl_val, 2),
+                                "why": why,
+                                "stop_basis": f"breakout swing low {stop + 5:,.2f} - 5",
+                                "candle": b,
+                                "day_open": day_open,
+                                "trendline": (x1, y1, x2, y2),
+                                "is_reentry": is_reentry,
+                                "attempt": entries_taken + 1,
+                            }
+                            out.append(sig)
+                            entries_taken += 1
+                            if allow_reentry and entries_taken < max_entries:
+                                res = staged_exit_of(bars, sig, bar_minutes=bar_minutes)
+                                if res["r_multiple"] <= 0:
+                                    active_stop_time = res["exit_time"]
+                                    stop_bar_idx = next((k for k, x in enumerate(bars) if x["date"] >= active_stop_time), i)
+                                    stop_extreme = min(x["low"] for x in bars[i : stop_bar_idx + 1])
+                                    break
+                                else:
+                                    entries_taken = max_entries
+                                    break
+                            else:
+                                entries_taken = max_entries
+                                break
+            if entries_taken >= max_entries:
                 break
     return out
+
 
 
 def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[dict] | None = None) -> str:
@@ -476,17 +629,24 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
         badge = "⚡ LIQUIDITY SWEEP"
         strat_name = "PDH/PDL Liquidity Sweep"
         setup_desc = f"{'sell-side sweep' if long else 'buy-side raid'} of {pool_tag}{s['level']:,.2f}"
+    tf = s.get("timeframe", "5m")
+    tf_label = tf.upper()
+    if s.get("is_reentry"):
+        badge += " 🔄 RE-ENTRY SUGGESTION (Attempt 2)"
+
     lines = [
         f"🚨 [{badge}]",
-        f"Strategy: {strat_name}",
+        f"Strategy: {strat_name}" + (" (Re-Entry)" if s.get("is_reentry") else ""),
+        f"⏱️ Timeframe: {tf_label}",
         f"NIFTY {s['side'].upper()} signal at {s['time'][11:]} IST ({setup_desc})",
+
         "",
         "TRADE (index)",
-        f"Entry {e:,.2f} (5m close) | Stop {s['stop']:,.2f} | Target {s['target']:,.2f}",
+        f"Entry {e:,.2f} ({tf} close) | Stop {s['stop']:,.2f} | Target {s['target']:,.2f}",
         f"Risk {s['risk']:.0f} pts ({s['risk'] / e:.2%}) | Reward {abs(s['target'] - e):.0f} pts | R:R 1:{abs(s['target'] - e) / s['risk']:.3g}",
         *([f"Stop basis: {s['stop_basis']}"] if s.get("stop_basis") else []),
         f"Move the stop to entry {e:,.2f} once price reaches {e + s['risk'] if long else e - s['risk']:,.2f} (+1R)",
-        f"Staged targets: T1 {e + s['risk'] if long else e - s['risk']:,.2f} (+1R: SL to BE) | T2 {e + 2 * s['risk'] if long else e - 2 * s['risk']:,.2f} (+2R: Book 50%, lock +1R) | T3 {s['target']:,.2f} (Runner: trail on 5m candle close reversal)",
+        f"Staged targets: T1 {e + s['risk'] if long else e - s['risk']:,.2f} (+1R: SL to BE) | T2 {e + 2 * s['risk'] if long else e - 2 * s['risk']:,.2f} (+2R: Book 50%, lock +1R) | T3 {s['target']:,.2f} (Runner: trail on {tf} candle close reversal)",
         "",
         "OPTION & SPREAD STRATEGY",
         *option_lines,
@@ -531,8 +691,10 @@ def option_plan(s: dict, settings: Settings, lots: int = 2, otm_steps: int = OTM
     try:
         snapshot = feed.snapshot("NIFTY")
         if snapshot is not None:
+            tf = s.get("timeframe", "5m")
+            hold_days = 0.02 if tf in ("1m", "2m") else 0.08
             plan = plan_pnl(snapshot, settings, "CE" if s["side"] == "Long" else "PE", strike_of(s, step, otm_steps=otm_steps),
-                            s["entry"], {"stop": s["stop"], "target": s["target"]}, lots=lots)  # fmt: skip
+                            s["entry"], {"stop": s["stop"], "target": s["target"]}, lots=lots, hold_days=hold_days)  # fmt: skip
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         print(f"option chain unavailable: {exc}")
     if plan is None:
@@ -739,6 +901,7 @@ def staged_exit_of(
     trail_on_close: bool = True,
     trail_trigger_r: float = 1.5,
     stagnation_bars: int = 0,
+    bar_minutes: int = 5,
 ) -> dict:
     """Evaluates staged exits:
     1. Breakeven: once price reaches +be_r (+1R), SL moves to entry from next bar.
@@ -764,16 +927,20 @@ def staged_exit_of(
     be_triggered = False
     trail_active = False
 
+    # Micro timeframe (1m/2m) noise protection: disable single-candle close trail unless explicitly wanted
+    if bar_minutes <= 2 and trail_on_close is True:
+        trail_on_close = False
+
     after = [b for b in day if b["date"] >= s["time"]]
     if not after:
         after = [day[-1]]
 
     reason = "Last bar"
     final_px = day[-1]["close"]
-    final_at = _at(day[-1]["date"], 5)
+    final_at = _at(day[-1]["date"], bar_minutes)
 
     for idx, b in enumerate(after):
-        at = _at(b["date"], 5)
+        at = _at(b["date"], bar_minutes)
 
         # 1. Check Stop hit on this bar
         if (b["low"] <= stop) if long else (b["high"] >= stop):

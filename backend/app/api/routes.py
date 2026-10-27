@@ -25,7 +25,7 @@ from app.ingest.store import IngestRunStore
 from app.ingest.youtube import fetch_youtube_transcript
 from app.provenance import report_inputs
 from app.reports.store import ReportStore
-from app.strategies.analyzer import analyze_trading_strategy, get_full_strategy_catalog
+from app.strategies.analyzer import analyze_trading_strategy, get_full_strategy_catalog, sanitize_strategy_specification
 from app.strategies.clarify import answers_as_hints, clarifying_questions
 from app.strategies.schema import StrategyDocument, parse_strategy_markdown
 from app.strategies.store import StrategyStore
@@ -318,7 +318,7 @@ def get_strategy(strategy_id: str, db: Session = Depends(get_db)):
     doc = parse_strategy_markdown(version.markdown)
     return {
         "strategy_id": strategy_id,
-        "markdown": doc.markdown,
+        "markdown": sanitize_strategy_specification(doc.markdown),
         "gaps": doc.gaps,
         "questions": clarifying_questions(doc),
         "version": version.version,
