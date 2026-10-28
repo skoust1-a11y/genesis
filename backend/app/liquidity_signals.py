@@ -52,7 +52,7 @@ from app.trading.option_pnl import black76, plan_pnl
 # ponytail: Yahoo bars are a few minutes delayed and the index has no volume, so VWAP comes from the NIFTYBEES ETF.
 # Switch to broker bars (Groww/Kite) and NIFTY futures VWAP for real-time signals.
 INDEX, VWAP_PROXY = "^NSEI", "NIFTYBEES.NS"
-SWING, R_MULT, OTM_STEPS, FIRST_ENTRY, LAST_ENTRY = 2, 3.0, 0, "09:30", "14:30"
+SWING, R_MULT, OTM_STEPS, FIRST_ENTRY, LAST_ENTRY = 2, 3.0, 1, "09:30", "14:30"
 FRESH = timedelta(minutes=15)  # older triggers are reported as missed, never sent: no chasing a late entry
 MIN_RISK = 30  # pts: over 2016-2026 setups with a closer stop earned nothing after costs
 RISK_PCT, LOSS_STREAK, BREAK_DAYS, EXIT = 5, 3, 3, "15:10"
@@ -936,7 +936,8 @@ def resolve_strike_and_lots(
     """Resolves (otm_steps, lots, tier_name) according to the 3-Tier Execution Framework:
     - Tier 2 (Super-Trend): 4 Lots, 2-OTM (when Super-Trend setup detected, price <= margin budget)
     - Tier 1 (General): 3 Lots, 1-OTM (standard daily setups, solid delta)
-    - Tier 3 (Expensive): 2 Lots, ATM (when entry premium > 155.0 / fresh Monday contracts)
+    - Tier 3 (Expensive): 2 Lots, 1-OTM (when entry premium > 155.0 / fresh Monday contracts)
+    All suggested trades and Telegram alerts strictly select Out-Of-The-Money (OTM) contracts.
     """
     step = settings.strike_step("NIFTY") or 50.0
     lot_size = settings.lot_size("NIFTY") or 65
@@ -952,14 +953,14 @@ def resolve_strike_and_lots(
     rem_days = max(left.total_seconds() / 86400, 0.0035)
     atm_prem = black76(s["entry"], atm_strike, rem_days / 365, vix / 100, kind)
 
-    if is_super and atm_prem <= 155.0:
+    if is_super:
         target_otm = 2
         preferred_lots = 4
         tier_name = "Tier 2 (Super-Trend: 4 Lots 2-OTM)"
     elif atm_prem > 155.0:
-        target_otm = 0
+        target_otm = 1
         preferred_lots = 2
-        tier_name = "Tier 3 (Expensive: 2 Lots ATM)"
+        tier_name = "Tier 3 (Expensive: 2 Lots 1-OTM)"
     else:
         target_otm = 1
         preferred_lots = 3

@@ -185,11 +185,17 @@ def test_3_tier_execution_framework():
 
     # Test 3: Tier 1 (General: 3 Lots / 1-OTM) on standard setup
     otm_1, lots_1, tier_1 = resolve_strike_and_lots(std_sig, settings, vix=13.5)
-    assert otm_1 in (0, 1)
+    assert otm_1 >= 1  # Strictly OTM
     assert lots_1 in (2, 3)
 
     # Test 4: Tier 2 (Super-Trend: 4 Lots / 2-OTM) when cheap option allows
     otm_2, lots_2, tier_2 = resolve_strike_and_lots(st_sig, settings, vix=13.5)
-    assert otm_2 in (0, 2)
+    assert otm_2 == 2  # Super-Trend 2-OTM
     assert lots_2 in (2, 3, 4)
+
+    # Test 5: Verify all tiers strictly enforce OTM strikes (no ATM allowed)
+    expensive_sig = dict(std_sig, time="2026-10-23 09:30")  # Fresh Monday morning high premium
+    otm_3, lots_3, tier_3 = resolve_strike_and_lots(expensive_sig, settings, vix=17.0)
+    assert otm_3 >= 1
+    assert "OTM" in tier_3
 
