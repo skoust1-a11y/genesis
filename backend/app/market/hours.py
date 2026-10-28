@@ -18,7 +18,12 @@ from app.market.feed import IST
 
 
 def holidays_path(settings: Settings) -> Path:
-    return Path(settings.data_dir) / "holidays" / "nse.yaml"
+    p = Path(settings.data_dir) / "holidays" / "nse.yaml"
+    if not p.exists():
+        fallback = Path(__file__).resolve().parents[2] / "data" / "holidays" / "nse.yaml"
+        if fallback.exists():
+            return fallback
+    return p
 
 
 @lru_cache

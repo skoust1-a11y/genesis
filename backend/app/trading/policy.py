@@ -33,6 +33,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from app.strategies.rules import Check
 from app.trading.decisions import PositionMark
+from app.trading.scaling_law import ScaleUpLawConfig
 
 IST = ZoneInfo("Asia/Kolkata")
 SIZING_CHECK = "policy.sizing"
@@ -187,6 +188,7 @@ class TradePolicy(_Strict):
     vix_sizing: VixSizing | None = None
     withdrawal: Withdrawal | None = None
     odds_gate: OddsGate | None = None
+    scale_up_law: ScaleUpLawConfig | None = None
 
     @model_validator(mode="after")
     def _compounding_needs_risk_sizing(self) -> TradePolicy:

@@ -414,3 +414,136 @@ def export_trades_csv(report_id: str, db: Session = Depends(get_db)):
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="trades-{report_id}.csv"'},
     )
+
+
+@router.get("/trades/forward-tested")
+def get_forward_tested_trades():
+    """Returns the forward-tested trades (Post-Oct 15) and aggregate metrics."""
+    import openpyxl
+
+    file_path = Path(__file__).resolve().parents[3] / "trades" / "live_and_forward_trades.xlsx"
+    if not file_path.exists():
+        file_path = Path(__file__).resolve().parents[3] / "trades" / "suggested_trades_by_strategy.xlsx"
+    if not file_path.exists():
+        return {"metrics": {}, "strategy_metrics": {}, "trades": []}
+
+    wb = openpyxl.load_workbook(file_path, data_only=True)
+    sheet_name = "📋 Live & Forward Trades" if "📋 Live & Forward Trades" in wb.sheetnames else "📋 All Suggested Trades"
+    ws = wb[sheet_name]
+    rows = list(ws.iter_rows(values_only=True))
+    if not rows:
+        return {"metrics": {}, "strategy_metrics": {}, "trades": []}
+
+    header = [str(c) if c is not None else "" for c in rows[0]]
+    raw_trades = [dict(zip(header, r)) for r in rows[1:] if any(r)]
+
+    trades = []
+    for t in raw_trades:
+        d = str(t.get("Date") or "")[:10]
+        if not d or d < "2026-10-15":
+            continue
+        r_mult = float(t.get("R-Multiple") or 0.0)
+        pnl = float(t.get("Est P&L (Rs)") or 0.0)
+        pts = float(t.get("Points") or 0.0)
+        prem_in = float(t.get("Entry Premium") or 0.0)
+        lots = int(t.get("Lots") or 2)
+        qty = int(t.get("Qty") or 130)
+        capital = float(t.get("Capital Deployed") or round(prem_in * qty, 0))
+        exit_val = float(t.get("Exit Value") or max(0.0, round(capital + pnl, 0)))
+        prem_out = float(t.get("Exit Premium") or (round(exit_val / qty, 2) if qty > 0 else 0.0))
+        roi = float(t.get("ROI %") or (round((pnl / capital) * 100, 1) if capital > 0 else 0.0))
+
+        trades.append({
+            "date": d,
+            "time": str(t.get("Time") or ""),
+            "strategy": str(t.get("Strategy") or ""),
+            "setup": str(t.get("Pool / Setup") or ""),
+            "side": str(t.get("Side") or "LONG").upper(),
+            "status": str(t.get("Status") or "FLAT"),
+            "entry": float(t.get("Entry Spot") or 0.0),
+            "stop": float(t.get("Stop Spot") or 0.0),
+            "target": float(t.get("Target Spot") or 0.0),
+            "risk": float(t.get("Risk Pts") or 0.0),
+            "exit_spot": float(t.get("Exit Spot") or 0.0),
+            "exit_time": str(t.get("Exit Time") or ""),
+            "exit_reason": str(t.get("Exit Reason") or ""),
+            "points": pts,
+            "r_multiple": r_mult,
+            "option": str(t.get("Option") or ""),
+            "expiry": str(t.get("Expiry") or ""),
+            "entry_premium": prem_in,
+            "exit_premium": prem_out,
+            "capital_deployed": capital,
+            "exit_value": exit_val,
+            "roi_pct": roi,
+            "est_pnl_inr": pnl,
+            "lots": lots,
+            "qty": qty,
+            "rationale": str(t.get("Rationale") or ""),
+        })
+
+    # Sort descending by date, time
+    trades.sort(key=lambda x: (x["date"], x["time"]), reverse=True)
+
+    wins = [t for t in trades if t["r_multiple"] > 0.05]
+    losses = [t for t in trades if t["r_multiple"] < -0.05]
+    be = [t for t in trades if abs(t["r_multiple"]) <= 0.05]
+
+    tot_trades = len(trades)
+    win_rate = (len(wins) / tot_trades * 100) if tot_trades > 0 else 0.0
+    win_rate_ex_be = (len(wins) / (len(wins) + len(losses)) * 100) if (len(wins) + len(losses)) > 0 else 0.0
+    tot_r = sum(t["r_multiple"] for t in trades)
+    tot_pts = sum(t["points"] for t in trades)
+    tot_pnl = sum(t["est_pnl_inr"] for t in trades)
+    tot_capital = sum(t["capital_deployed"] for t in trades)
+    tot_exit_val = sum(t["exit_value"] for t in trades)
+    avg_trade_capital = round(tot_capital / tot_trades, 0) if tot_trades > 0 else 0.0
+    total_roi = round((tot_pnl / tot_capital) * 100, 1) if tot_capital > 0 else 0.0
+
+    gross_profit = sum(t["est_pnl_inr"] for t in wins)
+    gross_loss = abs(sum(t["est_pnl_inr"] for t in losses))
+    pf = (gross_profit / gross_loss) if gross_loss > 0 else (99.9 if gross_profit > 0 else 1.0)
+
+    # Strategy breakdown
+    strat_metrics = {}
+    strategies = sorted(set(t["strategy"] for t in trades))
+    for s_name in strategies:
+        s_trades = [t for t in trades if t["strategy"] == s_name]
+        s_wins = [t for t in s_trades if t["r_multiple"] > 0.05]
+        s_losses = [t for t in s_trades if t["r_multiple"] < -0.05]
+        s_be = [t for t in s_trades if abs(t["r_multiple"]) <= 0.05]
+        s_pnl = sum(t["est_pnl_inr"] for t in s_trades)
+        s_r = sum(t["r_multiple"] for t in s_trades)
+        s_cap = sum(t["capital_deployed"] for t in s_trades)
+        strat_metrics[s_name] = {
+            "trades": len(s_trades),
+            "wins": len(s_wins),
+            "losses": len(s_losses),
+            "be": len(s_be),
+            "win_rate": round(len(s_wins) / len(s_trades) * 100, 1) if s_trades else 0.0,
+            "total_r": round(s_r, 2),
+            "capital_deployed": round(s_cap, 0),
+            "net_pnl_inr": round(s_pnl, 0),
+            "roi_pct": round((s_pnl / s_cap) * 100, 1) if s_cap > 0 else 0.0,
+        }
+
+    return {
+        "metrics": {
+            "total_trades": tot_trades,
+            "wins": len(wins),
+            "losses": len(losses),
+            "breakevens": len(be),
+            "win_rate": round(win_rate, 1),
+            "win_rate_ex_be": round(win_rate_ex_be, 1),
+            "total_r": round(tot_r, 2),
+            "total_points": round(tot_pts, 1),
+            "net_pnl_inr": round(tot_pnl, 0),
+            "profit_factor": round(pf, 2),
+            "total_capital_deployed": round(tot_capital, 0),
+            "total_exit_value": round(tot_exit_val, 0),
+            "avg_trade_capital": avg_trade_capital,
+            "total_roi_pct": total_roi,
+        },
+        "strategy_metrics": strat_metrics,
+        "trades": trades,
+    }

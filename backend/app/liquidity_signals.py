@@ -94,14 +94,111 @@ def pivots(bars: list[dict], key: str) -> list[int]:
     return [j for j in range(n, len(bars) - n) if bars[j][key] == pick(b[key] for b in bars[j - n : j + n + 1])]
 
 
+def is_midday_waterfall_active(
+    time_str: str,
+    risk: float,
+    slope: float | None = None,
+    is_reentry: bool = False,
+    strategy: str = "",
+) -> tuple[bool, str]:
+    """Determines whether a midday signal (11:30 - 13:00 IST) is an active high-velocity
+    Midday Waterfall (participate) or low-volume Lunch Lull chop (skip).
+
+    Two-Tier Engine:
+    - Tier 1: Lunch Lull (11:30 - 12:30 IST): Strict slope velocity (|slope| >= 0.8 pts/bar) and risk <= 85.
+    - Tier 2: European Open Surge (12:30 - 13:00 IST): Active trendline breakout participation (|slope| >= 0.5 pts/bar) and risk <= 85.
+    - Ban B&R re-entries unconditionally.
+    """
+    if not (BLACKOUT_START <= time_str <= BLACKOUT_END):
+        return True, "Outside lunch lull window"
+
+    # Ban B&R re-entries during lunch unconditionally
+    if is_reentry and "retest" in strategy.lower():
+        return False, "Midday B&R re-entry skipped (lunch lull chop risk)"
+
+    # Skip bloated risk (> 85 pts indicates overextension)
+    if risk > 85.0:
+        return False, f"Midday risk bloated ({risk:.1f} > 85 pts; overextension)"
+
+    # Two-Tier Midday Evaluation
+    if time_str < "12:30":
+        # Tier 1 (11:30 - 12:30): Strict velocity filter to cut lunch consolidation
+        if slope is not None and abs(slope) < 0.8:
+            return False, f"Midday Tier 1 slope insufficient ({slope:+.2f} < 0.8; lunch chop)"
+    else:
+        # Tier 2 (12:30 - 13:00): European Open Institutional Surge (88.9% historical WR)
+        if slope is not None and abs(slope) < 0.5:
+            return False, f"Midday Tier 2 slope flat ({slope:+.2f} < 0.5)"
+
+    return True, "Midday Waterfall Active (Tier parameters satisfied)"
+
+
+def get_dynamic_spot_target(
+    entry: float,
+    risk: float,
+    side: str,
+    spot_levels: list[float] | None = None,
+    min_r: float = 1.8,
+    default_r: float = 3.0,
+    max_r: float = 4.5,
+    buffer_pts: float = 3.0,
+) -> tuple[float, str]:
+    """Calculates dynamic target based on NIFTY Spot levels:
+    - For Long: searches for nearest major resistance >= entry + min_r * risk.
+      If level is within 3.2R, targets level - buffer_pts to front-run the reversal trap.
+      If clear skies, allows runner to target macro level up to max_r (4.5R).
+    - For Short: searches for nearest major support <= entry - min_r * risk.
+      If level is within 3.2R, targets level + buffer_pts.
+      If clear skies, allows runner up to max_r.
+    Returns: (target_price, target_basis)
+    """
+    if not spot_levels or risk <= 0:
+        tgt = entry + default_r * risk if side == "Long" else entry - default_r * risk
+        return round(tgt, 2), f"Fixed {default_r:.1f}R Target"
+
+    long = side == "Long"
+    if long:
+        valid_res = [lv for lv in spot_levels if lv >= entry + min_r * risk]
+        if valid_res:
+            nearest_res = min(valid_res)
+            r_dist = (nearest_res - entry) / risk
+            if r_dist <= 3.2:
+                tgt = nearest_res - buffer_pts
+                return round(tgt, 2), f"Dynamic Spot Resistance ({nearest_res:,.1f} - {buffer_pts:.0f} pts buffer | {r_dist:.2f}R)"
+            else:
+                tgt = min(nearest_res - buffer_pts, entry + max_r * risk)
+                achieved_r = (tgt - entry) / risk
+                return round(tgt, 2), f"Dynamic Macro Spot Target ({tgt:,.1f} | {achieved_r:.2f}R Extended)"
+        else:
+            tgt = entry + default_r * risk
+            return round(tgt, 2), f"Default {default_r:.1f}R (No Opposing Resistance)"
+    else:
+        valid_sup = [lv for lv in spot_levels if lv <= entry - min_r * risk]
+        if valid_sup:
+            nearest_sup = max(valid_sup)
+            r_dist = (entry - nearest_sup) / risk
+            if r_dist <= 3.2:
+                tgt = nearest_sup + buffer_pts
+                return round(tgt, 2), f"Dynamic Spot Support ({nearest_sup:,.1f} + {buffer_pts:.0f} pts buffer | {r_dist:.2f}R)"
+            else:
+                tgt = max(nearest_sup + buffer_pts, entry - max_r * risk)
+                achieved_r = (entry - tgt) / risk
+                return round(tgt, 2), f"Dynamic Macro Spot Target ({tgt:,.1f} | {achieved_r:.2f}R Extended)"
+        else:
+            tgt = entry - default_r * risk
+            return round(tgt, 2), f"Default {default_r:.1f}R (No Opposing Support)"
+
+
 def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: float,
          min_risk: float = MIN_RISK, stop_at: str = "swing", min_sweep: float = 2.0,
-         require_trendline: bool = False, skip_lunch: bool = False) -> list[dict]:  # fmt: skip
+         require_trendline: bool = False, skip_lunch: bool | str = "conditional",
+         dynamic_targets: bool = False, spot_levels: list[float] | None = None) -> list[dict]:  # fmt: skip
     """Entries in one session's completed 5m `bars`; `above_vwap[date]` is whether that bar closed above VWAP.
     `stop_at` "sweep" puts every stop 5 pts past the sweep low / raid high instead of at the last swing.
     `min_sweep` requires sweep depth >= min_sweep (default 2.0 pts) past PDH/PDL to filter noise.
     `require_trendline` enforces breakdown below ascending trendline (Short) or breakout above descending trendline (Long).
-    `skip_lunch` avoids entries between 11:30 and 13:00 IST to prevent lunch lull chop."""
+    `skip_lunch` avoids entries between 11:30 and 13:00 IST to prevent lunch lull chop.
+    When set to 'conditional' (default), participates in high-momentum Midday Waterfalls and filters chop."""
     if not bars:
         return []
     day_open, b15, out = bars[0]["open"], to_15m(bars), []
@@ -138,7 +235,7 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
             closes_at = _at(b["date"], 5)
             if closes_at[11:] > LAST_ENTRY:
                 break
-            if skip_lunch and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
+            if str(skip_lunch).lower() == "true" and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
                 continue
             c = b["close"]
             inside = c > pdl and c > day_open if long else c < pdh and c < day_open
@@ -189,10 +286,19 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
                         stop, basis = ext + 5, f"raid high {ext:,.2f} + 5"
             risk = abs(c - stop)
             if risk >= min_risk:
-                target = c + R_MULT * risk if long else c - R_MULT * risk
+                if str(skip_lunch).lower() in ("conditional", "auto") and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
+                    wf_ok, wf_reason = is_midday_waterfall_active(closes_at[11:], risk=risk, strategy="Liquidity Sweep")
+                    if not wf_ok:
+                        continue
+                    why.append(f"[{wf_reason}]")
+                if dynamic_targets and spot_levels:
+                    target, target_basis = get_dynamic_spot_target(c, risk, side, spot_levels)
+                else:
+                    target = c + R_MULT * risk if long else c - R_MULT * risk
+                    target_basis = f"Fixed {R_MULT:g}R"
                 out.append({"side": side, "time": closes_at, "entry": c, "stop": round(stop, 2),
-                            "target": round(target, 2), "risk": round(risk, 2), "level": pdl if long else pdh,
-                            "why": why, "stop_basis": basis, "candle": b, "day_open": day_open})  # fmt: skip
+                            "target": round(target, 2), "target_basis": target_basis, "risk": round(risk, 2),
+                            "level": pdl if long else pdh, "why": why, "stop_basis": basis, "candle": b, "day_open": day_open})  # fmt: skip
             break
     return out
 
@@ -205,161 +311,191 @@ def scan_retest(
     min_risk: float = MIN_RISK,
     min_breakout: float = 2.0,
     max_retest_depth: float = 25.0,
-    skip_lunch: bool = True,
+    skip_lunch: bool | str = "conditional",
     candle_confirmation: bool = False,
     allow_reentry: bool = False,
     bar_minutes: int = 5,
+    include_orh_orl: bool = False,
+    dynamic_targets: bool = False,
+    spot_levels: list[float] | None = None,
 ) -> list[dict]:
-    """Entries for Breakout & Support/Resistance Retests past PDH/PDL:
-    - Long (Buy CE): 5m breaks above PDH + min_breakout -> subsequent 5m pullback tests PDH zone (within max_retest_depth)
-      and holds -> 5m candle closes green above PDH, above VWAP and above Open.
+    """Entries for Breakout & Support/Resistance Retests past PDH/PDL or ORH/ORL:
+    - Long (Buy CE): 5m breaks above PDH/ORH + min_breakout -> subsequent 5m pullback tests level zone (within max_retest_depth)
+      and holds -> 5m candle closes green above level, above VWAP and above Open.
       Stop: 5 pts below the retest pullback low.
-    - Short (Buy PE): 5m breaks below PDL - min_breakout -> subsequent 5m pullback tests PDL zone (from below)
-      and holds -> 5m candle closes red below PDL, below VWAP and below Open.
+    - Short (Buy PE): 5m breaks below PDL/ORL - min_breakout -> subsequent 5m pullback tests level zone (from below)
+      and holds -> 5m candle closes red below level, below VWAP and below Open.
       Stop: 5 pts above the retest pullback high.
     - candle_confirmation: Enforces Ross Cameron candle-over-candle breakout & wick rejection filter.
     - allow_reentry: Allows a single condition-matched re-entry (Attempt 2) if first trade stopped out.
     - bar_minutes: Candle duration in minutes (e.g. 5 for 5m, 1 for 1m).
-    Target: 3R."""
+    - include_orh_orl: If True, also scans 30-min Opening Range High/Low retests after 10:00 AM.
+    - dynamic_targets: Dynamically anchors target to next opposing Spot level.
+    Target: 3R or dynamic spot target."""
     if not bars:
         return []
     if bar_minutes <= 2 and min_risk == MIN_RISK:
         min_risk = 10.0
     day_open, out = bars[0]["open"], []
-    for side in ("Long", "Short"):
-        long = side == "Long"
-        level = pdh if long else pdl
-        stage, retest_extreme, why = 0, 0.0, []
-        entries_taken = 0
-        active_stop_time = ""
-        stop_extreme = 0.0
-        stop_bar_idx = -1
-        max_entries = 2 if allow_reentry else 1
 
-        for i, b in enumerate(bars):
-            if entries_taken >= max_entries:
-                break
-            c = b["close"]
-            closes_at = _at(b["date"], bar_minutes)
-            if closes_at[11:] > LAST_ENTRY:
-                break
+    level_pairs = [("PD", pdh, pdl)]
+    if include_orh_orl and len(bars) >= 6:
+        orh = max(b["high"] for b in bars[:6])
+        orl = min(b["low"] for b in bars[:6])
+        level_pairs.append(("OR-30", orh, orl))
 
-            # Enforce cooldown of at least 15 mins after stop-out before re-entry
-            cooldown_bars = max(1, 15 // bar_minutes)
-            if active_stop_time:
-                if b["date"] <= active_stop_time or (i - stop_bar_idx) < cooldown_bars:
+    for lvl_prefix, lvl_high, lvl_low in level_pairs:
+        start_i = 6 if lvl_prefix == "OR-30" else 0
+        for side in ("Long", "Short"):
+            long = side == "Long"
+            level = lvl_high if long else lvl_low
+            stage, retest_extreme, why = 0, 0.0, []
+            entries_taken = 0
+            active_stop_time = ""
+            stop_extreme = 0.0
+            stop_bar_idx = -1
+            max_entries = 2 if allow_reentry else 1
+
+            for i in range(start_i, len(bars)):
+                b = bars[i]
+                if entries_taken >= max_entries:
+                    break
+                c = b["close"]
+                closes_at = _at(b["date"], bar_minutes)
+                if closes_at[11:] > LAST_ENTRY:
+                    break
+
+                # Enforce cooldown of at least 15 mins after stop-out before re-entry
+                cooldown_bars = max(1, 15 // bar_minutes)
+                if active_stop_time:
+                    if b["date"] <= active_stop_time or (i - stop_bar_idx) < cooldown_bars:
+                        continue
+                    if REENTRY_BLACKOUT_START <= closes_at[11:] <= REENTRY_BLACKOUT_END:
+                        continue
+
+                if stage == 0:
+                    if (long and b["high"] >= level + min_breakout and c > day_open) or (
+                        not long and b["low"] <= level - min_breakout and c < day_open
+                    ):
+                        stage = 1
+                        why = [
+                            f"{closes_at[11:]} breakout: 5m high {b['high']:,.2f} cleared {lvl_prefix}H {level:,.2f}"
+                            if long
+                            else f"{closes_at[11:]} breakdown: 5m low {b['low']:,.2f} breached {lvl_prefix}L {level:,.2f}"
+                        ]
                     continue
-                if REENTRY_BLACKOUT_START <= closes_at[11:] <= REENTRY_BLACKOUT_END:
-                    continue
 
-            if stage == 0:
-                if (long and b["high"] >= level + min_breakout and c > day_open) or (
-                    not long and b["low"] <= level - min_breakout and c < day_open
-                ):
-                    stage = 1
-                    why = [
-                        f"{closes_at[11:]} breakout: 5m high {b['high']:,.2f} cleared PDH {level:,.2f}"
-                        if long
-                        else f"{closes_at[11:]} breakdown: 5m low {b['low']:,.2f} breached PDL {level:,.2f}"
-                    ]
-                continue
-
-            if stage == 1:
-                # Track retest / pullback near level
-                is_pullback = (long and b["low"] <= level + 15.0 and b["low"] >= level - max_retest_depth) or (
-                    not long and b["high"] >= level - 15.0 and b["high"] <= level + max_retest_depth
-                )
-                if is_pullback:
-                    stage = 2
-                    retest_extreme = b["low"] if long else b["high"]
-                    why.append(
-                        f"{closes_at[11:]} retest: 5m {'low' if long else 'high'} {retest_extreme:,.2f} tested {'PDH' if long else 'PDL'} {level:,.2f} as {'support' if long else 'resistance'}"
+                if stage == 1:
+                    # Track retest / pullback near level
+                    is_pullback = (long and b["low"] <= level + 15.0 and b["low"] >= level - max_retest_depth) or (
+                        not long and b["high"] >= level - 15.0 and b["high"] <= level + max_retest_depth
                     )
-                continue
-
-            if stage == 2:
-                retest_extreme = min(retest_extreme, b["low"]) if long else max(retest_extreme, b["high"])
-                confirmed = (
-                    long and c > level and c > b["open"] and above_vwap.get(b["date"]) is True and c > day_open
-                ) or (
-                    not long and c < level and c < b["open"] and above_vwap.get(b["date"]) is False and c < day_open
-                )
-                if not confirmed:
+                    if is_pullback:
+                        stage = 2
+                        retest_extreme = b["low"] if long else b["high"]
+                        why.append(
+                            f"{closes_at[11:]} retest: 5m {'low' if long else 'high'} {retest_extreme:,.2f} tested {lvl_prefix}{'H' if long else 'L'} {level:,.2f} as {'support' if long else 'resistance'}"
+                        )
                     continue
 
-                prev_b = bars[i - 1] if i > 0 else b
-
-                # Ross Cameron Candle-Over-Candle Confirmation Trigger
-                if candle_confirmation:
-                    candle_break = (long and b["high"] > prev_b["high"]) or (not long and b["low"] < prev_b["low"])
-                    if not candle_break:
+                if stage == 2:
+                    retest_extreme = min(retest_extreme, b["low"]) if long else max(retest_extreme, b["high"])
+                    confirmed = (
+                        long and c > level and c > b["open"] and above_vwap.get(b["date"]) is True and c > day_open
+                    ) or (
+                        not long and c < level and c < b["open"] and above_vwap.get(b["date"]) is False and c < day_open
+                    )
+                    if not confirmed:
                         continue
-                    body = abs(c - b["open"])
-                    if long:
-                        upper_wick = b["high"] - max(b["open"], c)
-                        if upper_wick > max(body * 1.5, 4.0):
+
+                    prev_b = bars[i - 1] if i > 0 else b
+
+                    # Ross Cameron Candle-Over-Candle Confirmation Trigger
+                    if candle_confirmation:
+                        candle_break = (long and b["high"] > prev_b["high"]) or (not long and b["low"] < prev_b["low"])
+                        if not candle_break:
                             continue
-                    else:
-                        lower_wick = min(b["open"], c) - b["low"]
-                        if lower_wick > max(body * 1.5, 4.0):
-                            continue
+                        body = abs(c - b["open"])
+                        if long:
+                            upper_wick = b["high"] - max(b["open"], c)
+                            if upper_wick > max(body * 1.5, 4.0):
+                                continue
+                        else:
+                            lower_wick = min(b["open"], c) - b["low"]
+                            if lower_wick > max(body * 1.5, 4.0):
+                                continue
 
-                is_reentry = entries_taken > 0
-                if is_reentry:
-                    # Strict Re-entry Condition: Must form higher low (Long) or lower high (Short) vs shakeout
-                    if long and b["low"] <= stop_extreme:
-                        continue
-                    if not long and b["high"] >= stop_extreme:
-                        continue
-
-                if closes_at[11:] < FIRST_ENTRY:
-                    continue
-                if skip_lunch and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
-                    continue
-
-                stop = (retest_extreme - 5.0) if long else (retest_extreme + 5.0)
-                stop_basis = f"retest {'low' if long else 'high'} {retest_extreme:,.2f} {'-' if long else '+'} 5"
-                risk = abs(c - stop)
-                if risk >= min_risk:
-                    target = c + R_MULT * risk if long else c - R_MULT * risk
-                    reentry_label = " (Re-Entry)" if is_reentry else ""
-                    why_msg = f"{closes_at[11:]} confirmation: 5m close {c:,.2f} held {'above PDH' if long else 'below PDL'} and VWAP"
+                    is_reentry = entries_taken > 0
                     if is_reentry:
-                        why_msg += f" (Re-entry after shakeout; higher {'low' if long else 'high'} held)"
-                    why.append(why_msg)
-                    sig = {
-                        "side": side,
-                        "strategy": "retest",
-                        "pool": f"PD{'H Support' if long else 'L Resistance'} Flip{reentry_label}",
-                        "time": closes_at,
-                        "entry": c,
-                        "stop": round(stop, 2),
-                        "target": round(target, 2),
-                        "risk": round(risk, 2),
-                        "level": level,
-                        "why": why,
-                        "stop_basis": stop_basis,
-                        "candle": b,
-                        "day_open": day_open,
-                        "is_reentry": is_reentry,
-                        "attempt": entries_taken + 1,
-                    }
-                    out.append(sig)
-                    entries_taken += 1
+                        # Strict Re-entry Condition: Must form higher low (Long) or lower high (Short) vs shakeout
+                        if long and b["low"] <= stop_extreme:
+                            continue
+                        if not long and b["high"] >= stop_extreme:
+                            continue
 
-                    if allow_reentry and entries_taken < max_entries:
-                        res = staged_exit_of(bars, sig, bar_minutes=bar_minutes)
-                        if res["r_multiple"] <= 0:
-                            active_stop_time = res["exit_time"]
-                            stop_bar_idx = next((k for k, x in enumerate(bars) if x["date"] >= active_stop_time), i)
-                            stop_extreme = min(x["low"] for x in bars[i : stop_bar_idx + 1]) if long else max(x["high"] for x in bars[i : stop_bar_idx + 1])
-                            stage = 1
+                    if closes_at[11:] < FIRST_ENTRY:
+                        continue
+                    if str(skip_lunch).lower() == "true" and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
+                        continue
+
+                    stop = (retest_extreme - 5.0) if long else (retest_extreme + 5.0)
+                    stop_basis = f"retest {'low' if long else 'high'} {retest_extreme:,.2f} {'-' if long else '+'} 5"
+                    risk = abs(c - stop)
+                    if risk >= min_risk:
+                        wf_tag = ""
+                        if str(skip_lunch).lower() in ("conditional", "auto") and BLACKOUT_START <= closes_at[11:] <= BLACKOUT_END:
+                            wf_ok, wf_reason = is_midday_waterfall_active(
+                                closes_at[11:], risk=risk, is_reentry=is_reentry, strategy="Breakout & Retest"
+                            )
+                            if not wf_ok:
+                                continue
+                            wf_tag = f"[{wf_reason}]"
+                        if dynamic_targets and spot_levels:
+                            target, target_basis = get_dynamic_spot_target(c, risk, side, spot_levels)
+                        else:
+                            target = c + R_MULT * risk if long else c - R_MULT * risk
+                            target_basis = f"Fixed {R_MULT:g}R"
+                        reentry_label = " (Re-Entry)" if is_reentry else ""
+                        why_msg = f"{closes_at[11:]} confirmation: 5m close {c:,.2f} held {'above ' + lvl_prefix + 'H' if long else 'below ' + lvl_prefix + 'L'} and VWAP"
+                        if is_reentry:
+                            why_msg += f" (Re-entry after shakeout; higher {'low' if long else 'high'} held)"
+                        why.append(why_msg)
+                        if wf_tag:
+                            why.append(wf_tag)
+                        sig = {
+                            "side": side,
+                            "strategy": "retest",
+                            "pool": f"{lvl_prefix}{'H Support' if long else 'L Resistance'} Flip{reentry_label}",
+                            "time": closes_at,
+                            "entry": c,
+                            "stop": round(stop, 2),
+                            "target": round(target, 2),
+                            "target_basis": target_basis,
+                            "risk": round(risk, 2),
+                            "level": level,
+                            "why": why,
+                            "stop_basis": stop_basis,
+                            "candle": b,
+                            "day_open": day_open,
+                            "is_reentry": is_reentry,
+                            "attempt": entries_taken + 1,
+                        }
+                        out.append(sig)
+                        entries_taken += 1
+
+                        if allow_reentry and entries_taken < max_entries:
+                            res = staged_exit_of(bars, sig, bar_minutes=bar_minutes)
+                            if res["r_multiple"] <= 0:
+                                active_stop_time = res["exit_time"]
+                                stop_bar_idx = next((k for k, x in enumerate(bars) if x["date"] >= active_stop_time), i)
+                                stop_extreme = min(x["low"] for x in bars[i : stop_bar_idx + 1]) if long else max(x["high"] for x in bars[i : stop_bar_idx + 1])
+                                stage = 1
+                            else:
+                                entries_taken = max_entries
+                                break
                         else:
                             entries_taken = max_entries
                             break
-                    else:
-                        entries_taken = max_entries
-                        break
     return out
 
 
@@ -367,12 +503,15 @@ def scan_retest(
 def scan_trendline_reversal(
     bars: list[dict],
     min_slope: float = 0.5,
-    skip_lunch: bool = True,
+    skip_lunch: bool | str = "conditional",
     min_risk: float = MIN_RISK,
-    max_risk: float = 65.0,
+    max_risk: float = 55.0,
     candle_confirmation: bool = False,
     allow_reentry: bool = False,
     bar_minutes: int = 5,
+    require_choch: bool = False,
+    dynamic_targets: bool = False,
+    spot_levels: list[float] | None = None,
 ) -> list[dict]:
     """Entries for Clean Trendline Reversals (Breakdowns below Ascending Support & Breakouts above Descending Resistance):
     - Short (Buy PE): Ascending trendline (slope >= min_slope). 5m candle closes below trendline with a red close (c < open).
@@ -382,12 +521,26 @@ def scan_trendline_reversal(
     - candle_confirmation: Enforces Ross Cameron candle-over-candle breakout & wick rejection filter.
     - allow_reentry: Allows a single condition-matched re-entry (Attempt 2) if first trade stopped out.
     - bar_minutes: Candle duration in minutes (e.g. 5 for 5m, 1 for 1m).
+    - require_choch: Enforces Market Structure Change of Character (CHoCH / BOS) close confirmation.
     Target: 3R."""
     if bar_minutes <= 2 and min_risk == MIN_RISK:
         min_risk = 15.0
     if len(bars) < max(10, 20 // bar_minutes):
         return []
     day_open, out = bars[0]["open"], []
+
+    choch_events = {}
+    if require_choch and len(bars) >= 10:
+        try:
+            from app.market.chart_analytics import calculate_atr, detect_bos_choch, detect_swing_points
+            atr_vals = calculate_atr(bars, 14)
+            swings = detect_swing_points(bars, sensitivity=2, atr_series=atr_vals)
+            events = detect_bos_choch(bars, swings)
+            for ev in events:
+                if ev.confirmation == "close":
+                    choch_events[ev.break_date] = ev
+        except Exception:
+            choch_events = {}
 
     for side in ("Short", "Long"):
         long = side == "Long"
@@ -417,7 +570,7 @@ def scan_trendline_reversal(
                 if REENTRY_BLACKOUT_START <= time_str <= REENTRY_BLACKOUT_END:
                     continue
 
-            if skip_lunch and BLACKOUT_START <= time_str <= BLACKOUT_END:
+            if str(skip_lunch).lower() == "true" and BLACKOUT_START <= time_str <= BLACKOUT_END:
                 continue
 
             c = b["close"]
@@ -460,16 +613,40 @@ def scan_trendline_reversal(
                         )
                         if violations > 1:
                             continue
+                        if require_choch and choch_events:
+                            has_struct = False
+                            for k in range(max(0, i - 3), min(len(bars), i + 4)):
+                                b_date = bars[k]["date"]
+                                if b_date in choch_events and choch_events[b_date].direction == "bearish":
+                                    has_struct = True
+                                    break
+                            if not has_struct:
+                                continue
+
                         stop = max(b["high"], max(bars[k]["high"] for k in range(max(0, i - 2), i + 1))) + 5.0
                         risk = stop - c
                         if min_risk <= risk <= max_risk:
-                            target = c - R_MULT * risk
+                            wf_tag = ""
+                            if str(skip_lunch).lower() in ("conditional", "auto") and BLACKOUT_START <= time_str <= BLACKOUT_END:
+                                wf_ok, wf_reason = is_midday_waterfall_active(
+                                    time_str, risk=risk, slope=slope, is_reentry=is_reentry, strategy="Trendline Reversal"
+                                )
+                                if not wf_ok:
+                                    continue
+                                wf_tag = f"[{wf_reason}]"
+                            if dynamic_targets and spot_levels:
+                                target, target_basis = get_dynamic_spot_target(c, risk, "Short", spot_levels)
+                            else:
+                                target = c - R_MULT * risk
+                                target_basis = f"Fixed {R_MULT:g}R"
                             reentry_label = " (Re-Entry)" if is_reentry else ""
                             why = [
                                 f"{time_str} trendline breakdown: 5m close {c:,.2f} below ascending line {tl_val:,.2f} (slope {slope:+.2f})"
                                 + (f" (Re-entry after shakeout; lower high held)" if is_reentry else ""),
                                 f"Anchored by swing lows at {bars[x1]['date'][11:]} ({y1:,.2f}) and {bars[x2]['date'][11:]} ({y2:,.2f})",
                             ]
+                            if wf_tag:
+                                why.append(wf_tag)
                             sig = {
                                 "side": "Short",
                                 "strategy": "trendline_reversal",
@@ -478,6 +655,7 @@ def scan_trendline_reversal(
                                 "entry": c,
                                 "stop": round(stop, 2),
                                 "target": round(target, 2),
+                                "target_basis": target_basis,
                                 "risk": round(risk, 2),
                                 "level": round(tl_val, 2),
                                 "why": why,
@@ -528,16 +706,40 @@ def scan_trendline_reversal(
                         )
                         if violations > 1:
                             continue
+                        if require_choch and choch_events:
+                            has_struct = False
+                            for k in range(max(0, i - 3), min(len(bars), i + 4)):
+                                b_date = bars[k]["date"]
+                                if b_date in choch_events and choch_events[b_date].direction == "bullish":
+                                    has_struct = True
+                                    break
+                            if not has_struct:
+                                continue
+
                         stop = min(b["low"], min(bars[k]["low"] for k in range(max(0, i - 2), i + 1))) - 5.0
                         risk = c - stop
                         if min_risk <= risk <= max_risk:
-                            target = c + R_MULT * risk
+                            wf_tag = ""
+                            if str(skip_lunch).lower() in ("conditional", "auto") and BLACKOUT_START <= time_str <= BLACKOUT_END:
+                                wf_ok, wf_reason = is_midday_waterfall_active(
+                                    time_str, risk=risk, slope=slope, is_reentry=is_reentry, strategy="Trendline Reversal"
+                                )
+                                if not wf_ok:
+                                    continue
+                                wf_tag = f"[{wf_reason}]"
+                            if dynamic_targets and spot_levels:
+                                target, target_basis = get_dynamic_spot_target(c, risk, "Long", spot_levels)
+                            else:
+                                target = c + R_MULT * risk
+                                target_basis = f"Fixed {R_MULT:g}R"
                             reentry_label = " (Re-Entry)" if is_reentry else ""
                             why = [
                                 f"{time_str} trendline breakout: 5m close {c:,.2f} above descending line {tl_val:,.2f} (slope {slope:+.2f})"
                                 + (f" (Re-entry after shakeout; higher low held)" if is_reentry else ""),
                                 f"Anchored by swing highs at {bars[x1]['date'][11:]} ({y1:,.2f}) and {bars[x2]['date'][11:]} ({y2:,.2f})",
                             ]
+                            if wf_tag:
+                                why.append(wf_tag)
                             sig = {
                                 "side": "Long",
                                 "strategy": "trendline_reversal",
@@ -546,6 +748,7 @@ def scan_trendline_reversal(
                                 "entry": c,
                                 "stop": round(stop, 2),
                                 "target": round(target, 2),
+                                "target_basis": target_basis,
                                 "risk": round(risk, 2),
                                 "level": round(tl_val, 2),
                                 "why": why,
@@ -740,16 +943,17 @@ def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | No
     expiry = expiry or weekly_expiry(date.fromisoformat(s["time"][:10]), settings)
     left = datetime.combine(expiry, dtime.fromisoformat(settings.market_close), IST) - datetime.strptime(
         s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST)  # fmt: skip
-    years = lambda hold: max(left.total_seconds() / 86400 - hold, 0) / 365
-    entry = black76(s["entry"], strike, years(0), iv_pct / 100, kind)
+    rem_days = max(left.total_seconds() / 86400, 0.0035)
+    exit_days = max(rem_days - min(0.02, rem_days * 0.3), 0.0035)
+    entry = black76(s["entry"], strike, rem_days / 365, iv_pct / 100, kind)
     buy = order_charges(settings, kind, "BUY", entry, total_qty, s["time"][:10])["total"]
     exits = []
     for spot in (s["stop"], s["target"]):
-        premium = black76(spot, strike, years(0.15), iv_pct / 100, kind)
+        premium = black76(spot, strike, exit_days / 365, iv_pct / 100, kind)
         charges = buy + order_charges(settings, kind, "SELL", premium, total_qty, s["time"][:10])["total"]
         exits.append({"premium": round(premium, 2), "pnl": round((premium - entry) * total_qty - charges, 2)})
     spread_sell_strike = strike + (2 * step if kind == "CE" else -2 * step)
-    entry_sell = black76(s["entry"], spread_sell_strike, years(0), iv_pct / 100, kind)
+    entry_sell = black76(s["entry"], spread_sell_strike, rem_days / 365, iv_pct / 100, kind)
     spread_debit = max(entry - entry_sell, 0.5)
     spread_buy_chg = order_charges(settings, kind, "BUY", entry, total_qty, s["time"][:10])["total"]
     spread_sell_chg = order_charges(settings, kind, "SELL", entry_sell, total_qty, s["time"][:10])["total"]
@@ -899,6 +1103,7 @@ def staged_exit_of(
     partial_pct: float = 0.5,
     be_r: float = 1.0,
     trail_on_close: bool = True,
+    trail_mode: str = "candle",
     trail_trigger_r: float = 1.5,
     stagnation_bars: int = 0,
     bar_minutes: int = 5,
@@ -1001,11 +1206,14 @@ def staged_exit_of(
         # 7. Once partial or trail threshold is reached, check 5m Candle Close Reversal
         if (partial_hit or trail_active) and trail_on_close and idx > 0:
             prev_b = after[idx - 1]
-            reversal = (b["close"] < b["open"] or b["close"] < prev_b["low"]) if long else (b["close"] > b["open"] or b["close"] > prev_b["high"])
+            if trail_mode == "structure":
+                reversal = (b["close"] < prev_b["low"]) if long else (b["close"] > prev_b["high"])
+            else:
+                reversal = (b["close"] < b["open"] or b["close"] < prev_b["low"]) if long else (b["close"] > b["open"] or b["close"] > prev_b["high"])
             if reversal:
                 final_px = b["close"]
                 final_at = at
-                reason = "Partial + Candle Close Trail" if partial_hit else "Candle Close Trail"
+                reason = "Partial + Structure Trail" if (partial_hit and trail_mode == "structure") else ("Partial + Candle Close Trail" if partial_hit else ("Structure Trail" if trail_mode == "structure" else "Candle Close Trail"))
                 break
 
     # Calculate overall realized R

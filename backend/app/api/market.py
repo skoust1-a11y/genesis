@@ -38,8 +38,8 @@ COMMODITIES = {
     "GOLD": "GC=F", "SILVER": "SI=F", "CRUDEOIL": "CL=F", "NATURALGAS": "NG=F", "COPPER": "HG=F", "USDINR": "INR=X",
 }  # fmt: skip
 NSE_SYMBOL = re.compile(r"^[A-Z0-9&-]{1,20}$")
-# Longest history Yahoo serves per interval (1m: 7 days, 5m/15m: 60 days), so the chart can scroll back.
-RANGE = {"1m": "5d", "5m": "1mo", "15m": "60d", "60m": "1y", "1d": "5y"}
+# Longest history Yahoo serves per interval (1m: 7 days, 5m/15m: 60 days, 60m: 730 days), so the chart can scroll back.
+RANGE = {"1m": "7d", "5m": "60d", "15m": "60d", "60m": "2y", "1d": "30y"}  # "max" downgrades 1d to monthly bars
 IST = timezone(timedelta(hours=5, minutes=30))
 UA = {"User-Agent": "Mozilla/5.0"}
 
@@ -172,7 +172,7 @@ def market_candles(
             daily = [d for d in daily if d["date"][:10] < session] + [today]
 
     enriched = enrich_chart_payload(symbol, segment, interval, bars, daily, sensitivity=sensitivity)
-    zones = trading_zones(enriched["levels"], bars[-1]["close"])
+    zones = trading_zones(enriched["levels"], bars[-1]["close"], interval=interval)
     return enriched | {"zones": zones}
 
 
@@ -401,7 +401,7 @@ def option_candles(
 
     opt_symbol = f"{symbol} {int(strike)} {option_type}"
     enriched = enrich_chart_payload(opt_symbol, "index", interval, opt_bars, daily, sensitivity=sensitivity)
-    zones = trading_zones(enriched["levels"], opt_bars[-1]["close"])
+    zones = trading_zones(enriched["levels"], opt_bars[-1]["close"], interval=interval)
 
     contract_meta = {
         "underlying": symbol,
@@ -461,22 +461,46 @@ def intraday_levels(bars: list[dict], or_bars: int, swing: int = 2, keep: int = 
     return [{"label": k, "price": round(v, 2)} for k, v in levels]
 
 
-def trading_zones(levels: list[dict], last: float, width: float = 0.003) -> list[dict]:
+def trading_zones(
+    levels: list[dict],
+    last: float,
+    width: float | None = None,
+    interval: str = "5m",
+) -> list[dict]:
     """Bands where 2+ distinct levels cluster or major benchmark levels sit;
-    returns all structural zones covering the market trading range."""
+    returns all structural zones covering the market trading range.
+
+    Timeframe-Scaled Zone Dimensions:
+    - 1m: sharp, pinpoint zones (~3-5 pts) to match 1m micro candle volatility.
+    - 5m: standard execution zones (~6-10 pts).
+    - 15m: setup confirmation zones (~15-20 pts).
+    - 60m / 1d: broad macro institutional bands (~30-50 pts).
+    """
+    interval_params = {
+        "1m": {"width": 0.00010, "buffer_pct": 0.000055, "min_buf": 1.15},
+        "5m": {"width": 0.00022, "buffer_pct": 0.00009, "min_buf": 1.8},
+        "15m": {"width": 0.00050, "buffer_pct": 0.00020, "min_buf": 4.0},
+        "60m": {"width": 0.0015, "buffer_pct": 0.00050, "min_buf": 10.0},
+        "1d": {"width": 0.0030, "buffer_pct": 0.0010, "min_buf": 20.0},
+    }
+    cfg = interval_params.get(interval, interval_params["5m"])
+    eff_width = width if width is not None else cfg["width"]
+    buffer = max(cfg["min_buf"], round(last * cfg["buffer_pct"], 2))
+
     groups: list[list[dict]] = []
     for lv in sorted(levels, key=lambda lv: lv["price"]):
-        if groups and lv["price"] - groups[-1][0]["price"] <= width * last:
+        if groups and lv["price"] - groups[-1][0]["price"] <= eff_width * last:
             groups[-1].append(lv)
         else:
             groups.append([lv])
     raw_zones = []
-    buffer = max(2.0, round(last * 0.0012, 2))
     major_keys = (
-        "DH", "DL", "PDH", "PDL", "PWH", "PWL", "PMH", "PML",
-        "52WH", "52WL", "P", "R1", "R2", "R3", "S1", "S2", "S3",
+        "DH", "DL", "DO", "PDH", "PDL", "PWH", "PWL", "PMH", "PML",
+        "52WH", "52WL", "ATH", "P", "R1", "R2", "R3", "S1", "S2", "S3",
         "ORH", "ORL", "EQH", "EQL", "Res", "Sup", "BSL", "SSL",
+        "5M-H", "5M-L", "15M-H", "15M-L", "5M-", "15M-", "30M-", "1H-", "Daily-",
     )
+    cluster_pad = 0.15 if interval == "1m" else (0.20 if interval == "5m" else 0.25)
     for g in groups:
         low, high = g[0]["price"], g[-1]["price"]
         labels = [lv["label"] for lv in g]
@@ -488,8 +512,21 @@ def trading_zones(levels: list[dict], last: float, width: float = 0.003) -> list
             low = round(low - buffer, 2)
             high = round(high + buffer, 2)
         else:
-            low = round(low - buffer * 0.4, 2)
-            high = round(high + buffer * 0.4, 2)
+            low = round(low - buffer * cluster_pad, 2)
+            high = round(high + buffer * cluster_pad, 2)
+
+        # 1m specific calibration: keep liquidity zone span strictly within 2.0 to 3.0 points range
+        if interval == "1m":
+            span = high - low
+            if span > 3.0:
+                mid = (high + low) / 2.0
+                low = round(mid - 1.5, 2)
+                high = round(mid + 1.5, 2)
+            elif span < 2.0:
+                mid = (high + low) / 2.0
+                low = round(mid - 1.15, 2)
+                high = round(mid + 1.15, 2)
+
         side = "resistance" if low >= last else "support" if high <= last else ("resistance" if (last - low) < (high - last) else "support")
         raw_zones.append({"low": low, "high": high, "labels": labels, "side": side})
 

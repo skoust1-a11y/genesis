@@ -27,6 +27,14 @@ export default function Dashboard() {
   const [book, setBook] = useState({ net_pnl: 0, charges: 0 });
   const [orders, setOrders] = useState<Order[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [forwardMetrics, setForwardMetrics] = useState<{
+    total_trades: number;
+    win_rate: number;
+    net_pnl_inr: number;
+    total_roi_pct: number;
+    total_capital_deployed: number;
+    total_exit_value: number;
+  } | null>(null);
 
   useEffect(() => {
     const fail = (e: unknown) => setError(e instanceof Error ? e.message : "Could not load dashboard");
@@ -35,11 +43,13 @@ export default function Dashboard() {
       Promise.all([
         api<{ positions: Position[]; net_pnl: number; charges: number }>("/api/paper/positions"),
         api<{ orders: Order[] }>("/api/paper/orders"),
+        api<{ metrics: { total_trades: number; win_rate: number; net_pnl_inr: number; total_roi_pct: number; total_capital_deployed: number; total_exit_value: number } }>("/api/trades/forward-tested"),
       ])
-        .then(([p, o]) => {
+        .then(([p, o, f]) => {
           setPositions(p.positions);
           setBook({ net_pnl: p.net_pnl, charges: p.charges });
           setOrders(o.orders);
+          setForwardMetrics(f.metrics);
         })
         .catch(fail);
     };
@@ -84,6 +94,60 @@ export default function Dashboard() {
           <Link href="/markets" className="text-xs text-emerald-700 hover:underline">
             Trade on Markets →
           </Link>
+        </div>
+      </section>
+
+      {/* Forward-Tested Strategy Engine Connection */}
+      <section className="rounded-xl border border-emerald-200/80 bg-gradient-to-r from-emerald-50/90 via-teal-50/70 to-blue-50/70 p-4 shadow-sm">
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="inline-flex items-center rounded-full bg-emerald-600 px-2.5 py-0.5 text-[10px] font-bold text-white uppercase tracking-wider">
+                Strategy Forward-Testing Engine
+              </span>
+              <span className="text-xs font-semibold text-emerald-900">
+                ● Live Out-of-Sample Paper Simulation (Oct 15 – Present)
+              </span>
+            </div>
+            <h3 className="text-base font-bold text-zinc-900">
+              Automated Strategy Edge & Black-76 Option Execution Blueprint
+            </h3>
+            <p className="text-xs text-zinc-600 max-w-2xl">
+              Continuously scanned across 1m, 5m, and 15m timeframes. All setups are valued with true Black-76 option pricing, statutory charges, and dynamic breakeven stops — serving as the automated execution blueprint for future live trading.
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-3">
+            {forwardMetrics && (
+              <div className="grid grid-cols-4 gap-2.5 bg-white/90 backdrop-blur rounded-lg border border-emerald-200 p-2.5 text-center shadow-sm">
+                <div className="px-1">
+                  <div className="text-[10px] text-zinc-500 font-medium">Forward Trades</div>
+                  <div className="font-bold text-zinc-900 text-sm">{forwardMetrics.total_trades}</div>
+                </div>
+                <div className="px-1">
+                  <div className="text-[10px] text-zinc-500 font-medium">Win Rate</div>
+                  <div className="font-bold text-emerald-700 text-sm">{forwardMetrics.win_rate}%</div>
+                </div>
+                <div className="px-1">
+                  <div className="text-[10px] text-zinc-500 font-medium">Net P&L</div>
+                  <div className={`font-bold text-sm ${forwardMetrics.net_pnl_inr >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                    {forwardMetrics.net_pnl_inr >= 0 ? `+${inr(forwardMetrics.net_pnl_inr)}` : inr(forwardMetrics.net_pnl_inr)}
+                  </div>
+                </div>
+                <div className="px-1">
+                  <div className="text-[10px] text-zinc-500 font-medium">Option ROI</div>
+                  <div className="font-bold text-emerald-700 text-sm">+{forwardMetrics.total_roi_pct}%</div>
+                </div>
+              </div>
+            )}
+            <Link
+              href="/forward-tested"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-700 px-3.5 py-2 text-xs font-semibold text-white shadow-sm hover:bg-emerald-800 transition"
+            >
+              <span>📊 View Forward Ledger & Options</span>
+              <span>→</span>
+            </Link>
+          </div>
         </div>
       </section>
 

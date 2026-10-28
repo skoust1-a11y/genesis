@@ -25,6 +25,7 @@ const NAV = [
   { href: "/", label: "Dashboard" },
   { href: "/markets", label: "Markets" },
   { href: "/strategies", label: "Strategies & Analyzer" },
+  { href: "/forward-tested", label: "Forward Tested" },
   { href: "/lab", label: "Strategy Lab" },
   { href: "/deploy", label: "Deploy" },
   { href: "/deployments", label: "Deployments" },

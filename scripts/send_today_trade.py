@@ -79,13 +79,13 @@ def main():
     # Detect signals
     signals = []
     if args.strategy in ("auto", "trendline"):
-        for s in scan_trendline_reversal(today_bars, skip_lunch=False):
+        for s in scan_trendline_reversal(today_bars, skip_lunch="conditional"):
             signals.append(("Trendline Reversal", s))
     if args.strategy in ("auto", "retest"):
-        for s in scan_retest(today_bars, above, pdh, pdl, skip_lunch=False):
+        for s in scan_retest(today_bars, above, pdh, pdl, skip_lunch="conditional"):
             signals.append(("Breakout & Retest", s))
     if args.strategy in ("auto", "sweep"):
-        for s in scan(today_bars, above, pdh, pdl, skip_lunch=False):
+        for s in scan(today_bars, above, pdh, pdl, skip_lunch="conditional"):
             signals.append(("Liquidity Sweep", s))
 
     if not signals:

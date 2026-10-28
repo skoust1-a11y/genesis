@@ -19,7 +19,7 @@ import argparse
 import os
 import sys
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time as dtime, timedelta, timezone
 from pathlib import Path
 
 # Paths
@@ -48,6 +48,8 @@ from app.liquidity_signals import (
     staged_exit_of,
     weekly_expiry,
 )
+from app.paper import order_charges
+from app.trading.option_pnl import black76
 
 
 def get_market_data(days: int = 60) -> tuple[list[dict], dict[str, bool | None], list[dict]]:
@@ -99,52 +101,85 @@ def extract_all_suggested_trades(
         day_open = cur_bars[0]["open"]
         is_today = cur_d == today_str
 
-        # Expiry calculation
+        # Expiry calculation: If today is expiry day, roll to next weekly contract
+        # (institutional best practice so that positions don't expire within hours)
         d_obj = date.fromisoformat(cur_d)
         expiry = weekly_expiry(d_obj, settings)
+        if expiry <= d_obj:
+            next_day = d_obj + timedelta(days=1)
+            expiry = weekly_expiry(next_day, settings)
+            while expiry <= d_obj:
+                next_day += timedelta(days=1)
+                expiry = weekly_expiry(next_day, settings)
 
         # Implied Volatility
         iv_pct = vix_data.get(prev_d, 14.5)
 
-        # For today's trades, entry, exit, and re-entry are strictly based on 1-min candles
-        bar_mins = 1 if is_today else 5
+        # Evaluate Primary Institutional Structure on 5-min candles (consistent across all dates)
+        bar_mins = 5
         eval_bars = cur_bars
         eval_above = above
-        if is_today:
-            try:
-                raw_1m = parse_yahoo_chart(_chart(INDEX, "1m", "1d"))
-                t_1m = [
-                    b for b in raw_1m
-                    if b["date"].startswith(today_str) and None not in (b.get("open"), b.get("high"), b.get("low"))
-                ]
-                if t_1m:
-                    eval_bars = t_1m
-                    proxy_1m = add_vwap(parse_yahoo_chart(_chart(VWAP_PROXY, "1m", "1d")))
-                    eval_above = {b["date"]: b["close"] > b["vwap"] if b.get("vwap") else None for b in proxy_1m}
-            except Exception as e:
-                print(f"⚠️ Could not load 1m bars for today: {e}")
+
+        # Precompute key Spot levels for dynamic targets
+        spot_levels = [pdh, pdl]
+        if len(cur_bars) >= 6:
+            spot_levels.extend([max(b["high"] for b in cur_bars[:6]), min(b["low"] for b in cur_bars[:6])])
+        spot_levels = sorted(list(set(spot_levels)))
 
         # Collect raw signals
         day_signals: list[tuple[str, dict]] = []
 
-        # 1. Trendline Reversal
-        for s in scan_trendline_reversal(eval_bars, skip_lunch=False, allow_reentry=True, bar_minutes=bar_mins):
-            is_reentry = "Re-Entry" in s.get("pool", "")
-            strat_label = f"Trendline Reversal{' (Re-Entry)' if is_reentry else ''}"
-            day_signals.append((strat_label, s))
+        # 1. Trendline Reversal (CHoCH Confirmed + Dynamic Spot Target)
+        for s in scan_trendline_reversal(
+            eval_bars,
+            skip_lunch="conditional",
+            allow_reentry=True,
+            bar_minutes=bar_mins,
+            require_choch=True,
+            max_risk=55.0,
+            dynamic_targets=True,
+            spot_levels=spot_levels,
+        ):
+            if 10.0 <= s.get("risk", 0) <= 55.0:
+                is_reentry = "Re-Entry" in s.get("pool", "")
+                strat_label = f"Trendline Reversal{' (Re-Entry)' if is_reentry else ''}"
+                day_signals.append((strat_label, s))
 
-        # 2. Breakout & Retest
-        for s in scan_retest(eval_bars, eval_above, pdh, pdl, skip_lunch=False, allow_reentry=True, bar_minutes=bar_mins):
-            is_reentry = "Re-Entry" in s.get("pool", "")
-            strat_label = f"Breakout & Retest{' (Re-Entry)' if is_reentry else ''}"
-            day_signals.append((strat_label, s))
+        # 2. Breakout & Retest (Grade A PDH/PDL + ORH/ORL + Dynamic Spot Target)
+        for s in scan_retest(
+            eval_bars,
+            eval_above,
+            pdh,
+            pdl,
+            skip_lunch="conditional",
+            allow_reentry=False,
+            bar_minutes=bar_mins,
+            include_orh_orl=True,
+            dynamic_targets=True,
+            spot_levels=spot_levels,
+        ):
+            if 10.0 <= s.get("risk", 0) <= 55.0:
+                is_reentry = "Re-Entry" in s.get("pool", "")
+                pool_desc = s.get("pool", "")
+                is_orb = "OR" in pool_desc
+                strat_label = f"Breakout & Retest ({'OR-30' if is_orb else 'PD'}){' (Re-Entry)' if is_reentry else ''}"
+                day_signals.append((strat_label, s))
 
-        # 3. Liquidity Sweep
+        # 3. Liquidity Sweep (Grade A PDH/PDL Sweep & Reclaim)
         if not is_today:
-            for s in scan(cur_bars, above, pdh, pdl, skip_lunch=False):
-                day_signals.append(("Liquidity Sweep", s))
+            for s in scan(cur_bars, above, pdh, pdl, skip_lunch="conditional", dynamic_targets=True, spot_levels=spot_levels):
+                if 10.0 <= s.get("risk", 0) <= 55.0:
+                    day_signals.append(("Liquidity Sweep", s))
 
+        # Deduplicate signals at identical time
+        unique_signals = []
+        seen_times = set()
         for strat_name, sig in day_signals:
+            if sig["time"] not in seen_times:
+                seen_times.add(sig["time"])
+                unique_signals.append((strat_name, sig))
+
+        for strat_name, sig in unique_signals:
             entry_time = sig["time"]
             entry_spot = sig["entry"]
             stop_spot = sig["stop"]
@@ -152,8 +187,12 @@ def extract_all_suggested_trades(
             risk_pts = sig["risk"]
             side = sig["side"]
 
-            # Evaluate Exit on 1-min candles for today
-            res = staged_exit_of(eval_bars, sig, bar_minutes=bar_mins)
+            # Dynamic Sizing (Fixed ~₹2,200 - ₹2,500 Risk Budget)
+            trade_lots = 1 if risk_pts > 40.0 else 2
+            qty = trade_lots * lot_size
+
+            # Evaluate Exit with Structure Trailing
+            res = staged_exit_of(eval_bars, sig, bar_minutes=bar_mins, trail_mode="structure")
             exit_reason = res["exit_reason"]
             exit_price = res["exit_price"]
             exit_time = res["exit_time"]
@@ -171,30 +210,44 @@ def extract_all_suggested_trades(
 
             points = exit_price - entry_spot if side == "Long" else entry_spot - exit_price
 
-            # Option Plan
-            plan = estimated_plan(sig, settings, iv_pct=iv_pct, expiry=expiry, lots=lots, otm_steps=0)
-            opt_contract = plan.get("option", "")
-            prem_in = plan.get("entry_premium", 0.0)
-            stop_prem = plan["exits"][0]["premium"] if plan.get("exits") else prem_in * 0.8
-            tgt_prem = plan["exits"][1]["premium"] if len(plan.get("exits", [])) > 1 else prem_in * 1.5
+            # Strike selection: ATM strike (nearest 50 points)
+            step = settings.strike_step("NIFTY") or 50
+            strike = round(entry_spot / step) * step
+            kind = "CE" if side == "Long" else "PE"
+            opt_contract = f"{strike:g} {kind}"
 
-            # Estimated Option P&L in Rupees (2 Lots = 130 qty)
-            qty = lots * lot_size
-            if r_mult >= 3.0 or exit_reason == "Target":
-                est_pnl_rs = (tgt_prem - prem_in) * qty
-                status = "TARGET HIT (3R)"
-            elif r_mult > 0:
-                est_pnl_rs = (prem_in * 0.4 * r_mult) * qty
-                status = f"TRAILED (+{r_mult:.2f}R)"
-            elif r_mult <= -1.0 or "Stop" in exit_reason:
-                est_pnl_rs = -abs(prem_in - stop_prem) * qty
-                status = "STOPPED OUT (-1R)"
-            else:
-                est_pnl_rs = (prem_in * 0.4 * r_mult) * qty
-                status = f"LOSS ({r_mult:.2f}R)" if r_mult < 0 else "FLAT"
+            # Rigorous Black-76 Option Valuation at Entry & Exit timestamps
+            exp_dt = datetime.combine(expiry, dtime.fromisoformat(settings.market_close), IST)
+            ent_dt = datetime.strptime(f"{cur_d} {entry_time[11:]}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+            ext_dt = datetime.strptime(f"{cur_d} {exit_time[11:]}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+
+            y_ent = max((exp_dt - ent_dt).total_seconds(), 300) / 86400 / 365
+            y_ext = max((exp_dt - ext_dt).total_seconds(), 60) / 86400 / 365
+
+            prem_in = round(black76(entry_spot, strike, y_ent, iv_pct / 100, kind), 2)
+            prem_out = round(black76(exit_price, strike, y_ext, iv_pct / 100, kind), 2)
+
+            capital_deployed = round(prem_in * qty, 0)
+            exit_value = round(prem_out * qty, 0)
+
+            # Statutory Order Charges
+            buy_chg = order_charges(settings, kind, "BUY", prem_in, qty, cur_d)["total"]
+            sell_chg = order_charges(settings, kind, "SELL", prem_out, qty, cur_d)["total"]
+            tot_charges = round(buy_chg + sell_chg, 2)
+
+            est_pnl_rs = round((prem_out - prem_in) * qty - tot_charges, 0)
+            roi_pct = round((est_pnl_rs / capital_deployed) * 100, 1) if capital_deployed > 0 else 0.0
 
             if exit_reason == "Active / Running":
                 status = f"ACTIVE ({r_mult:+.2f}R)"
+            elif r_mult >= 2.5 or exit_reason == "Target":
+                status = "TARGET HIT (3R)"
+            elif r_mult > 0.1:
+                status = f"TRAILED (+{r_mult:.2f}R)"
+            elif r_mult <= -0.9 or "Stop" in exit_reason:
+                status = "STOPPED OUT (-1R)"
+            else:
+                status = "FLAT"
 
             all_trades.append({
                 "Date": cur_d,
@@ -213,10 +266,14 @@ def extract_all_suggested_trades(
                 "Points": round(points, 2),
                 "R-Multiple": round(r_mult, 2),
                 "Option": f"NIFTY {opt_contract}",
-                "Expiry": plan.get("expiry", ""),
-                "Entry Premium": round(prem_in, 2),
-                "Est P&L (Rs)": round(est_pnl_rs, 0),
-                "Lots": lots,
+                "Expiry": expiry.isoformat(),
+                "Entry Premium": prem_in,
+                "Exit Premium": prem_out,
+                "Capital Deployed": capital_deployed,
+                "Exit Value": exit_value,
+                "Est P&L (Rs)": est_pnl_rs,
+                "ROI %": roi_pct,
+                "Lots": trade_lots,
                 "Qty": qty,
                 "Rationale": " | ".join(sig.get("why", [])),
             })
@@ -305,20 +362,25 @@ def style_worksheet(ws: openpyxl.worksheet.worksheet.Worksheet, is_dashboard: bo
                 cell.fill = zebra_fill
             cell.alignment = Alignment(vertical="center")
 
-            # Center dates, times, sides, status
+            # Center dates, times, sides, status, expiry
             header_val = ws.cell(1, cell.column).value or ""
-            if header_val in ("Date", "Time", "Side", "Status", "Exit Time", "Lots", "Qty"):
+            if header_val in ("Date", "Time", "Side", "Status", "Exit Time", "Lots", "Qty", "Expiry"):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
-            elif header_val in ("Entry Spot", "Stop Spot", "Target Spot", "Exit Spot", "Risk Pts", "Points", "Entry Premium"):
+            elif header_val in ("Entry Spot", "Stop Spot", "Target Spot", "Exit Spot", "Risk Pts", "Points", "Entry Premium", "Exit Premium"):
                 cell.number_format = "#,##0.00"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
-            elif header_val in ("R-Multiple",):
-                cell.number_format = "+0.00;-0.00;0.00"
+            elif header_val in ("Capital Deployed", "Exit Value", "Est P&L (Rs)"):
+                cell.number_format = '"Rs "#,##0;[Red]-"Rs "#,##0;"Rs "0'
+                cell.alignment = Alignment(horizontal="right", vertical="center")
+                if header_val == "Est P&L (Rs)" and cell.value and isinstance(cell.value, (int, float)):
+                    cell.font = green_font if cell.value > 0 else (red_font if cell.value < 0 else Font(name="Calibri", size=11))
+            elif header_val in ("ROI %",):
+                cell.number_format = "+0.0%;-0.0%;0.0%"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
                 if cell.value and isinstance(cell.value, (int, float)):
                     cell.font = green_font if cell.value > 0 else (red_font if cell.value < 0 else Font(name="Calibri", size=11))
-            elif header_val in ("Est P&L (Rs)",):
-                cell.number_format = '"Rs "#,##0;[Red]-"Rs "#,##0;"Rs "0'
+            elif header_val in ("R-Multiple",):
+                cell.number_format = "+0.00;-0.00;0.00"
                 cell.alignment = Alignment(horizontal="right", vertical="center")
                 if cell.value and isinstance(cell.value, (int, float)):
                     cell.font = green_font if cell.value > 0 else (red_font if cell.value < 0 else Font(name="Calibri", size=11))
@@ -353,9 +415,9 @@ def create_dashboard_tab(ws: openpyxl.worksheet.worksheet.Worksheet, all_trades:
     strats = ["Breakout & Retest", "Trendline Reversal", "Liquidity Sweep"]
     metrics_map = {
         "All Strategies Combined": calculate_metrics(all_trades),
-        "Trendline Reversal": calculate_metrics([t for t in all_trades if t["Strategy"] == "Trendline Reversal"]),
-        "Breakout & Retest": calculate_metrics([t for t in all_trades if t["Strategy"] == "Breakout & Retest"]),
-        "Liquidity Sweep": calculate_metrics([t for t in all_trades if t["Strategy"] == "Liquidity Sweep"]),
+        "Trendline Reversal": calculate_metrics([t for t in all_trades if "Trendline Reversal" in t["Strategy"]]),
+        "Breakout & Retest": calculate_metrics([t for t in all_trades if "Breakout & Retest" in t["Strategy"]]),
+        "Liquidity Sweep": calculate_metrics([t for t in all_trades if "Liquidity Sweep" in t["Strategy"]]),
     }
 
     # Table Header
@@ -471,15 +533,15 @@ def save_strategy_workbooks(all_trades: list[dict]):
     build_strategy_sheet(wb_master, "📋 All Suggested Trades", all_trades)
 
     # Tab 3: Trendline Reversal
-    tl_trades = [t for t in all_trades if t["Strategy"] == "Trendline Reversal"]
+    tl_trades = [t for t in all_trades if "Trendline Reversal" in t["Strategy"]]
     build_strategy_sheet(wb_master, "📈 Trendline Reversal", tl_trades)
 
     # Tab 4: Breakout & Retest
-    retest_trades = [t for t in all_trades if t["Strategy"] == "Breakout & Retest"]
+    retest_trades = [t for t in all_trades if "Breakout & Retest" in t["Strategy"]]
     build_strategy_sheet(wb_master, "🔄 Breakout & Retest", retest_trades)
 
     # Tab 5: Liquidity Sweep
-    sweep_trades = [t for t in all_trades if t["Strategy"] == "Liquidity Sweep"]
+    sweep_trades = [t for t in all_trades if "Liquidity Sweep" in t["Strategy"]]
     build_strategy_sheet(wb_master, "🎯 Liquidity Sweep", sweep_trades)
 
     wb_master.save(master_path)

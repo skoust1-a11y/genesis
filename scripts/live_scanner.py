@@ -49,7 +49,54 @@ from app.liquidity_signals import (
     session_data,
     trading_levels,
 )
+from app.trading import scaling_law
+import openpyxl
 from scripts.maintain_trades_excel import main as update_trades_excel
+
+
+def load_real_money_state(
+    starting_capital: float = 100_000.0,
+    start_lots: int = 4,
+    cfg: scaling_law.ScaleUpLawConfig | None = None,
+) -> tuple[scaling_law.ScalingTierState, scaling_law.ScalingDecision, scaling_law.CircuitBreakerStatus]:
+    """Reconstruct live real-money tier state, locked safety wall, and circuit breaker status from live trades."""
+    config = cfg or scaling_law.ScaleUpLawConfig()
+    state = scaling_law.initialize_tier_state(starting_capital=starting_capital, start_lots=start_lots)
+    master_file = ROOT_DIR / "trades" / "live_and_forward_trades.xlsx"
+    today_trades: list[scaling_law.TradeRecord] = []
+    today_str = datetime.now().strftime("%Y-%m-%d")
+
+    if master_file.exists():
+        try:
+            wb = openpyxl.load_workbook(master_file, data_only=True)
+            if "📋 Live & Forward Trades" in wb.sheetnames:
+                ws = wb["📋 Live & Forward Trades"]
+                rows = list(ws.iter_rows(min_row=2, values_only=True))
+                rows_chron = sorted(rows, key=lambda r: (str(r[0]), str(r[1])))
+                for i, r in enumerate(rows_chron):
+                    pnl = float(r[21]) if r[21] is not None else 0.0
+                    r_mult = float(r[14]) if r[14] is not None else 0.0
+                    lots = int(r[23]) if r[23] is not None else start_lots
+                    date_val = str(r[0])
+                    trade = scaling_law.TradeRecord(
+                        trade_id=f"LF{i}",
+                        date=date_val,
+                        strat_name=str(r[2]),
+                        lots=lots,
+                        pnl_inr=pnl,
+                        r_multiple=r_mult,
+                        exit_reason=str(r[12]),
+                    )
+                    state, _ = scaling_law.record_trade(state, trade, config)
+                    if date_val == today_str:
+                        today_trades.append(trade)
+        except Exception as e:
+            print(f"⚠️ Error loading real-money state from Excel: {e}")
+
+    decision = scaling_law.evaluate_scaling(state, config)
+    cb_status = scaling_law.check_daily_circuit_breaker(today_trades, config)
+    return state, decision, cb_status
+
 
 MARKET_OPEN = "09:15"
 MARKET_CLOSE = "15:30"
@@ -158,11 +205,25 @@ def scan_latest_bars(
                 continue
             tf_bars_map[tf] = bars
             bar_mins = parse_timeframe_minutes(tf)
+            # Precompute key Spot levels for dynamic targets
+            spot_levels = [pdh, pdl]
+            if len(bars) >= 6:
+                spot_levels.extend([max(b["high"] for b in bars[:6]), min(b["low"] for b in bars[:6])])
+            spot_levels = sorted(list(set(spot_levels)))
 
-            # Strategy: Trendline Reversal
+            # Strategy: Trendline Reversal (CHoCH Confirmed + Dynamic Spot Target)
             if strategy in ("auto", "trendline"):
-                for s in scan_trendline_reversal(bars, skip_lunch=True, allow_reentry=allow_reentry, bar_minutes=bar_mins):
-                    if not (10.0 <= s.get("risk", 0) <= 45.0):
+                for s in scan_trendline_reversal(
+                    bars,
+                    skip_lunch="conditional",
+                    allow_reentry=allow_reentry,
+                    bar_minutes=bar_mins,
+                    require_choch=True,
+                    max_risk=55.0,
+                    dynamic_targets=True,
+                    spot_levels=spot_levels,
+                ):
+                    if not (10.0 <= s.get("risk", 0) <= 55.0):
                         continue
                     s_dict = dict(s)
                     s_dict["timeframe"] = tf
@@ -170,21 +231,34 @@ def scan_latest_bars(
                     strat_label = f"Trendline Reversal{' (Re-Entry)' if is_reentry else ''}"
                     signals.append((strat_label, tf, s_dict, bars))
 
-            # Strategy: Breakout & Retest
+            # Strategy: Breakout & Retest (Grade A PDH/PDL + ORH/ORL + Dynamic Spot Target)
             if strategy in ("auto", "retest"):
-                for s in scan_retest(bars, above, pdh, pdl, skip_lunch=True, allow_reentry=allow_reentry, bar_minutes=bar_mins):
-                    if not (10.0 <= s.get("risk", 0) <= 45.0):
+                for s in scan_retest(
+                    bars,
+                    above,
+                    pdh,
+                    pdl,
+                    skip_lunch="conditional",
+                    allow_reentry=False,
+                    bar_minutes=bar_mins,
+                    include_orh_orl=True,
+                    dynamic_targets=True,
+                    spot_levels=spot_levels,
+                ):
+                    if not (10.0 <= s.get("risk", 0) <= 55.0):
                         continue
                     s_dict = dict(s)
                     s_dict["timeframe"] = tf
                     is_reentry = "Re-Entry" in s_dict.get("pool", "")
-                    strat_label = f"Breakout & Retest{' (Re-Entry)' if is_reentry else ''}"
+                    pool_desc = s_dict.get("pool", "")
+                    is_orb = "OR" in pool_desc
+                    strat_label = f"Breakout & Retest ({'OR-30' if is_orb else 'PD'}){' (Re-Entry)' if is_reentry else ''}"
                     signals.append((strat_label, tf, s_dict, bars))
 
             # Strategy: Liquidity Sweep (requires enough bars and timeframe >= 3m)
             if strategy in ("auto", "sweep") and len(bars) >= 12 and bar_mins >= 3:
-                for s in scan(bars, above, pdh, pdl, skip_lunch=True):
-                    if not (10.0 <= s.get("risk", 0) <= 45.0):
+                for s in scan(bars, above, pdh, pdl, skip_lunch="conditional", dynamic_targets=True, spot_levels=spot_levels):
+                    if not (10.0 <= s.get("risk", 0) <= 55.0):
                         continue
                     s_dict = dict(s)
                     s_dict["timeframe"] = tf
@@ -236,11 +310,26 @@ def broadcast_signal(
     buy_range_high = round(per_share_entry + max(2.0, per_share_entry * 0.03), 1)
     max_chase_limit = round(per_share_entry + max(4.0, per_share_entry * 0.06), 1)
 
+    # Load Live Real-Money Scaling State & Safety Wall
+    real_state, real_decision, cb_status = load_real_money_state()
+    active_lots = real_state.current_lots
+    active_qty = active_lots * lot
+    trade_risk_inr = round(per_share_risk * active_qty, 2)
+    risk_pct = round((trade_risk_inr / real_state.current_capital) * 100, 2)
+
+    cb_banner = ""
+    if cb_status.is_locked_out:
+        cb_banner = f"⛔ [REAL-MONEY CIRCUIT BREAKER ACTIVE]\nSession trading locked: {cb_status.reason}\n\n"
+
     sig_time_str = sig["time"][11:16] if len(sig.get("time", "")) >= 16 else sig.get("time", "")
     forward_test_card = (
-        f"🚀 NEW TRADE ENTRY\n"
+        f"{cb_banner}"
+        f"🚀 NEW REAL-MONEY TRADE ENTRY\n"
         f"Trade Name: {strat_name} ({sig['side'].upper()}) [{tf_upper}]\n"
         f"Contract: NIFTY {plan['option']} ({plan['expiry']})\n"
+        f"• Sizing Tier: {active_lots} Lots ({active_qty} Qty) | Max Risk: Rs {trade_risk_inr:,.2f} ({risk_pct}% of capital)\n"
+        f"• Safety Wall: Rs {real_state.safety_wall_locked:,.2f} Locked (Inviolable) | Active Capital: Rs {real_state.active_risk_capital:,.2f}\n"
+        f"• 4-Gate Progress: Trades {real_state.tier_trades_count}/15 | Tier R: +{real_state.tier_accumulated_r:.2f}R/12.0R\n"
         f"• Entry Time: {sig_time_str} IST\n"
         f"• Supposed Entry (CMP): Rs {per_share_entry:,.2f}\n"
         f"• Buy Range: Rs {buy_range_low:,.2f} – Rs {buy_range_high:,.2f}\n"
@@ -261,8 +350,13 @@ def broadcast_signal(
     )
 
     print(f"\n=======================================================")
-    print(f"🚀 LIVE TRADE TRIGGERED: [{strat_name}] {sig['side'].upper()}")
+    if cb_status.is_locked_out:
+        print(f"⛔ CIRCUIT BREAKER ACTIVE: {cb_status.reason}")
+    print(f"🚀 REAL-MONEY BOT TRIGGER: [{strat_name}] {sig['side'].upper()}")
     print(f"   ⏱️ TIMEFRAME: {tf_upper} ({tf_role})")
+    print(f"   🛡️ LOT SIZING: {active_lots} Lots ({active_qty} Qty) | Risk: Rs {trade_risk_inr:,.2f} ({risk_pct}%)")
+    print(f"   🏦 SAFETY WALL: Rs {real_state.safety_wall_locked:,.2f} Locked | Active Capital: Rs {real_state.active_risk_capital:,.2f}")
+    print(f"   ⚖️ 4-GATE STATUS: {real_decision.action} ({real_decision.reason})")
     print(f"   Time: {sig['time']} IST")
     print(f"   Option to Buy: {plan['option']} ({plan['expiry']})")
     print(f"   Suggested Buy Range: Rs {buy_range_low:,.2f} – Rs {buy_range_high:,.2f} / share (CMP ~Rs {per_share_entry:,.2f})")

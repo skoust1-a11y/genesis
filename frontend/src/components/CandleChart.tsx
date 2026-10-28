@@ -190,22 +190,24 @@ const num = (v: number) => v.toLocaleString("en-IN", { minimumFractionDigits: 2,
 const levelColor = (l: string, isDark: boolean) =>
   l.startsWith("Entry")
     ? "#a855f7"
-    : l.startsWith("PDH") ||
+    : l.startsWith("ATH")
+    ? isDark ? "#ef4444" : "#991b1b"
+    : l.includes("Res") ||
+      l.includes("-H") ||
+      l.startsWith("PDH") ||
       l.startsWith("PWH") ||
       l.startsWith("PMH") ||
       l.startsWith("52WH") ||
       l === "DH" ||
-      l.startsWith("Res") ||
-      l.startsWith("Flip Res") ||
       /^R[1-4]/.test(l)
     ? isDark ? "#f87171" : "#e11d48"
-    : l.startsWith("PDL") ||
+    : l.includes("Sup") ||
+      l.includes("-L") ||
+      l.startsWith("PDL") ||
       l.startsWith("PWL") ||
       l.startsWith("PML") ||
       l.startsWith("52WL") ||
       l === "DL" ||
-      l.startsWith("Sup") ||
-      l.startsWith("Flip Sup") ||
       /^S[1-4]/.test(l)
     ? isDark ? "#34d399" : "#059669"
     : /^(EQH)/.test(l)
@@ -216,6 +218,8 @@ const levelColor = (l: string, isDark: boolean) =>
     ? isDark ? "#f87171" : "#e11d48"
     : /^(SSL)/.test(l)
     ? isDark ? "#34d399" : "#059669"
+    : l === "DO" || l.startsWith("DO")
+    ? isDark ? "#94a3b8" : "#64748b"
     : l === "P"
     ? "#818cf8"
     : isDark ? "#94a3b8" : "#64748b";
@@ -228,7 +232,7 @@ const toTime = (d: string): Time =>
     ? ((Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10), +d.slice(11, 13), +d.slice(14, 16)) / 1000) as UTCTimestamp)
     : d;
 
-type Box = { low: number; high: number; color: string; text: string; right?: boolean };
+type Box = { low: number; high: number; color: string; text: string; right?: boolean; alwaysLabel?: boolean };
 
 /** Comprehensive Institutional Canvas Overlays (Structure, BOS, CHoCH, Trendlines, Sweeps, Zones) */
 class InstitutionalOverlays implements ISeriesPrimitive<Time> {
@@ -245,6 +249,12 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
   private showZones = true;
   private showSweeps = true;
   private isDark = true;
+  showLabels = false; // level/zone/trendline names; hidden unless the user asks for them
+
+  setShowLabels(v: boolean) {
+    this.showLabels = v;
+    this.p?.requestUpdate();
+  }
 
   attached(p: SeriesAttachedParameter<Time>) {
     this.p = p;
@@ -319,6 +329,8 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
             ctx.setLineDash([3 * hr, 3 * hr]);
             ctx.strokeRect(x, y, w - x, h);
             ctx.setLineDash([]);
+
+            if (!this.showLabels && !b.alwaysLabel) continue;
 
             // Neat tag pinned to the right edge
             const tw = ctx.measureText(b.text).width + 10 * hr;
@@ -565,7 +577,7 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
               ctx.restore();
 
               // Break marker badge if line was violated
-              if (tl.is_broken && xBreakPx !== null && xBreakPx > x2) {
+              if (this.showLabels && tl.is_broken && xBreakPx !== null && xBreakPx > x2) {
                 const breakY = y2 + p.slopePx * (xBreakPx - x2);
                 ctx.save();
                 ctx.fillStyle = "#ef4444";
@@ -599,6 +611,7 @@ class InstitutionalOverlays implements ISeriesPrimitive<Time> {
             }
 
             // 5. Trendline Label Pill Badge (Placed cleanly along the line near x2)
+            if (!this.showLabels) continue;
             ctx.save();
             ctx.font = `600 ${8.5 * vr}px ui-sans-serif, system-ui, sans-serif`;
             const badgeText = tl.label || `${style.label} (${tl.touch_count ?? 3}T)`;
@@ -779,6 +792,9 @@ export function CandleChart({
   const lastLogicalRange = useRef<{ from: number; to: number } | null>(null);
   const [visibleLogicalRange, setVisibleLogicalRange] = useState<{ from: number; to: number } | null>(null);
   const [hover, setHover] = useState<number | null>(null);
+  const [hoverY, setHoverY] = useState<number | null>(null);
+  const levelGroups = useRef<{ price: number; labels: string[] }[]>([]);
+  const [showLabels, setShowLabels] = useState(false);
 
   // TradingView Style Configuration State
   const [theme, setTheme] = useState<"dark" | "light">(() => propTheme || "dark");
@@ -921,13 +937,34 @@ export function CandleChart({
       rightPriceScale: {
         borderColor: isDark ? darkBorder : lightBorder,
         scaleMargins: { top: 0.08, bottom: 0.18 },
+        autoScale: true,
       },
       timeScale: {
         borderColor: isDark ? darkBorder : lightBorder,
         rightOffset: 8,
-        minBarSpacing: 3,
+        minBarSpacing: 0.001,
         timeVisible: intraday,
         secondsVisible: false,
+        shiftVisibleRangeOnNewBar: true,
+        allowBoldLabels: true,
+      },
+      handleScale: {
+        axisPressedMouseMove: {
+          time: true,
+          price: true,
+        },
+        axisDoubleClickReset: {
+          time: true,
+          price: true,
+        },
+        mouseWheel: true,
+        pinch: true,
+      },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: true,
       },
       localization: { locale: "en-IN", priceFormatter: num },
     });
@@ -1141,6 +1178,8 @@ export function CandleChart({
   useEffect(() => {
     const c = chart.current;
     if (!c || !data.length) return;
+    // The chart is created before bars arrive, so sync time labels (HH:MM) to the loaded timeframe here.
+    c.api.applyOptions({ timeScale: { timeVisible: intraday, secondsVisible: false } });
 
     if (chartType === "candlestick") {
       (c.mainSeries as ISeriesApi<"Candlestick">).setData(
@@ -1314,6 +1353,7 @@ export function CandleChart({
           ]),
     ]);
 
+    chart.current?.overlays.setShowLabels(showLabels);
     chart.current?.overlays.update(
       [...zoneBoxes, ...riskBoxes],
       start?.time ?? null,
@@ -1328,7 +1368,7 @@ export function CandleChart({
       showSweeps,
       isDark
     );
-  }, [zones, plans, data, intraday, showLevelsAndTrendlines, showStructure, showSweeps, marketStructure, trendlines, sweeps, timeMap, isDark, isRangeIncreased]);
+  }, [zones, plans, data, intraday, showLevelsAndTrendlines, showLabels, showStructure, showSweeps, marketStructure, trendlines, sweeps, timeMap, isDark, isRangeIncreased]);
 
   // Clean, Non-Colliding Horizontal Levels on Chart
   useEffect(() => {
@@ -1343,30 +1383,45 @@ export function CandleChart({
     const baseMin = vMin > 0 ? vMin : (data.length > 0 ? Math.min(...data.map((b) => b.low ?? b.close)) : 0);
     const baseMax = vMax > 0 ? vMax : (data.length > 0 ? Math.max(...data.map((b) => b.high ?? b.close)) : 0);
     const viewSpan = Math.max(baseMax - baseMin, 100);
-    const pad = Math.max(viewSpan * 0.15, 60);
-    const lowBound = baseMin - pad;
-    const highBound = baseMax + pad;
 
-    const keyBenchmarks = ["DH", "DL", "PDH", "PDL", "PWH", "PWL", "PMH", "PML", "52WH", "52WL"];
-    const majorPivots = ["P", "R1", "S1", "R2", "S2"];
-    const minorIntraday = ["ORH", "ORL", "EQH", "EQL", "Res", "Sup", "BSL", "SSL", "R3", "S3", "R4", "S4"];
+    const keyBenchmarks = [
+      "DH", "DL", "DO", "PDH", "PDL", "PDC", "PWH", "PWL", "PMH", "PML", "52WH", "52WL", "ATH",
+      "5M-H", "5M-L", "15M-H", "15M-L", "1H-", "30M-", "15M-", "5M-", "Daily-",
+    ];
+    const majorPivots = ["P", "R1", "S1", "R2", "S2", "R3", "S3", "R4", "S4"];
+    const minorIntraday = ["ORH", "ORL", "EQH", "EQL", "Res", "Sup", "Flip", "BSL", "SSL", "Entry"];
 
-    // When range is increased, keep ONLY important benchmark and pivot levels
-    const allowed = isRangeIncreased
-      ? [...keyBenchmarks, ...majorPivots]
-      : [...keyBenchmarks, ...majorPivots, ...minorIntraday];
+    const allowed = [...keyBenchmarks, ...majorPivots, ...minorIntraday];
 
-    const filtered = levels.filter(
-      (lv) => lv.price >= lowBound && lv.price <= highBound && allowed.some((p) => lv.label.startsWith(p))
-    );
+    // Key benchmarks, pivots, and intraday liquidity pools should be preserved across the entire price range
+    // (from starting price to All-Time High) so scrolling/zooming reveals them cleanly
+    const filtered = levels.filter((lv) => allowed.some((p) => lv.label.startsWith(p)));
 
     const sorted = [...filtered].sort((a, b) => a.price - b.price);
     const clustered: { price: number; labels: string[] }[] = [];
     
-    // When range is increased, cluster nearby lines with wider spacing so chart never crowds
+    // Cluster nearby lines with dynamic spacing so chart never crowds
     const minSpacing = isRangeIncreased
       ? Math.max(viewSpan * 0.045, 25)
-      : Math.max(viewSpan * 0.025, 12);
+      : Math.max(viewSpan * 0.015, 8);
+
+    const getLevelPriority = (lbl: string): number => {
+      if (lbl.startsWith("ATH") || lbl.startsWith("52WH") || lbl.startsWith("52WL")) return 100;
+      if (lbl.startsWith("Daily-")) return 90;
+      if (lbl.startsWith("5M-H") || lbl.startsWith("5M-L") || lbl.startsWith("15M-H") || lbl.startsWith("15M-L")) return 85;
+      if (lbl.startsWith("1H-")) return 80;
+      if (lbl.startsWith("30M-")) return 70;
+      if (lbl.startsWith("15M-")) return 60;
+      if (lbl.startsWith("5M-")) return 50;
+      if (lbl.startsWith("PDH") || lbl.startsWith("PDL") || lbl.startsWith("PDC")) return 40;
+      if (lbl.startsWith("PWH") || lbl.startsWith("PWL") || lbl.startsWith("PMH") || lbl.startsWith("PML")) return 35;
+      if (lbl === "DH" || lbl === "DL" || lbl === "DO") return 30;
+      if (lbl.startsWith("ORH") || lbl.startsWith("ORL")) return 25;
+      if (lbl.startsWith("EQH") || lbl.startsWith("EQL")) return 20;
+      if (/^[RS][1-4]/.test(lbl) || lbl === "P") return 15;
+      if (lbl.startsWith("BSL") || lbl.startsWith("SSL")) return 10;
+      return 1;
+    };
 
     for (const lv of sorted) {
       const lastGroup = clustered[clustered.length - 1];
@@ -1379,22 +1434,30 @@ export function CandleChart({
       }
     }
 
+    levelGroups.current = clustered;
+
     for (const item of clustered) {
+      // Sort labels so Higher Timeframe (1H, 30M, 15M, Daily, ATH, PDH) always takes primary precedence in title
+      item.labels.sort((a, b) => getLevelPriority(b) - getLevelPriority(a));
+
       const primary = item.labels[0];
-      const isKeyBenchmark = keyBenchmarks.some((p) => primary.startsWith(p));
+      const isHTFCandle = primary.startsWith("5M-H") || primary.startsWith("5M-L") || primary.startsWith("15M-H") || primary.startsWith("15M-L");
+      const isMacroHTF = primary.startsWith("1H-") || primary.startsWith("Daily-") || primary.startsWith("ATH") || primary.startsWith("52W");
+      const isIntraHTF = isHTFCandle || primary.startsWith("30M-") || primary.startsWith("15M-") || primary.startsWith("5M-") || primary.startsWith("PD");
+      const isKeyBenchmark = isMacroHTF || isIntraHTF || keyBenchmarks.some((p) => primary.startsWith(p));
 
       c.lines.push(
         c.mainSeries.createPriceLine({
           price: item.price,
           color: levelColor(primary, isDark),
-          lineWidth: isKeyBenchmark ? 1 : 1,
-          lineStyle: isKeyBenchmark ? LineStyle.Dashed : LineStyle.SparseDotted,
-          axisLabelVisible: false,
-          title: `${item.labels.slice(0, 2).join("/")} (${num(item.price)})`,
+          lineWidth: isMacroHTF ? 2 : 1,
+          lineStyle: isMacroHTF ? LineStyle.Solid : isHTFCandle ? LineStyle.Dashed : isIntraHTF ? LineStyle.Dashed : LineStyle.SparseDotted,
+          axisLabelVisible: true,
+          title: showLabels ? `${item.labels.slice(0, 3).join("/")} (${num(item.price)})` : "",
         })
       );
     }
-  }, [levels, showLevelsAndTrendlines, data, isDark, isRangeIncreased]);
+  }, [levels, showLevelsAndTrendlines, showLabels, data, isDark, isRangeIncreased]);
 
   // Hovered Bar & Values
   const shown = data[hover !== null && hover >= 0 && hover < data.length ? hover : data.length - 1];
@@ -1404,14 +1467,40 @@ export function CandleChart({
   const changePct = ((change / ((prev?.close ?? op) || 1)) * 100).toFixed(2);
   const activeIdx = shown ? data.indexOf(shown) : data.length - 1;
 
+  const nearestLevel = useMemo(() => {
+    if (!shown || !levelGroups.current.length) return null;
+    const refPrice = shown.close;
+    let closest = levelGroups.current[0];
+    let minDiff = Math.abs(refPrice - closest.price);
+    for (const lg of levelGroups.current) {
+      const diff = Math.abs(refPrice - lg.price);
+      if (diff < minDiff) {
+        minDiff = diff;
+        closest = lg;
+      }
+    }
+    return minDiff <= 35 ? closest : null;
+  }, [shown]);
+
   const currentRsi = indicators?.rsi14?.[activeIdx];
   const currentMacd = indicators?.macd?.[activeIdx];
   const currentSignal = indicators?.signal?.[activeIdx];
   const currentHist = indicators?.hist?.[activeIdx];
 
+  const fitAllHistory = () => {
+    if (chart.current?.api && data.length) {
+      chart.current.api.priceScale("right").applyOptions({ autoScale: true });
+      chart.current.api.timeScale().fitContent();
+    }
+  };
+
   const resetView = () => {
     if (chart.current?.api && data.length) {
-      chart.current.api.timeScale().setVisibleLogicalRange({ from: data.length - 90, to: data.length + 6 });
+      chart.current.api.priceScale("right").applyOptions({ autoScale: true });
+      chart.current.api.timeScale().setVisibleLogicalRange({
+        from: Math.max(0, data.length - 90),
+        to: data.length + 8,
+      });
     }
   };
 
@@ -1546,6 +1635,23 @@ export function CandleChart({
             />
             <span>Levels & Trendlines</span>
           </button>
+
+          {/* Level Names Toggle: Hidden by default, show on demand */}
+          {showLevelsAndTrendlines && (
+            <button
+              onClick={() => setShowLabels(!showLabels)}
+              className={`flex items-center gap-1 rounded px-2 py-0.5 text-[11px] font-semibold border transition ${
+                showLabels
+                  ? "bg-emerald-600 text-white border-emerald-600 shadow-xs"
+                  : isDark
+                  ? "text-[#787b86] border-[#2a2e39] hover:bg-[#1e222d] hover:text-[#d1d4dc]"
+                  : "text-zinc-500 border-zinc-200 hover:bg-zinc-100"
+              }`}
+              title={showLabels ? "Hide level & zone names" : "Show all level & zone names"}
+            >
+              <span>{showLabels ? "🏷️ Names ON" : "🏷️ Names"}</span>
+            </button>
+          )}
 
           {/* Dedicated Sub-Pane Toggles: RSI & MACD */}
           <button
@@ -1797,6 +1903,37 @@ export function CandleChart({
                     </label>
 
                     <label
+                      className="flex items-center justify-between cursor-pointer p-1.5 pl-5 rounded-lg transition"
+                      style={{
+                        backgroundColor: showLabels ? (isDark ? "#2a2e39" : "#f3f4f6") : "transparent",
+                      }}
+                    >
+                      <span className="flex items-center gap-2">
+                        <span className="text-xs">🏷️</span>
+                        <div>
+                          <span
+                            className="block font-semibold text-xs leading-tight"
+                            style={{ color: isDark ? "#ffffff" : "#111827" }}
+                          >
+                            Level & Zone Names
+                          </span>
+                          <span
+                            className="block text-[10px] leading-tight"
+                            style={{ color: isDark ? "#9598a1" : "#6b7280" }}
+                          >
+                            Display names on lines and zones
+                          </span>
+                        </div>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={showLabels}
+                        onChange={(e) => setShowLabels(e.target.checked)}
+                        className="h-4 w-4 rounded accent-emerald-600 cursor-pointer"
+                      />
+                    </label>
+
+                    <label
                       className="flex items-center justify-between cursor-pointer p-1.5 rounded-lg transition"
                       style={{
                         backgroundColor: showVwap ? (isDark ? "#2a2e39" : "#f3f4f6") : "transparent",
@@ -1956,16 +2093,32 @@ export function CandleChart({
             )}
           </div>
 
-          {/* Reset Zoom Button */}
-          <button
-            onClick={resetView}
-            className={`rounded px-2 py-0.5 text-[11px] font-semibold border transition ${
-              isDark ? "text-[#787b86] border-[#2a2e39] hover:bg-[#1e222d] hover:text-[#d1d4dc]" : "text-zinc-600 border-zinc-200 hover:bg-zinc-100"
-            }`}
-            title="Reset Chart View & Fit Candles"
-          >
-            Auto
-          </button>
+          {/* View Controls: Fit All Time & Auto Reset */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={fitAllHistory}
+              className={`flex items-center gap-1 rounded px-2.5 py-0.5 text-[11px] font-bold border transition ${
+                isDark
+                  ? "bg-[#1e222d] text-[#2962ff] hover:bg-[#2a2e39] border-[#2a2e39]"
+                  : "bg-blue-50 text-blue-600 hover:bg-blue-100 border-blue-200"
+              }`}
+              title="Fit All History (Zoom out to max to see all time in one screen)"
+            >
+              <span>⤢</span>
+              <span>Fit All</span>
+            </button>
+            <button
+              onClick={resetView}
+              className={`rounded px-2.5 py-0.5 text-[11px] font-semibold border transition ${
+                isDark
+                  ? "text-[#787b86] border-[#2a2e39] hover:bg-[#1e222d] hover:text-[#d1d4dc]"
+                  : "text-zinc-600 border-zinc-200 hover:bg-zinc-100"
+              }`}
+              title="Auto: Reset to recent candles & auto-scale price axis"
+            >
+              Auto
+            </button>
+          </div>
 
           {/* Explicit Chart Background Theme Switcher (Dark / Light) */}
           <div
@@ -2054,6 +2207,12 @@ export function CandleChart({
                 {currentHist != null && ` Hist ${currentHist.toFixed(2)}`}
               </span>
             )}
+
+            {nearestLevel && !showLabels && (
+              <span className={`px-1.5 py-0.5 rounded text-[10px] ${isDark ? "bg-emerald-950/60 text-emerald-300 border border-emerald-800/50" : "bg-emerald-50 text-emerald-700 border border-emerald-200"}`} title="Nearest Key Level to current candle">
+                📍 {nearestLevel.labels.slice(0, 3).join("/")} ({num(nearestLevel.price)})
+              </span>
+            )}
           </div>
         )}
 
@@ -2070,6 +2229,33 @@ export function CandleChart({
         style={{ height: chartPixelHeight, minHeight: 460 }}
       >
         <div ref={box} className="w-full h-full" />
+
+        {/* Floating Quick Navigation & Scale Helpers (Bottom-Right, TradingView Style) */}
+        <div className="absolute bottom-8 right-16 z-20 flex items-center gap-1 opacity-80 hover:opacity-100 transition-opacity pointer-events-auto">
+          <button
+            onClick={fitAllHistory}
+            className={`px-2 py-1 text-[10px] font-bold uppercase rounded-md shadow-md backdrop-blur-md border transition ${
+              isDark
+                ? "bg-[#1e222d]/90 text-[#3b82f6] border-[#2a2e39] hover:bg-[#2a2e39]"
+                : "bg-white/90 text-blue-600 border-zinc-200 hover:bg-zinc-100"
+            }`}
+            title="Fit All History (Zoom out to max)"
+          >
+            ⤢ All
+          </button>
+          <button
+            onClick={resetView}
+            className={`px-2 py-1 text-[10px] font-bold uppercase rounded-md shadow-md backdrop-blur-md border transition ${
+              isDark
+                ? "bg-[#1e222d]/90 text-[#9598a1] border-[#2a2e39] hover:text-white hover:bg-[#2a2e39]"
+                : "bg-white/90 text-zinc-700 border-zinc-200 hover:bg-zinc-100"
+            }`}
+            title="Auto-Scale & Reset View (Double-click axis also resets)"
+          >
+            Auto
+          </button>
+        </div>
+
         {!data.length && (
           <div className="absolute inset-0 grid place-items-center text-sm text-zinc-500">
             Loading market candles…

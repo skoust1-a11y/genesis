@@ -913,6 +913,7 @@ def calculate_liquidity_levels(
     intraday_bars: list[dict],
     weekly_bars: list[dict] | None = None,
     swings: list[SwingPoint] | None = None,
+    interval: str = "5m",
 ) -> list[LiquidityLevel]:
     """Compute institutional liquidity levels:
 
@@ -986,11 +987,14 @@ def calculate_liquidity_levels(
                 LiquidityLevel("PML", round(pml, 2), "PML", "#059669", "dashed", "high"),
             ])
 
-    # 4. 52-Week / Major Range High & Low (52WH, 52WL)
+    # 4. 52-Week / All-Time High & Low (ATH, 52WH, 52WL)
     if len(daily_bars) >= 20:
         lookback_bars = daily_bars[-252:]
         yh = max((b["high"] or b["close"]) for b in lookback_bars)
         yl = min((b["low"] or b["close"]) for b in lookback_bars)
+        ath = max((b["high"] or b["close"]) for b in daily_bars)
+        if abs(ath - yh) > 5:
+            levels.append(LiquidityLevel("ATH", round(ath, 2), "52WH", "#7f1d1d", "solid", "high"))
         levels.extend([
             LiquidityLevel("52WH", round(yh, 2), "52WH", "#991b1b", "solid", "high"),
             LiquidityLevel("52WL", round(yl, 2), "52WL", "#047857", "solid", "high"),
@@ -1082,23 +1086,50 @@ def calculate_liquidity_levels(
             major_sup_added += 1
             levels.append(LiquidityLevel(lbl, avg_p, kind, col, "dashed", "standard"))
 
-    # 6. Session High (DH), Session Low (DL), Opening Range (ORH, ORL), Equal Highs/Lows
+    # 6. Session Open (DO), High (DH), Low (DL), Opening Range (ORH, ORL), Untouched Pools (BSL, SSL), Equal Highs/Lows
     if intraday_bars:
         latest_day = intraday_bars[-1]["date"][:10]
         today_bars = [b for b in intraday_bars if b["date"][:10] == latest_day]
-        if len(today_bars) > 1:
-            dh = max(b["high"] or b["close"] for b in today_bars)
-            dl = min(b["low"] or b["close"] for b in today_bars)
+        if len(today_bars) >= 1:
+            first_open = today_bars[0].get("open") or today_bars[0]["close"]
+            levels.append(LiquidityLevel("DO", round(first_open, 2), "DO", "#94a3b8", "dotted", "medium"))
+
+            dh = max((b.get("high") or b["close"]) for b in today_bars)
+            dl = min((b.get("low") or b["close"]) for b in today_bars)
             levels.append(LiquidityLevel("DH", round(dh, 2), "DH", "#f43f5e", "solid", "high"))
             levels.append(LiquidityLevel("DL", round(dl, 2), "DL", "#10b981", "solid", "high"))
 
-            # 15m Opening Range (first 3 bars of 5m)
+            # 15m Opening Range (first 3 bars of 5m or 15 bars of 1m)
             or15_bars = [b for b in today_bars if b["date"][11:16] < "09:30"]
+            orh15, orl15 = None, None
             if or15_bars:
-                orh15 = max(b["high"] for b in or15_bars)
-                orl15 = min(b["low"] for b in or15_bars)
+                orh15 = max((b.get("high") or b["close"]) for b in or15_bars)
+                orl15 = min((b.get("low") or b["close"]) for b in or15_bars)
                 levels.append(LiquidityLevel("ORH-15", round(orh15, 2), "ORH", "#f59e0b", "dashed", "medium"))
                 levels.append(LiquidityLevel("ORL-15", round(orl15, 2), "ORL", "#f59e0b", "dashed", "medium"))
+
+            # 30m Opening Range
+            or30_bars = [b for b in today_bars if b["date"][11:16] < "09:45"]
+            if or30_bars and len(or30_bars) > len(or15_bars):
+                orh30 = max((b.get("high") or b["close"]) for b in or30_bars)
+                orl30 = min((b.get("low") or b["close"]) for b in or30_bars)
+                if orh15 is None or abs(orh30 - orh15) > 2:
+                    levels.append(LiquidityLevel("ORH-30", round(orh30, 2), "ORH", "#f59e0b", "dashed", "medium"))
+                if orl15 is None or abs(orl30 - orl15) > 2:
+                    levels.append(LiquidityLevel("ORL-30", round(orl30, 2), "ORL", "#f59e0b", "dashed", "medium"))
+
+            # Untouched Intraday Liquidity Pools (BSL / SSL)
+            if len(today_bars) >= 5:
+                hi = [(b.get("high") or b["close"]) for b in today_bars]
+                lo = [(b.get("low") or b["close"]) for b in today_bars]
+                sw_win = 2
+                rng = range(sw_win, len(today_bars) - sw_win)
+                bsl = [hi[i] for i in rng if hi[i] >= max(hi[i - sw_win : i]) and hi[i] > max(hi[i + 1 :]) and hi[i] != max(hi)]
+                ssl = [lo[i] for i in rng if lo[i] <= min(lo[i - sw_win : i]) and lo[i] < min(lo[i + 1 :]) and lo[i] != min(lo)]
+                for n, p in enumerate(reversed(bsl[-3:]), 1):
+                    levels.append(LiquidityLevel(f"BSL{n}", round(p, 2), "BSL", "#f43f5e", "dashed", "high"))
+                for n, p in enumerate(reversed(ssl[-3:]), 1):
+                    levels.append(LiquidityLevel(f"SSL{n}", round(p, 2), "SSL", "#10b981", "dashed", "high"))
 
             # Equal Highs (EQH) and Equal Lows (EQL)
             atr_val = calculate_atr(intraday_bars, 14)[-1] if len(intraday_bars) >= 14 else 15.0
@@ -1121,6 +1152,76 @@ def calculate_liquidity_levels(
                     avg_eq = round((l1.price + l2.price) / 2.0, 2)
                     levels.append(LiquidityLevel("EQL", avg_eq, "EQL", "#eab308", "solid", "high"))
                     break
+
+    # 7. Higher Timeframe (HTF) Support & Resistance for active timeframe:
+    # When viewing 1m: extract 5M, 15M, 30M, 1H key swing support & resistance
+    # When viewing 5m: extract 15M, 30M, 1H key swing support & resistance
+    # When viewing 15m: extract 30M, 1H, Daily key swing support & resistance
+    # When viewing 60m: extract Daily key swing support & resistance
+    # 7. Higher Timeframe (HTF) Candle High/Low & Swing Support/Resistance:
+    if intraday_bars:
+        # Immediate Previous 1 and 2 Higher-Timeframe Candle Highs & Lows:
+        # On 1m chart: project last 1-2 completed 5M candle Highs & Lows (5M-H1, 5M-L1, 5M-H2, 5M-L2)
+        # On 5m chart: project last 1-2 completed 15M candle Highs & Lows (15M-H1, 15M-L1, 15M-H2, 15M-L2)
+        if interval == "1m":
+            agg_5m = aggregate_bars(intraday_bars, 5)
+            if agg_5m:
+                last_bucket_date = agg_5m[-1]["date"]
+                bars_in_last_bucket = sum(1 for b in intraday_bars if b["date"] >= last_bucket_date)
+                closed_5m = agg_5m[:-1] if (bars_in_last_bucket < 5 and len(agg_5m) >= 2) else agg_5m
+                if closed_5m:
+                    c1 = closed_5m[-1]
+                    levels.append(LiquidityLevel("5M-H1", round(c1["high"], 2), "HTF_CANDLE", "#ef4444", "dashed", "high"))
+                    levels.append(LiquidityLevel("5M-L1", round(c1["low"], 2), "HTF_CANDLE", "#10b981", "dashed", "high"))
+                if len(closed_5m) >= 2:
+                    c2 = closed_5m[-2]
+                    levels.append(LiquidityLevel("5M-H2", round(c2["high"], 2), "HTF_CANDLE", "#f87171", "dotted", "medium"))
+                    levels.append(LiquidityLevel("5M-L2", round(c2["low"], 2), "HTF_CANDLE", "#34d399", "dotted", "medium"))
+        elif interval == "5m":
+            agg_15m = aggregate_bars(intraday_bars, 15)
+            if agg_15m:
+                last_bucket_date = agg_15m[-1]["date"]
+                bars_in_last_bucket = sum(1 for b in intraday_bars if b["date"] >= last_bucket_date)
+                closed_15m = agg_15m[:-1] if (bars_in_last_bucket < 3 and len(agg_15m) >= 2) else agg_15m
+                if closed_15m:
+                    c1 = closed_15m[-1]
+                    levels.append(LiquidityLevel("15M-H1", round(c1["high"], 2), "HTF_CANDLE", "#ef4444", "dashed", "high"))
+                    levels.append(LiquidityLevel("15M-L1", round(c1["low"], 2), "HTF_CANDLE", "#10b981", "dashed", "high"))
+                if len(closed_15m) >= 2:
+                    c2 = closed_15m[-2]
+                    levels.append(LiquidityLevel("15M-H2", round(c2["high"], 2), "HTF_CANDLE", "#f87171", "dotted", "medium"))
+                    levels.append(LiquidityLevel("15M-L2", round(c2["low"], 2), "HTF_CANDLE", "#34d399", "dotted", "medium"))
+
+        htf_configs: list[tuple[str, int]] = []
+        if interval == "1m":
+            htf_configs = [("5M", 5), ("15M", 15), ("30M", 30), ("1H", 60)]
+        elif interval == "5m":
+            htf_configs = [("15M", 15), ("30M", 30), ("1H", 60)]
+        elif interval == "15m":
+            htf_configs = [("30M", 30), ("1H", 60)]
+
+        for htf_label, mins in htf_configs:
+            agg = aggregate_bars(intraday_bars, mins)
+            if len(agg) >= 5:
+                htf_swings = detect_swing_points(agg, sensitivity=2)
+                h_highs = [s for s in htf_swings if s.kind == "high"]
+                h_lows = [s for s in htf_swings if s.kind == "low"]
+                if h_highs:
+                    last_h = h_highs[-1]
+                    levels.append(LiquidityLevel(f"{htf_label}-Res", round(last_h.price, 2), "RESISTANCE", "#f43f5e", "dashed", "high"))
+                if h_lows:
+                    last_l = h_lows[-1]
+                    levels.append(LiquidityLevel(f"{htf_label}-Sup", round(last_l.price, 2), "SUPPORT", "#10b981", "dashed", "high"))
+
+    # Daily Structural Support & Resistance (for intraday charts 1m, 5m, 15m, 60m)
+    if daily_bars and len(daily_bars) >= 6:
+        d_swings = detect_swing_points(daily_bars, sensitivity=2)
+        d_highs = [s for s in d_swings if s.kind == "high"]
+        d_lows = [s for s in d_swings if s.kind == "low"]
+        if d_highs:
+            levels.append(LiquidityLevel("Daily-Res", round(d_highs[-1].price, 2), "RESISTANCE", "#dc2626", "dashed", "high"))
+        if d_lows:
+            levels.append(LiquidityLevel("Daily-Sup", round(d_lows[-1].price, 2), "SUPPORT", "#059669", "dashed", "high"))
 
     return levels
 
@@ -1789,7 +1890,7 @@ def enrich_chart_payload(
 
     # 4. Liquidity Levels & Sweeps
     weekly_bars = weekly_bars_from_daily(daily_bars)
-    liquidity_levels = calculate_liquidity_levels(daily_bars, bars, weekly_bars, swings=swings)
+    liquidity_levels = calculate_liquidity_levels(daily_bars, bars, weekly_bars, swings=swings, interval=interval)
     sweeps = detect_liquidity_sweeps(bars, liquidity_levels)
 
     # 5. Trend Classification Engine

@@ -64,6 +64,7 @@ from app.strategies.rules import (
 from app.strategies.schema import parse_strategy_markdown
 from app.trading import odds as odds_gate
 from app.trading import policy as trade_policy
+from app.trading import scaling_law
 from app.trading.decisions import (
     MissingMarketConfig,
     build_entry_proposal,
@@ -1018,6 +1019,7 @@ def _entry(state: TickState) -> TickState:
         halt(ctx, str(exc))
         return {"stop": True, "outcome": "halted", "detail": "missing lot size or strike step"}
     lots, sizing_check = max_lots, None
+    scale_check, cb_check = None, None
     policy = trade_policy.policy_from_limits(deployment.risk_limits)
     if policy is not None and policy.sizing is not None:
         store = LiveStore(ctx.live)
@@ -1026,6 +1028,46 @@ def _entry(state: TickState) -> TickState:
         economics = proposal["economics"]
         per_lot = economics.max_loss / max_lots if economics else None
         lots, sizing_check = trade_policy.size_lots(policy.sizing, max_lots, capital, per_lot)
+
+    if policy is not None and policy.scale_up_law is not None:
+        store = LiveStore(ctx.live)
+        closed = store.closed_trades([deployment.id])
+        base_cap = capital_in_force(store, ctx.settings, deployment)
+        tier_state = scaling_law.initialize_tier_state(base_cap, start_lots=policy.scale_up_law.min_lots)
+        economics = proposal.get("economics")
+        per_lot_loss = (economics.max_loss / max_lots) if economics and economics.max_loss else 2275.0
+        for t in closed:
+            pnl = float(t.net)
+            r_mult = pnl / per_lot_loss if per_lot_loss else (1.0 if pnl > 0 else -1.0)
+            rec = scaling_law.TradeRecord(
+                trade_id=str(t.id),
+                date=t.closed_at.isoformat() if t.closed_at else "",
+                strat_name="RealMoney",
+                lots=max(1, getattr(t, "lots", 1)),
+                pnl_inr=pnl,
+                r_multiple=round(r_mult, 2),
+            )
+            tier_state, _ = scaling_law.record_trade(tier_state, rec, policy.scale_up_law)
+        decision = scaling_law.evaluate_scaling(tier_state, policy.scale_up_law)
+        auth_lots = decision.recommended_lots
+        passed = lots <= auth_lots
+        scale_check = Check("policy.scale_up_law", "authorized_lots", "<=", auth_lots, lots, passed)
+        lots = min(lots, auth_lots)
+
+        today_trades = [
+            scaling_law.TradeRecord(
+                trade_id=str(t.id),
+                date=t.closed_at.isoformat() if t.closed_at else "",
+                strat_name="RealMoney",
+                lots=max(1, getattr(t, "lots", 1)),
+                pnl_inr=float(t.net),
+                r_multiple=round(float(t.net) / per_lot_loss if per_lot_loss else (1.0 if float(t.net) > 0 else -1.0), 2),
+            )
+            for t in store.trades_closed_on(ctx.clock().date(), ctx.deployment_id)
+        ]
+        cb_status = scaling_law.check_daily_circuit_breaker(today_trades, policy.scale_up_law)
+        cb_check = Check("policy.circuit_breaker", "is_locked_out", "==", False, cb_status.is_locked_out, not cb_status.is_locked_out)
+
     unscaled = lots
     ladder = state.get("ladder")
     vix_factor = trade_policy.vix_size_factor(policy.vix_sizing, market.vix) if policy is not None else 1.0
@@ -1039,6 +1081,8 @@ def _entry(state: TickState) -> TickState:
         "proposal": proposal,
         "max_lots": max_lots,
         "sizing_check": sizing_check,
+        "scale_check": scale_check,
+        "cb_check": cb_check,
         "unscaled_lots": unscaled,
         "vix_factor": vix_factor,
     }
@@ -1094,7 +1138,16 @@ def _risk_checks(state: TickState, proposal: dict) -> list[Check]:
         economics = proposal["economics"]
         max_loss = economics.max_loss if economics else None
         checks += drawdown.floor_checks(state["floor_inr"], state["equity"].equity_inr, max_loss)
-    checks += [c for c in (state.get("sizing_check"), state.get("daily_check")) if c is not None]
+    checks += [
+        c
+        for c in (
+            state.get("sizing_check"),
+            state.get("daily_check"),
+            state.get("scale_check"),
+            state.get("cb_check"),
+        )
+        if c is not None
+    ]
     if state.get("odds") is not None:
         checks += odds_gate.odds_checks(state["odds"], live_odds.gate_for(deployment))
     margin = _margin_check(ctx, proposal)

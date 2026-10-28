@@ -95,7 +95,11 @@ start_services() {
     echo -e "Starting Frontend on ${CYAN}http://localhost:${FRONTEND_PORT}${NC}..."
     (
       cd "${FRONTEND_DIR}"
-      nohup npx next dev -p "${FRONTEND_PORT}" > "${LOGS_DIR}/frontend.log" 2>&1 &
+      if [ -x "./node_modules/.bin/next" ]; then
+        nohup ./node_modules/.bin/next dev -p "${FRONTEND_PORT}" </dev/null > "${LOGS_DIR}/frontend.log" 2>&1 &
+      else
+        nohup npx next dev -p "${FRONTEND_PORT}" </dev/null > "${LOGS_DIR}/frontend.log" 2>&1 &
+      fi
       echo $! > "${PID_DIR}/frontend.pid"
     )
   fi
