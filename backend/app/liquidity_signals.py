@@ -810,6 +810,13 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
             elif vix_val > MAX_VIX:
                 option_lines += ["", f"⚠️ India VIX {vix_val:g}% is Elevated (>{MAX_VIX}%): Risk of IV crush; strongly prefer Debit Spread."]
         option_loss = -stop["pnl"] / lots_n
+        if plan.get("tier"):
+            tier_header = [
+                f"⚡ 3-TIER SIZING: {plan['tier']} | {lots_n} Lots ({lot * lots_n} Qty)",
+                f"   Capital Deployed: ~Rs {plan.get('capital_deployed', 0):,.0f} | Risk on Stop-Out: ~Rs {-stop['pnl']:,.0f}",
+                "",
+            ]
+            option_lines = tier_header + option_lines
     else:
         option = f"{strike_of(s, step):g} {'CE' if long else 'PE'}"
         option_lines = [f"{option}: ~Rs {fut_loss * 0.4:,.0f}/lot at stop (delta ~0.4; option chain unavailable)"]
@@ -885,10 +892,113 @@ def message(s: dict, settings: Settings, plan: dict | None = None, levels: list[
     return "\n".join(lines)
 
 
-def option_plan(s: dict, settings: Settings, lots: int = 2, otm_steps: int = OTM_STEPS) -> dict | None:
+
+def is_super_trend_setup(s: dict, vix: float | None = None) -> bool:
+    """Detects whether a trade setup qualifies as a high-velocity Super-Trend day.
+    Conditions:
+    1. Trendline breakout with steep slope (|slope| >= 2.0 pts/bar).
+    2. Clean breakout beyond previous day extreme (PDH / PDL) or OR-30 with momentum.
+    3. India VIX expansion (>= 14.5).
+    """
+    pool = s.get("pool", "").lower()
+    why_text = " ".join(s.get("why", [])).lower()
+    trendline = s.get("trendline")
+    if trendline and len(trendline) >= 4:
+        x1, y1, x2, y2 = trendline
+        dx = x2 - x1
+        if dx != 0 and abs((y2 - y1) / dx) >= 2.0:
+            return True
+    if "slope" in why_text:
+        try:
+            for part in why_text.split("slope"):
+                sub = part.strip().split()[0].replace(")", "").replace(":", "")
+                if abs(float(sub)) >= 2.0:
+                    return True
+        except (ValueError, IndexError):
+            pass
+    if "or-30" in pool or "pd" in pool:
+        time_str = s.get("time", "")[11:16]
+        if time_str and time_str <= "11:30":
+            return True
+    if vix is not None and vix >= 14.5:
+        return True
+    return False
+
+
+def resolve_strike_and_lots(
+    s: dict,
+    settings: Settings,
+    capital: float = 50000.0,
+    margin_budget: float = 18000.0,
+    max_risk_pct: float = 4.5,
+    vix: float = 13.5,
+) -> tuple[int, int, str]:
+    """Resolves (otm_steps, lots, tier_name) according to the 3-Tier Execution Framework:
+    - Tier 2 (Super-Trend): 4 Lots, 2-OTM (when Super-Trend setup detected, price <= margin budget)
+    - Tier 1 (General): 3 Lots, 1-OTM (standard daily setups, solid delta)
+    - Tier 3 (Expensive): 2 Lots, ATM (when entry premium > 155.0 / fresh Monday contracts)
+    """
+    step = settings.strike_step("NIFTY") or 50.0
+    lot_size = settings.lot_size("NIFTY") or 65
+    kind = "CE" if s["side"] == "Long" else "PE"
+    is_super = is_super_trend_setup(s, vix=vix)
+
+    # Estimate ATM entry premium to gauge contract price
+    atm_strike = strike_of(s, step, otm_steps=0)
+    exp = weekly_expiry(date.fromisoformat(s["time"][:10]), settings)
+    left = datetime.combine(exp, dtime.fromisoformat(settings.market_close), IST) - datetime.strptime(
+        s["time"], "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=IST)
+    rem_days = max(left.total_seconds() / 86400, 0.0035)
+    atm_prem = black76(s["entry"], atm_strike, rem_days / 365, vix / 100, kind)
+
+    if is_super and atm_prem <= 155.0:
+        target_otm = 2
+        preferred_lots = 4
+        tier_name = "Tier 2 (Super-Trend: 4 Lots 2-OTM)"
+    elif atm_prem > 155.0:
+        target_otm = 0
+        preferred_lots = 2
+        tier_name = "Tier 3 (Expensive: 2 Lots ATM)"
+    else:
+        target_otm = 1
+        preferred_lots = 3
+        tier_name = "Tier 1 (General: 3 Lots 1-OTM)"
+
+    selected_strike = strike_of(s, step, otm_steps=target_otm)
+    entry_prem = black76(s["entry"], selected_strike, rem_days / 365, vix / 100, kind)
+    stop_prem = black76(s["stop"], selected_strike, max(rem_days - 0.02, 0.0035) / 365, vix / 100, kind)
+
+    lot_cost = entry_prem * lot_size
+    lot_risk = max(0.5, (entry_prem - stop_prem)) * lot_size
+    max_risk_allowed = capital * (max_risk_pct / 100.0)
+
+    lots_by_margin = int(margin_budget // lot_cost) if lot_cost > 0 else 2
+    lots_by_risk = int(max_risk_allowed // lot_risk) if lot_risk > 0 else 2
+
+    final_lots = max(2, min(preferred_lots, lots_by_margin, lots_by_risk))
+    return target_otm, final_lots, tier_name
+
+
+def option_plan(s: dict, settings: Settings, lots: int | None = None, otm_steps: int | None = None) -> dict | None:
     """The strike_of() call (long) or put (short) priced from Groww's live chain at entry, stop and target; estimated
-    at India VIX when the chain is unavailable; None if VIX is unavailable too."""
+    at India VIX when the chain is unavailable; None if VIX is unavailable too.
+    When lots or otm_steps are None, dynamically resolves via the 3-Tier Execution Framework."""
     step = settings.strike_step("NIFTY") or 50
+    tier_name = None
+    vix = 13.5
+    try:
+        vix = parse_yahoo_chart(_chart("^INDIAVIX", "1d", "5d"))[-1]["close"]
+    except (httpx.HTTPError, IndexError, KeyError):
+        pass
+
+    if lots is None or otm_steps is None:
+        dyn_otm, dyn_lots, tier_name = resolve_strike_and_lots(s, settings, vix=vix)
+        if otm_steps is None:
+            otm_steps = dyn_otm
+        if lots is None:
+            lots = dyn_lots
+
     feed = BrokerFeed(GrowwQuotes(), settings, iv_rank=lambda *_: None, prev_range=lambda *_: None)
     plan = None
     try:
@@ -901,28 +1011,27 @@ def option_plan(s: dict, settings: Settings, lots: int = 2, otm_steps: int = OTM
     except (httpx.HTTPError, ValueError, KeyError) as exc:
         print(f"option chain unavailable: {exc}")
     if plan is None:
-        vix = 13.5
-        try:
-            vix = parse_yahoo_chart(_chart("^INDIAVIX", "1d", "5d"))[-1]["close"]
-        except (httpx.HTTPError, IndexError, KeyError) as exc:
-            print(f"India VIX unavailable, using fallback 13.5%: {exc}")
         plan = estimated_plan(s, settings, vix, lots=lots, otm_steps=otm_steps)
-    if plan and "spread" not in plan:
-        kind = "CE" if s["side"] == "Long" else "PE"
-        strike = strike_of(s, step, otm_steps=otm_steps)
-        spread_strike = strike + (2 * step if kind == "CE" else -2 * step)
-        entry_buy = plan["entry_premium"]
-        entry_sell = entry_buy * 0.45
-        spread_debit = max(entry_buy - entry_sell, 0.5)
+    if plan:
+        if tier_name:
+            plan["tier"] = tier_name
         lot = settings.lot_size("NIFTY") or 65
         total_qty = lot * lots
-        plan["spread"] = {
-            "buy_strike": f"{strike:g} {kind}",
-            "sell_strike": f"{spread_strike:g} {kind}",
-            "net_debit": round(spread_debit, 2),
-            "max_risk": round(spread_debit * total_qty, 2),
-            "max_reward": round((2 * step - spread_debit) * total_qty, 2),
-        }
+        plan["capital_deployed"] = round(plan["entry_premium"] * total_qty, 2)
+        if "spread" not in plan:
+            kind = "CE" if s["side"] == "Long" else "PE"
+            strike = strike_of(s, step, otm_steps=otm_steps)
+            spread_strike = strike + (2 * step if kind == "CE" else -2 * step)
+            entry_buy = plan["entry_premium"]
+            entry_sell = entry_buy * 0.45
+            spread_debit = max(entry_buy - entry_sell, 0.5)
+            plan["spread"] = {
+                "buy_strike": f"{strike:g} {kind}",
+                "sell_strike": f"{spread_strike:g} {kind}",
+                "net_debit": round(spread_debit, 2),
+                "max_risk": round(spread_debit * total_qty, 2),
+                "max_reward": round((2 * step - spread_debit) * total_qty, 2),
+            }
     return plan
 
 
@@ -934,15 +1043,31 @@ def weekly_expiry(day: date, settings: Settings) -> date:
     return exp
 
 
-def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | None = None, lots: int = 2, otm_steps: int = OTM_STEPS) -> dict:
+def estimated_plan(
+    s: dict,
+    settings: Settings,
+    iv_pct: float,
+    expiry: date | None = None,
+    lots: int | None = None,
+    otm_steps: int | None = None,
+) -> dict:
     """option_plan() without a live chain: the strike_of() option to `expiry` (default: the weekly one) priced by
     Black-76 at `iv_pct` (India VIX, a 30-day ATM IV), forward = spot. Same shape as plan_pnl() with `quote` None."""
     step, lot = settings.strike_step("NIFTY") or 50, settings.lot_size("NIFTY") or 65
+    tier_name = None
+    if lots is None or otm_steps is None:
+        dyn_otm, dyn_lots, tier_name = resolve_strike_and_lots(s, settings, vix=iv_pct)
+        if otm_steps is None:
+            otm_steps = dyn_otm
+        if lots is None:
+            lots = dyn_lots
+
     total_qty = lot * lots
     kind, strike = "CE" if s["side"] == "Long" else "PE", strike_of(s, step, otm_steps=otm_steps)
     expiry = expiry or weekly_expiry(date.fromisoformat(s["time"][:10]), settings)
     left = datetime.combine(expiry, dtime.fromisoformat(settings.market_close), IST) - datetime.strptime(
-        s["time"], "%Y-%m-%d %H:%M").replace(tzinfo=IST)  # fmt: skip
+        s["time"], "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=IST)  # fmt: skip
     rem_days = max(left.total_seconds() / 86400, 0.0035)
     exit_days = max(rem_days - min(0.02, rem_days * 0.3), 0.0035)
     entry = black76(s["entry"], strike, rem_days / 365, iv_pct / 100, kind)
@@ -966,9 +1091,22 @@ def estimated_plan(s: dict, settings: Settings, iv_pct: float, expiry: date | No
         "max_risk": spread_max_risk,
         "max_reward": spread_max_reward,
     }
-    return {"option": f"{strike:g} {kind}", "expiry": expiry.isoformat(), "iv_pct": round(iv_pct, 2),
-            "forward_basis": 0.0, "entry_premium": round(entry, 2), "quote": None, "quantity": total_qty, "lots": lots,
-            "exits": exits, "spread": spread}  # fmt: skip
+    res = {
+        "option": f"{strike:g} {kind}",
+        "expiry": expiry.isoformat(),
+        "iv_pct": round(iv_pct, 2),
+        "forward_basis": 0.0,
+        "entry_premium": round(entry, 2),
+        "quote": None,
+        "quantity": total_qty,
+        "lots": lots,
+        "exits": exits,
+        "spread": spread,
+        "capital_deployed": round(entry * total_qty, 2),
+    }
+    if tier_name:
+        res["tier"] = tier_name
+    return res
 
 
 def option_bars(bars: list[dict], plan: dict, settings: Settings) -> list[dict]:

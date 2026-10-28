@@ -153,3 +153,43 @@ def test_10_lots_roadmap():
     res_50k = calculate_10_lots_roadmap(50_000.0, 2)
     assert res_50k["starting_lots"] == 2
     assert res_50k["projected_months_to_10_lots"] == 5.5
+
+
+def test_3_tier_execution_framework():
+    from app.config import get_settings
+    from app.liquidity_signals import is_super_trend_setup, resolve_strike_and_lots
+
+    settings = get_settings()
+
+    # Test 1: Super-Trend setup detection
+    st_sig = {
+        "side": "Long",
+        "entry": 22610.0,
+        "stop": 22585.0,
+        "time": "2026-10-28 10:15",
+        "pool": "Breakout & Retest (OR-30)",
+        "why": ["cleared OR-30H"],
+    }
+    assert is_super_trend_setup(st_sig)
+
+    # Test 2: Standard setup detection (Not super-trend)
+    std_sig = {
+        "side": "Long",
+        "entry": 22610.0,
+        "stop": 22585.0,
+        "time": "2026-10-28 13:45",
+        "pool": "Trendline",
+        "why": ["slope -1.2"],
+    }
+    assert not is_super_trend_setup(std_sig)
+
+    # Test 3: Tier 1 (General: 3 Lots / 1-OTM) on standard setup
+    otm_1, lots_1, tier_1 = resolve_strike_and_lots(std_sig, settings, vix=13.5)
+    assert otm_1 in (0, 1)
+    assert lots_1 in (2, 3)
+
+    # Test 4: Tier 2 (Super-Trend: 4 Lots / 2-OTM) when cheap option allows
+    otm_2, lots_2, tier_2 = resolve_strike_and_lots(st_sig, settings, vix=13.5)
+    assert otm_2 in (0, 2)
+    assert lots_2 in (2, 3, 4)
+

@@ -42,10 +42,12 @@ from app.liquidity_signals import (
     OTM_STEPS,
     VWAP_PROXY,
     estimated_plan,
+    resolve_strike_and_lots,
     scan,
     scan_retest,
     scan_trendline_reversal,
     staged_exit_of,
+    strike_of,
     weekly_expiry,
 )
 from app.paper import order_charges
@@ -187,8 +189,10 @@ def extract_all_suggested_trades(
             risk_pts = sig["risk"]
             side = sig["side"]
 
-            # Dynamic Sizing (Fixed ~₹2,200 - ₹2,500 Risk Budget)
-            trade_lots = 1 if risk_pts > 40.0 else 2
+            # 3-Tier Execution Framework (Dynamic Strike & Lots)
+            otm_steps, trade_lots, tier_name = resolve_strike_and_lots(
+                sig, settings, capital=50000.0, margin_budget=18000.0, max_risk_pct=4.5, vix=iv_pct
+            )
             qty = trade_lots * lot_size
 
             # Evaluate Exit with Structure Trailing
@@ -210,9 +214,9 @@ def extract_all_suggested_trades(
 
             points = exit_price - entry_spot if side == "Long" else entry_spot - exit_price
 
-            # Strike selection: ATM strike (nearest 50 points)
+            # Strike selection based on resolved 3-Tier OTM steps
             step = settings.strike_step("NIFTY") or 50
-            strike = round(entry_spot / step) * step
+            strike = strike_of(sig, step, otm_steps=otm_steps)
             kind = "CE" if side == "Long" else "PE"
             opt_contract = f"{strike:g} {kind}"
 
@@ -253,7 +257,7 @@ def extract_all_suggested_trades(
                 "Date": cur_d,
                 "Time": entry_time[11:],
                 "Strategy": strat_name,
-                "Pool / Setup": sig.get("pool", strat_name),
+                "Pool / Setup": f"{sig.get('pool', strat_name)} [{tier_name.split(':')[0]}]" if tier_name else sig.get("pool", strat_name),
                 "Side": side.upper(),
                 "Status": status,
                 "Entry Spot": round(entry_spot, 2),
