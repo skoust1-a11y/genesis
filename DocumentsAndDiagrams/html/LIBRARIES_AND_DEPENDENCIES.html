@@ -1,0 +1,310 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>LIBRARIES_AND_DEPENDENCIES</title><style>
+body { font-family: Helvetica, Arial, sans-serif; color: #1c1917; line-height: 1.45;
+       max-width: 920px; margin: 32px auto; padding: 0 24px; font-size: 12.5px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #d6d3d1; padding: 4px 6px; vertical-align: top; text-align: left; }
+th { background: #f5f5f4; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+pre { background: #f5f5f4; padding: 10px; overflow: auto; white-space: pre-wrap; }
+img { max-width: 100%; height: auto; margin: 8px 0; }
+blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1; color: #44403c; }
+</style></head><body><h1>Libraries and Dependencies</h1>
+
+<p>Libraries and external services Trading Strategy Lab actually uses. Each entry was checked against <code>backend/pyproject.toml</code>, <code>frontend/package.json</code>, and imports under <code>backend/app</code> and <code>frontend/src</code>.</p>
+
+<p>Application code was not changed to produce this document.</p>
+
+<p>Analysis date: 2026-10-10.</p>
+
+<h2>1. Overview</h2>
+
+<p>The application is a Python API plus a Next.js UI. Crew processes are the same Python package, started as modules rather than as separate services.</p>
+
+<table><thead><tr><th>Surface</th><th>Manifest</th><th>Lockfile</th></tr></thead><tbody>
+<tr><td>Backend</td><td><code>backend/pyproject.toml</code></td><td><code>backend/uv.lock</code></td></tr>
+<tr><td>Frontend</td><td><code>frontend/package.json</code></td><td><code>frontend/package-lock.json</code></td></tr>
+<tr><td>Reference tree</td><td><code>vendor/TradingAgents</code></td><td>Not installed as a dependency of this app</td></tr>
+</tbody></table>
+
+<p>Backend packages require Python <code>&gt;=3.12</code>. The frontend declares Next.js <code>15.5.27</code> and React <code>19.1.0</code>.</p>
+
+<table><thead><tr><th>Criticality</th><th>Meaning here</th></tr></thead><tbody>
+<tr><td>Core</td><td>Imported on the API or UI path that always loads</td></tr>
+<tr><td>Supporting</td><td>Imported on a path that runs only for that feature</td></tr>
+<tr><td>Development-only</td><td>Tests or lint</td></tr>
+<tr><td>Unused declaration</td><td>Listed in a manifest or <code>.env.example</code> and not imported</td></tr>
+</tbody></table>
+
+<p><code>vendor/TradingAgents</code> declares its own dependencies. This application does not import that package. Those dependencies are not listed below.</p>
+
+<h2>2. Backend libraries</h2>
+
+<h3>FastAPI</h3>
+
+<p>1. <strong>Name:</strong> FastAPI</p>
+<p>2. <strong>Version:</strong> <code>&gt;=0.142.2</code> (declared)</p>
+<p>3. <strong>Category:</strong> API</p>
+<p>4. <strong>Purpose:</strong> HTTP routes, request models, and OpenAPI.</p>
+<p>5. <strong>Why it is used:</strong> The API is a FastAPI app.</p>
+<p>6. <strong>Where it is used:</strong> <code>backend/app/main.py</code>, <code>backend/app/api/routes.py</code>, <code>journal.py</code>, <code>audit.py</code>, <code>live.py</code>, <code>market.py</code>, <code>common.py</code>.</p>
+<p>7. <strong>Main functionality:</strong> <code>FastAPI</code>, <code>APIRouter</code>, <code>Depends</code>, <code>HTTPException</code>.</p>
+<p>8. <strong>Important configuration:</strong> <code>BACKEND_PORT</code> (default 8841), <code>CORS_ORIGINS</code>.</p>
+<p>9. <strong>Criticality:</strong> Core.</p>
+<p>10. <strong>External service:</strong> None.</p>
+<p>11. <strong>Compatibility:</strong> Pydantic v2.</p>
+
+<h3>Uvicorn</h3>
+
+<p>1. <strong>Name:</strong> Uvicorn</p>
+<p>2. <strong>Version:</strong> <code>&gt;=0.54.0</code></p>
+<p>3. <strong>Category:</strong> API</p>
+<p>4. <strong>Purpose:</strong> ASGI server.</p>
+<p>5. <strong>Why it is used:</strong> The root README starts <code>uvicorn app.main:app</code>.</p>
+<p>6. <strong>Where it is used:</strong> Process entry. <code>backend/app/main.py</code> does not call <code>uvicorn.run</code>. The console script <code>trading-strategy-lab-backend</code> points at <code>trading_strategy_lab_backend:main</code>, which only prints a hello string.</p>
+<p>7. <strong>Criticality:</strong> Core for serving the API.</p>
+<p>8. <strong>External service:</strong> None.</p>
+
+<h3>Pydantic and pydantic-settings</h3>
+
+<p>1. <strong>Name:</strong> pydantic, pydantic-settings</p>
+<p>2. <strong>Version:</strong> <code>pydantic&gt;=2.13.5</code>, <code>pydantic-settings&gt;=2.15.0</code></p>
+<p>3. <strong>Category:</strong> Validation and configuration</p>
+<p>4. <strong>Purpose:</strong> Request bodies and <code>Settings</code>.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/config.py</code>, API request models.</p>
+<p>6. <strong>Important configuration:</strong> Environment variables documented in <code>.env.example</code>. <code>Settings</code> ignores unknown keys (<code>extra=&quot;ignore&quot;</code>), which is why unused Langfuse keys do not crash startup.</p>
+<p>7. <strong>Criticality:</strong> Core.</p>
+
+<h3>python-dotenv</h3>
+
+<p>1. <strong>Name:</strong> python-dotenv</p>
+<p>2. <strong>Version:</strong> <code>&gt;=1.2.4</code></p>
+<p>3. <strong>Category:</strong> Configuration</p>
+<p>4. <strong>Purpose:</strong> Load <code>.env</code> from the working directory.</p>
+<p>5. <strong>Where it is used:</strong> <code>load_dotenv()</code> in <code>backend/app/main.py</code>, <code>app/live/__main__.py</code>, <code>app/agents/trade_crew/__main__.py</code>. <code>dotenv_values</code> in <code>backend/app/brokers/credentials.py</code> reads <code>BROKER_*</code> keys.</p>
+<p>6. <strong>Criticality:</strong> Core when configuration comes from <code>.env</code>.</p>
+
+<h3>SQLAlchemy</h3>
+
+<p>1. <strong>Name:</strong> SQLAlchemy</p>
+<p>2. <strong>Version:</strong> <code>&gt;=2.0</code></p>
+<p>3. <strong>Category:</strong> Database</p>
+<p>4. <strong>Purpose:</strong> ORM, sessions, and metadata for all three databases.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/db/</code>, <code>backend/app/market/models.py</code>.</p>
+<p>6. <strong>Criticality:</strong> Core.</p>
+<p>7. <strong>External service:</strong> SQLite file or PostgreSQL.</p>
+
+<h3>Alembic</h3>
+
+<p>1. <strong>Name:</strong> Alembic</p>
+<p>2. <strong>Version:</strong> <code>&gt;=1.20.0</code></p>
+<p>3. <strong>Category:</strong> Database</p>
+<p>4. <strong>Purpose:</strong> Research and live migrations.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/alembic</code>, <code>backend/alembic_live</code>, <code>backend/alembic.ini</code>. Tests apply the migrations.</p>
+<p>6. <strong>Criticality:</strong> Core for a migrated database. The market database does not use it.</p>
+<p>7. <strong>Note:</strong> The market database calls <code>create_all</code> instead.</p>
+
+<h2>3. AI / LLM libraries</h2>
+
+<h3>LangGraph</h3>
+
+<p>1. <strong>Name:</strong> langgraph</p>
+<p>2. <strong>Version:</strong> <code>&gt;=1.2.14</code></p>
+<p>3. <strong>Category:</strong> Agent orchestration</p>
+<p>4. <strong>Purpose:</strong> State graphs for the Review Crew and the Trade Crew.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/agents/review_crew/graph.py</code>, <code>backend/app/agents/trade_crew/graph.py</code> (<code>StateGraph</code>, <code>START</code>, <code>END</code>).</p>
+<p>6. <strong>Criticality:</strong> Core for review and for each crew tick.</p>
+<p>7. <strong>External service:</strong> None. The graph itself is in-process.</p>
+
+<h3>LangChain core, OpenAI, and Anthropic</h3>
+
+<p>1. <strong>Name:</strong> langchain-core, langchain-openai, langchain-anthropic</p>
+<p>2. <strong>Version:</strong> <code>langchain-core&gt;=1.6.7</code>, <code>langchain-openai&gt;=1.6.7</code>, <code>langchain-anthropic&gt;=1.0</code></p>
+<p>3. <strong>Category:</strong> LLM clients</p>
+<p>4. <strong>Purpose:</strong> Chat completions for extract, improvement rationale, opinions, lessons, and the optional explain note.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/llm.py</code> constructs <code>ChatOpenAI</code> or <code>ChatAnthropic</code>. <code>backend/app/extract/extractor.py</code> imports <code>HumanMessage</code> and <code>SystemMessage</code>.</p>
+<p>6. <strong>Important configuration:</strong> <code>LLM_PROVIDER</code>, <code>OPENAI_API_KEY</code>, <code>OPENAI_MODEL</code>, <code>ANTHROPIC_API_KEY</code>, <code>ANTHROPIC_MODEL</code>, <code>LLM_OPINION_MODEL</code>, <code>LLM_OPINION_TIMEOUT_S</code>.</p>
+<p>7. <strong>Criticality:</strong> Supporting. The demo fixture and a rules-only crew tick run without a key.</p>
+<p>8. <strong>External service:</strong> OpenAI or Anthropic, one of them, matching <code>LLM_PROVIDER</code>.</p>
+
+<h3>openai (declared package)</h3>
+
+<p>1. <strong>Name:</strong> openai</p>
+<p>2. <strong>Version:</strong> <code>&gt;=3.26.0</code></p>
+<p>3. <strong>Category:</strong> LLM SDK</p>
+<p>4. <strong>Purpose:</strong> Declared directly. Application code does not <code>import openai</code>. <code>ChatOpenAI</code> uses this SDK.</p>
+<p>5. <strong>Criticality:</strong> Supporting, transitive in practice, direct in the manifest.</p>
+<p>6. <strong>External service:</strong> OpenAI, only when <code>LLM_PROVIDER=openai</code> and a key is set.</p>
+
+<h2>4. Ingest libraries</h2>
+
+<h3>HTTPX</h3>
+
+<p>1. <strong>Name:</strong> httpx</p>
+<p>2. <strong>Version:</strong> <code>&gt;=0.28.1</code></p>
+<p>3. <strong>Category:</strong> HTTP client</p>
+<p>4. <strong>Purpose:</strong> Fetch HTML and Instagram pages. Send Telegram alerts. Fetch delayed quotes and candles for the markets screen.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/ingest/doc.py</code>, <code>instagram.py</code>, <code>backend/app/alerts.py</code>, <code>backend/app/api/market.py</code>.</p>
+<p>6. <strong>Criticality:</strong> Supporting.</p>
+<p>7. <strong>External service:</strong> The URL the user submitted, <code>api.telegram.org</code> when alerts are configured, and <code>query1.finance.yahoo.com</code> when the dashboard or markets page loads.</p>
+
+<h3>Beautiful Soup and lxml</h3>
+
+<p>1. <strong>Name:</strong> beautifulsoup4, lxml</p>
+<p>2. <strong>Version:</strong> <code>beautifulsoup4&gt;=4.15.0</code>, <code>lxml&gt;=6.1.3</code></p>
+<p>3. <strong>Category:</strong> HTML</p>
+<p>4. <strong>Purpose:</strong> Strip scripts and layout from a document URL.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/ingest/doc.py</code> (<code>BeautifulSoup(html, &quot;lxml&quot;)</code>). <code>lxml</code> is not imported by name. It is the parser backend.</p>
+<p>6. <strong>Criticality:</strong> Supporting. PDF responses are rejected before parsing.</p>
+
+<h3>youtube-transcript-api</h3>
+
+<p>1. <strong>Name:</strong> youtube-transcript-api</p>
+<p>2. <strong>Version:</strong> <code>&gt;=1.2.4</code></p>
+<p>3. <strong>Category:</strong> Ingest</p>
+<p>4. <strong>Purpose:</strong> Fetch a YouTube transcript.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/ingest/youtube.py</code>.</p>
+<p>6. <strong>Criticality:</strong> Supporting.</p>
+<p>7. <strong>External service:</strong> YouTube.</p>
+
+<h3>PyYAML</h3>
+
+<p>1. <strong>Name:</strong> pyyaml</p>
+<p>2. <strong>Version:</strong> <code>&gt;=6.0.3</code></p>
+<p>3. <strong>Category:</strong> Documents</p>
+<p>4. <strong>Purpose:</strong> Strategy frontmatter, holiday list, event files.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/strategies/schema.py</code>, <code>backend/app/market/calendar.py</code>, <code>backend/app/market/hours.py</code>.</p>
+<p>6. <strong>Criticality:</strong> Core for any strategy with frontmatter.</p>
+
+<h2>5. Security</h2>
+
+<h3>cryptography</h3>
+
+<p>1. <strong>Name:</strong> cryptography</p>
+<p>2. <strong>Version:</strong> <code>&gt;=44</code></p>
+<p>3. <strong>Category:</strong> Secrets</p>
+<p>4. <strong>Purpose:</strong> Fernet encryption for <code>broker_credentials.ciphertext</code>.</p>
+<p>5. <strong>Where it is used:</strong> <code>backend/app/brokers/credentials.py</code>.</p>
+<p>6. <strong>Important configuration:</strong> <code>BROKER_CREDENTIALS_KEY</code>. Without a valid key, save returns 400 and stored values are ignored.</p>
+<p>7. <strong>Criticality:</strong> Supporting. Required before credentials can be stored.</p>
+<p>8. <strong>External service:</strong> None.</p>
+
+<p>API token checks use the standard library <code>hashlib</code> (SHA-256). There is no Auth0, PyJWT, or session library.</p>
+
+<p>SMTP alerts use the standard library <code>smtplib</code>.</p>
+
+<h2>6. Observability</h2>
+
+<p>No tracing or metrics library is imported.</p>
+
+<p><code>LANGFUSE_SECRET_KEY</code>, <code>LANGFUSE_PUBLIC_KEY</code>, and <code>LANGFUSE_BASE_URL</code> appear in <code>.env.example</code> only. They are not fields on <code>Settings</code> and have no client. Treat them as unused.</p>
+
+<p>Audit chains, heartbeats, and alerts are application code (<code>backend/app/audit/</code>, <code>crew_heartbeats</code>, <code>backend/app/alerts.py</code>).</p>
+
+<h2>7. Frontend libraries</h2>
+
+<h3>Next.js</h3>
+
+<p>1. <strong>Name:</strong> next</p>
+<p>2. <strong>Version:</strong> <code>15.5.27</code></p>
+<p>3. <strong>Category:</strong> UI</p>
+<p>4. <strong>Purpose:</strong> App router and dev server.</p>
+<p>5. <strong>Where it is used:</strong> <code>frontend/src/app/</code>.</p>
+<p>6. <strong>Scripts:</strong> <code>next dev --turbopack</code>, <code>next build --turbopack</code>.</p>
+<p>7. <strong>Criticality:</strong> Core for the UI.</p>
+<p>8. <strong>Configuration:</strong> <code>NEXT_PUBLIC_API_URL</code>.</p>
+
+<h3>React and React DOM</h3>
+
+<p>1. <strong>Name:</strong> react, react-dom</p>
+<p>2. <strong>Version:</strong> <code>19.1.0</code></p>
+<p>3. <strong>Category:</strong> UI</p>
+<p>4. <strong>Purpose:</strong> Page components. No extra component library.</p>
+<p>5. <strong>Criticality:</strong> Core.</p>
+
+<h3>Tailwind CSS</h3>
+
+<p>1. <strong>Name:</strong> tailwindcss, <code>@tailwindcss/postcss</code></p>
+<p>2. <strong>Version:</strong> <code>^4</code></p>
+<p>3. <strong>Category:</strong> UI</p>
+<p>4. <strong>Purpose:</strong> Utility classes on the pages and components.</p>
+<p>5. <strong>Criticality:</strong> Core for the current layout.</p>
+
+<h3>lightweight-charts</h3>
+
+<p>1. <strong>Name:</strong> lightweight-charts</p>
+<p>2. <strong>Version:</strong> <code>^5.2.1</code></p>
+<p>3. <strong>Category:</strong> UI</p>
+<p>4. <strong>Purpose:</strong> Candlestick chart with previous-day and pivot level lines.</p>
+<p>5. <strong>Where it is used:</strong> <code>frontend/src/components/CandleChart.tsx</code> on <code>/markets</code>.</p>
+<p>6. <strong>Criticality:</strong> Supporting. Only the markets page loads it.</p>
+
+<p>The UI does not depend on an HTTP client library. <code>frontend/src/lib/api.ts</code> uses <code>fetch</code>.</p>
+
+<h2>8. Testing and lint</h2>
+
+<table><thead><tr><th>Package</th><th>Where</th><th>Criticality</th></tr></thead><tbody>
+<tr><td>pytest <code>&gt;=9.1.1</code></td><td><code>backend</code> dev group. <code>uv run pytest</code></td><td>Development-only</td></tr>
+<tr><td>eslint <code>^9</code>, eslint-config-next <code>15.5.27</code></td><td><code>frontend</code> <code>npm run lint</code></td><td>Development-only</td></tr>
+<tr><td>typescript <code>^5</code>, <code>@types/react</code>, <code>@types/node</code></td><td>Frontend compile</td><td>Development-only</td></tr>
+</tbody></table>
+
+<p>Tests do not call a live LLM or a network broker. They migrate temporary SQLite files.</p>
+
+<h2>9. External services</h2>
+
+<table><thead><tr><th>Service</th><th>When it is contacted</th><th>Required to boot</th></tr></thead><tbody>
+<tr><td>OpenAI</td><td><code>LLM_PROVIDER=openai</code> and a key, on extract, rationale, opinion, lesson, or explain</td><td>No</td></tr>
+<tr><td>Anthropic</td><td><code>LLM_PROVIDER=anthropic</code> and a key, same call sites</td><td>No</td></tr>
+<tr><td>YouTube</td><td>Ingest source type <code>youtube</code></td><td>No</td></tr>
+<tr><td>Instagram</td><td>Ingest source type <code>instagram</code></td><td>No</td></tr>
+<tr><td>Document URL</td><td>Ingest source type <code>document</code></td><td>No</td></tr>
+<tr><td>Telegram</td><td>Both <code>ALERT_TELEGRAM_BOT_TOKEN</code> and <code>ALERT_TELEGRAM_CHAT_ID</code> set</td><td>No</td></tr>
+<tr><td>SMTP server</td><td><code>ALERT_SMTP_HOST</code> set</td><td>No</td></tr>
+<tr><td>NSE hosts</td><td>Only the import scripts, which download or read bhavcopy files the operator points them at</td><td>No</td></tr>
+<tr><td>Yahoo Finance chart API</td><td><code>GET /api/market/quotes</code>, <code>GET /api/market/candles</code>, and <code>GET /api/paper/positions</code> when a share or futures position is open. Unofficial and delayed</td><td>No</td></tr>
+<tr><td>Langfuse</td><td>Never, with the current code</td><td>No</td></tr>
+</tbody></table>
+
+<p>Paper trading on the replay feed needs none of these.</p>
+
+<h2>10. Potentially unused or reference-only</h2>
+
+<table><thead><tr><th>Item</th><th>Evidence</th></tr></thead><tbody>
+<tr><td>Langfuse environment keys</td><td><code>.env.example</code> only</td></tr>
+<tr><td><code>openai</code> import</td><td>No <code>import openai</code> under <code>backend/</code>. The package is still required by <code>langchain-openai</code></td></tr>
+<tr><td><code>trading_strategy_lab_backend</code> console script</td><td><code>backend/src/trading_strategy_lab_backend/__init__.py</code> prints a hello string and does not start Uvicorn</td></tr>
+<tr><td><code>vendor/TradingAgents</code></td><td>Not on <code>sys.path</code> for the app. See <code>vendor/INTEGRATION.md</code></td></tr>
+<tr><td>psycopg</td><td>Mentioned for Postgres URLs. Not in <code>pyproject.toml</code></td></tr>
+</tbody></table>
+
+<h2>11. Dependency summary</h2>
+
+<table><thead><tr><th>Package</th><th>Criticality</th><th>Direct import in <code>backend/app</code> or <code>frontend/src</code></th></tr></thead><tbody>
+<tr><td>fastapi</td><td>Core</td><td>Yes</td></tr>
+<tr><td>uvicorn</td><td>Core at runtime</td><td>Started by the operator, not imported in <code>app</code></td></tr>
+<tr><td>pydantic, pydantic-settings</td><td>Core</td><td>Yes</td></tr>
+<tr><td>python-dotenv</td><td>Core</td><td>Yes</td></tr>
+<tr><td>sqlalchemy</td><td>Core</td><td>Yes</td></tr>
+<tr><td>alembic</td><td>Core for migrations</td><td>Yes, in migration env modules</td></tr>
+<tr><td>langgraph</td><td>Core for crews</td><td>Yes</td></tr>
+<tr><td>langchain-core</td><td>Supporting</td><td>Yes</td></tr>
+<tr><td>langchain-openai</td><td>Supporting</td><td>Yes, inside <code>chat_model</code></td></tr>
+<tr><td>langchain-anthropic</td><td>Supporting</td><td>Yes, inside <code>chat_model</code></td></tr>
+<tr><td>openai</td><td>Supporting</td><td>No direct import</td></tr>
+<tr><td>httpx</td><td>Supporting</td><td>Yes</td></tr>
+<tr><td>beautifulsoup4</td><td>Supporting</td><td>Yes</td></tr>
+<tr><td>lxml</td><td>Supporting</td><td>Parser name only</td></tr>
+<tr><td>youtube-transcript-api</td><td>Supporting</td><td>Yes</td></tr>
+<tr><td>pyyaml</td><td>Core for frontmatter</td><td>Yes</td></tr>
+<tr><td>cryptography</td><td>Supporting</td><td>Yes</td></tr>
+<tr><td>pytest</td><td>Development-only</td><td>Tests</td></tr>
+<tr><td>next, react, react-dom, tailwindcss</td><td>Core for the UI</td><td>Yes</td></tr>
+<tr><td>lightweight-charts</td><td>Supporting</td><td>Yes</td></tr>
+</tbody></table>
+
+<h2>Summary</h2>
+
+<p>The running system is FastAPI, SQLAlchemy, Alembic, LangGraph, and a Next.js UI. LLM calls go through LangChain to either OpenAI or Anthropic. HTML ingest uses HTTPX, Beautiful Soup, and lxml. YouTube ingest uses <code>youtube-transcript-api</code>. Market quotes come from Yahoo Finance over HTTPX and are charted with <code>lightweight-charts</code>. Broker secrets use Fernet. There is no vector database, no Auth0, and no Langfuse client in this repository.</p></body></html>

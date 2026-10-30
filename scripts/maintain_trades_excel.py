@@ -257,7 +257,7 @@ def extract_all_suggested_trades(
                 "Date": cur_d,
                 "Time": entry_time[11:],
                 "Strategy": strat_name,
-                "Pool / Setup": f"{sig.get('pool', strat_name)} [{tier_name.split(':')[0]}]" if tier_name else sig.get("pool", strat_name),
+                "Pool / Setup": f"{sig.get('pool', strat_name)} [{tier_name}]" if tier_name else sig.get("pool", strat_name),
                 "Side": side.upper(),
                 "Status": status,
                 "Entry Spot": round(entry_spot, 2),
@@ -520,8 +520,30 @@ def build_strategy_sheet(wb: openpyxl.Workbook, title: str, trades: list[dict]):
     style_worksheet(ws)
 
 
+def merge_live_executed_trades(trades: list[dict]) -> list[dict]:
+    """Merges real-time bot executed trades from trades/live_executed_trades.json into the trade ledger.
+    Prioritizes actual live executed bot trades over theoretical 5m scans for the same day.
+    """
+    exec_file = TRADES_DIR / "live_executed_trades.json"
+    if not exec_file.exists():
+        return trades
+    try:
+        import json
+        exec_trades = json.loads(exec_file.read_text())
+        exec_dates = {str(et.get("Date")) for et in exec_trades}
+        # For dates with real live bot execution, replace theoretical scans with the actual live trades
+        filtered_trades = [t for t in trades if str(t.get("Date")) not in exec_dates]
+        merged = filtered_trades + exec_trades
+        merged.sort(key=lambda x: (str(x.get("Date", "")), str(x.get("Time", ""))), reverse=False)
+        return merged
+    except Exception as e:
+        print(f"⚠️ Could not merge live executed trades: {e}")
+        return trades
+
+
 def save_strategy_workbooks(all_trades: list[dict]):
     """Generate master workbook and individual strategy workbooks."""
+    all_trades = merge_live_executed_trades(all_trades)
     TRADES_DIR.mkdir(parents=True, exist_ok=True)
     STRATEGY_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -636,6 +658,63 @@ def save_live_and_forward_workbooks(all_trades: list[dict]):
     today_str = datetime.now(IST).strftime("%Y-%m-%d")
     today_trades = [t for t in all_trades if t["Date"] == today_str]
 
+    # Merge active live trades tracked by live scanner daemon
+    import json
+    active_file = TRADES_DIR / f".active_trades_{today_str}.json"
+    if active_file.exists():
+        try:
+            active_data = json.loads(active_file.read_text())
+            existing_signatures = {(t["Date"], t["Time"], t["Strategy"]) for t in forward_trades}
+            for k, v in active_data.items():
+                sig = v.get("sig", {})
+                plan = v.get("plan", {})
+                strat = v.get("strat_name", "")
+                d_str = str(sig.get("time", today_str))[:10]
+                t_str = str(sig.get("time", ""))[-5:]
+                if (d_str, t_str, strat) not in existing_signatures:
+                    qty = plan.get("quantity", plan.get("qty", 260))
+                    lots = plan.get("lots", 4)
+                    prem_in = plan.get("entry_premium", 78.67)
+                    cap = round(prem_in * qty, 0)
+                    current_sl = v.get("stop_p", prem_in)
+                    milestones = v.get("milestones_hit", [])
+                    top_m = milestones[-1] if milestones else "+0.0R"
+                    pnl = round((current_sl - prem_in) * qty, 0)
+                    risk_p = abs(prem_in - plan.get("exits", [{}])[0].get("premium", prem_in - 11.34))
+                    r_mult = round((current_sl - prem_in) / risk_p, 2) if risk_p > 0 else 1.0
+                    act_item = {
+                        "Date": d_str,
+                        "Time": t_str,
+                        "Strategy": strat,
+                        "Pool / Setup": f"{sig.get('pool', strat)} [Preferred Lot Size: {lots} Lots ({qty} Qty)]",
+                        "Side": sig.get("side", "LONG").upper(),
+                        "Status": f"ACTIVE (+{top_m} Trailing)",
+                        "Entry Spot": sig.get("entry", 0.0),
+                        "Stop Spot": sig.get("stop", 0.0),
+                        "Target Spot": sig.get("target", 0.0),
+                        "Risk Pts": sig.get("risk", 0.0),
+                        "Exit Spot": sig.get("entry", 0.0),
+                        "Exit Time": "Active",
+                        "Exit Reason": f"Active Live Trailing Runner (Locked SL: Rs {current_sl:,.2f})",
+                        "Points": 0.0,
+                        "R-Multiple": r_mult,
+                        "Option": f"NIFTY {plan.get('option', '')}",
+                        "Expiry": plan.get("expiry", ""),
+                        "Entry Premium": prem_in,
+                        "Exit Premium": current_sl,
+                        "Capital Deployed": cap,
+                        "Exit Value": round(cap + pnl, 0),
+                        "Est P&L (Rs)": pnl,
+                        "ROI %": round((pnl / cap * 100), 1) if cap > 0 else 0.0,
+                        "Lots": lots,
+                        "Qty": qty,
+                        "Rationale": "Active live runner being tracked by Genesis scanner. 50% locked at Target 2; runner trailing with SL above breakeven."
+                    }
+                    forward_trades.append(act_item)
+                    today_trades.append(act_item)
+        except Exception as ex:
+            print(f"⚠️ Error loading active trades into Excel: {ex}")
+
     # 1. Master Live & Forward Workbook
     live_master_path = TRADES_DIR / "live_and_forward_trades.xlsx"
     wb_live = openpyxl.Workbook()
@@ -650,15 +729,15 @@ def save_live_and_forward_workbooks(all_trades: list[dict]):
     build_strategy_sheet(wb_live, "📋 Live & Forward Trades", forward_trades)
 
     # Tab 3: Trendline Reversal (Live)
-    tl_live = [t for t in forward_trades if t["Strategy"] == "Trendline Reversal"]
+    tl_live = [t for t in forward_trades if "Trendline Reversal" in t["Strategy"]]
     build_strategy_sheet(wb_live, "📈 Trendline Reversal", tl_live)
 
     # Tab 4: Breakout & Retest (Live)
-    retest_live = [t for t in forward_trades if t["Strategy"] == "Breakout & Retest"]
+    retest_live = [t for t in forward_trades if "Breakout & Retest" in t["Strategy"]]
     build_strategy_sheet(wb_live, "🔄 Breakout & Retest", retest_live)
 
     # Tab 5: Liquidity Sweep (Live)
-    sweep_live = [t for t in forward_trades if t["Strategy"] == "Liquidity Sweep"]
+    sweep_live = [t for t in forward_trades if "Liquidity Sweep" in t["Strategy"]]
     build_strategy_sheet(wb_live, "🎯 Liquidity Sweep", sweep_live)
 
     wb_live.save(live_master_path)
@@ -700,6 +779,13 @@ def save_live_and_forward_workbooks(all_trades: list[dict]):
             ws.append(["No live trades recorded for this strategy"])
         wb_strat.save(fpath)
         print(f"✅ Strategy Live Workbook saved: {fpath}")
+
+    # 4. Synchronize SQLite SSOT Trade Store
+    try:
+        from app.db import trade_store
+        trade_store.sync_from_existing_sources()
+    except Exception as e:
+        print(f"⚠️ Could not sync SQLite trade store: {e}")
 
 
 def main(argv: list[str] | None = None):

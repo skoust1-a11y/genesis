@@ -418,7 +418,75 @@ def export_trades_csv(report_id: str, db: Session = Depends(get_db)):
 
 @router.get("/trades/forward-tested")
 def get_forward_tested_trades():
-    """Returns the forward-tested trades (Post-Oct 15) and aggregate metrics."""
+    """Returns the forward-tested trades (Post-Oct 15) and aggregate metrics directly from SQLite SSOT."""
+    try:
+        from app.db import trade_store
+        trades = trade_store.get_all_trades(since="2026-10-15")
+        
+        # Merge live active trades currently tracked by scanner daemon
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        active_file = Path(__file__).resolve().parents[3] / "trades" / f".active_trades_{today_str}.json"
+        if active_file.exists():
+            try:
+                active_data = json.loads(active_file.read_text())
+                existing_ids = {t.get("trade_id") for t in trades}
+                for k, v in active_data.items():
+                    sig = v.get("sig", {})
+                    plan = v.get("plan", {})
+                    strat = v.get("strat_name", "")
+                    d_str = str(sig.get("time", today_str))[:10]
+                    t_str = str(sig.get("time", ""))[-5:]
+                    t_id = trade_store.make_trade_id(d_str, t_str, strat)
+                    if t_id not in existing_ids:
+                        qty = plan.get("quantity", plan.get("qty", 260))
+                        lots = plan.get("lots", 4)
+                        prem_in = plan.get("entry_premium", 78.67)
+                        cap = round(prem_in * qty, 0)
+                        current_sl = v.get("stop_p", prem_in)
+                        milestones = v.get("milestones_hit", [])
+                        top_m = milestones[-1] if milestones else "+0.0R"
+                        pnl = round((current_sl - prem_in) * qty, 0)
+                        risk_p = abs(prem_in - plan.get("exits", [{}])[0].get("premium", prem_in - 11.34))
+                        r_mult = round((current_sl - prem_in) / risk_p, 2) if risk_p > 0 else 1.0
+                        trades.append({
+                            "trade_id": t_id,
+                            "date": d_str,
+                            "time": t_str,
+                            "strategy": strat,
+                            "setup": f"{sig.get('pool', strat)} [Live Active]",
+                            "side": sig.get("side", "LONG").upper(),
+                            "status": f"ACTIVE (+{top_m} Trailing)",
+                            "entry": sig.get("entry", 0.0),
+                            "stop": sig.get("stop", 0.0),
+                            "target": sig.get("target", 0.0),
+                            "risk": sig.get("risk", 0.0),
+                            "exit_spot": sig.get("entry", 0.0),
+                            "exit_time": "Running",
+                            "exit_reason": f"Active Live Trailing Runner (Locked SL: Rs {current_sl:,.2f})",
+                            "points": 0.0,
+                            "r_multiple": r_mult,
+                            "option": f"NIFTY {plan.get('option', '')}",
+                            "expiry": plan.get("expiry", ""),
+                            "entry_premium": prem_in,
+                            "exit_premium": current_sl,
+                            "capital_deployed": cap,
+                            "exit_value": round(cap + pnl, 0),
+                            "roi_pct": round((pnl / cap * 100), 1) if cap > 0 else 0.0,
+                            "est_pnl_inr": pnl,
+                            "lots": lots,
+                            "qty": qty,
+                            "rationale": "Active live runner being tracked by Genesis scanner. 50% locked at Target 2; runner trailing with SL above breakeven.",
+                            "source": "live"
+                        })
+            except Exception as ex:
+                print(f"⚠️ Error loading active trades: {ex}")
+
+        if trades:
+            return trade_store.compute_metrics(trades)
+    except Exception as e:
+        print(f"⚠️ SQLite trade store query fallback: {e}")
+
+    # Fallback to Excel if database is not yet ready
     import openpyxl
 
     file_path = Path(__file__).resolve().parents[3] / "trades" / "live_and_forward_trades.xlsx"
@@ -482,68 +550,5 @@ def get_forward_tested_trades():
             "rationale": str(t.get("Rationale") or ""),
         })
 
-    # Sort descending by date, time
-    trades.sort(key=lambda x: (x["date"], x["time"]), reverse=True)
-
-    wins = [t for t in trades if t["r_multiple"] > 0.05]
-    losses = [t for t in trades if t["r_multiple"] < -0.05]
-    be = [t for t in trades if abs(t["r_multiple"]) <= 0.05]
-
-    tot_trades = len(trades)
-    win_rate = (len(wins) / tot_trades * 100) if tot_trades > 0 else 0.0
-    win_rate_ex_be = (len(wins) / (len(wins) + len(losses)) * 100) if (len(wins) + len(losses)) > 0 else 0.0
-    tot_r = sum(t["r_multiple"] for t in trades)
-    tot_pts = sum(t["points"] for t in trades)
-    tot_pnl = sum(t["est_pnl_inr"] for t in trades)
-    tot_capital = sum(t["capital_deployed"] for t in trades)
-    tot_exit_val = sum(t["exit_value"] for t in trades)
-    avg_trade_capital = round(tot_capital / tot_trades, 0) if tot_trades > 0 else 0.0
-    total_roi = round((tot_pnl / tot_capital) * 100, 1) if tot_capital > 0 else 0.0
-
-    gross_profit = sum(t["est_pnl_inr"] for t in wins)
-    gross_loss = abs(sum(t["est_pnl_inr"] for t in losses))
-    pf = (gross_profit / gross_loss) if gross_loss > 0 else (99.9 if gross_profit > 0 else 1.0)
-
-    # Strategy breakdown
-    strat_metrics = {}
-    strategies = sorted(set(t["strategy"] for t in trades))
-    for s_name in strategies:
-        s_trades = [t for t in trades if t["strategy"] == s_name]
-        s_wins = [t for t in s_trades if t["r_multiple"] > 0.05]
-        s_losses = [t for t in s_trades if t["r_multiple"] < -0.05]
-        s_be = [t for t in s_trades if abs(t["r_multiple"]) <= 0.05]
-        s_pnl = sum(t["est_pnl_inr"] for t in s_trades)
-        s_r = sum(t["r_multiple"] for t in s_trades)
-        s_cap = sum(t["capital_deployed"] for t in s_trades)
-        strat_metrics[s_name] = {
-            "trades": len(s_trades),
-            "wins": len(s_wins),
-            "losses": len(s_losses),
-            "be": len(s_be),
-            "win_rate": round(len(s_wins) / len(s_trades) * 100, 1) if s_trades else 0.0,
-            "total_r": round(s_r, 2),
-            "capital_deployed": round(s_cap, 0),
-            "net_pnl_inr": round(s_pnl, 0),
-            "roi_pct": round((s_pnl / s_cap) * 100, 1) if s_cap > 0 else 0.0,
-        }
-
-    return {
-        "metrics": {
-            "total_trades": tot_trades,
-            "wins": len(wins),
-            "losses": len(losses),
-            "breakevens": len(be),
-            "win_rate": round(win_rate, 1),
-            "win_rate_ex_be": round(win_rate_ex_be, 1),
-            "total_r": round(tot_r, 2),
-            "total_points": round(tot_pts, 1),
-            "net_pnl_inr": round(tot_pnl, 0),
-            "profit_factor": round(pf, 2),
-            "total_capital_deployed": round(tot_capital, 0),
-            "total_exit_value": round(tot_exit_val, 0),
-            "avg_trade_capital": avg_trade_capital,
-            "total_roi_pct": total_roi,
-        },
-        "strategy_metrics": strat_metrics,
-        "trades": trades,
-    }
+    from app.db import trade_store
+    return trade_store.compute_metrics(trades)

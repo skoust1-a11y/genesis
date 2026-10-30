@@ -1,0 +1,786 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>CURRENT_DATABASE_ARCHITECTURE</title><style>
+body { font-family: Helvetica, Arial, sans-serif; color: #1c1917; line-height: 1.45;
+       max-width: 920px; margin: 32px auto; padding: 0 24px; font-size: 12.5px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #d6d3d1; padding: 4px 6px; vertical-align: top; text-align: left; }
+th { background: #f5f5f4; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+pre { background: #f5f5f4; padding: 10px; overflow: auto; white-space: pre-wrap; }
+img { max-width: 100%; height: auto; margin: 8px 0; }
+blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1; color: #44403c; }
+</style></head><body><h1>Current Database Architecture</h1>
+
+<p>Schema of Trading Strategy Lab as created by the current ORM and migrations. No live database was opened. Where a comment in an older migration describes tables that <code>0004_split_live</code> drops, the head revision is the applied schema.</p>
+
+<p>Analysis date: 2026-10-10.</p>
+
+<p>There are three databases. They do not share foreign keys.</p>
+
+<table><thead><tr><th>Database</th><th>URL setting</th><th>Default</th><th>Schema source</th><th>Bookkeeping</th></tr></thead><tbody>
+<tr><td>Research</td><td><code>DATABASE_URL</code></td><td><code>sqlite:///data/genesis.db</code></td><td>Alembic <code>backend/alembic</code>, head <code>0006_paper_orders</code></td><td><code>alembic_version</code></td></tr>
+<tr><td>Live</td><td><code>LIVE_DATABASE_URL</code></td><td><code>sqlite:///data/genesis_live.db</code></td><td>Alembic <code>backend/alembic_live</code>, head <code>0005_broker_credentials</code></td><td><code>alembic_version</code> in that file</td></tr>
+<tr><td>Market</td><td><code>MARKET_DATABASE_URL</code></td><td><code>sqlite:///data/market_eod.db</code></td><td><code>MarketBase.metadata.create_all</code> in <code>backend/app/market/store.py</code></td><td>None</td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>1. Current database technology</h2>
+
+<table><thead><tr><th>Item</th><th>Fact</th></tr></thead><tbody>
+<tr><td>Default platform</td><td>SQLite. WAL mode, foreign keys on, writes use <code>BEGIN IMMEDIATE</code> (see <code>backend/app/db/session.py</code>).</td></tr>
+<tr><td>Also accepted</td><td>PostgreSQL through SQLAlchemy URL <code>postgresql+psycopg://...</code>. <code>psycopg</code> is not declared in <code>backend/pyproject.toml</code>.</td></tr>
+<tr><td>ORM</td><td>SQLAlchemy 2. Research models use <code>Base</code>. Live models use <code>LiveBase</code>. Market models use <code>MarketBase</code>.</td></tr>
+<tr><td>Primary keys</td><td>UUID strings (<code>String(36)</code>, Python <code>uuid4</code>) or integer <code>autoincrement</code>. Not <code>gen_random_uuid()</code>.</td></tr>
+<tr><td>Money</td><td><code>Numeric(18, 4)</code> via <code>Money</code> in <code>backend/app/db/types.py</code>.</td></tr>
+<tr><td>Timestamps</td><td><code>UTCDateTime</code>. PostgreSQL stores <code>timestamptz</code>. SQLite stores naive UTC and the type decorator restores UTC on read.</td></tr>
+<tr><td>JSON</td><td>SQLAlchemy <code>JSON</code>.</td></tr>
+<tr><td>Migrations</td><td>Two Alembic configs in <code>backend/alembic.ini</code>: default env, and <code>[live]</code> (<code>uv run alembic -n live</code>).</td></tr>
+<tr><td>Market migrations</td><td>None. Tables appear on first open.</td></tr>
+</tbody></table>
+
+<h3>Research revision chain</h3>
+
+<p><code>0001_core_sim</code> → <code>0002_live_schema</code> → <code>0003_journal</code> → <code>0004_split_live</code> → <code>0005_sim_v3</code> → <code>0006_paper_orders</code>.</p>
+
+<p><code>0002_live_schema</code> created live tables inside the research database. <code>0004_split_live</code> drops them. It aborts if any of those tables still has rows. After head, live tables exist only in the live database.</p>
+
+<h3>Live revision chain</h3>
+
+<p><code>0001_live</code> → <code>0002_opinions</code> → <code>0003_drawdown</code> → <code>0004_partial_trades</code> → <code>0005_broker_credentials</code>.</p>
+
+<h3>Technology classification</h3>
+
+<table><thead><tr><th>Technology</th><th>Status</th><th>Evidence</th></tr></thead><tbody>
+<tr><td>SQLite</td><td>Default for all three databases</td><td><code>backend/app/config.py</code> defaults</td></tr>
+<tr><td>PostgreSQL</td><td>Supported for research and live URLs</td><td>README and settings. Not the default</td></tr>
+<tr><td>Market SQLite</td><td>Active, replaceable</td><td>Importers rewrite reference data. Reports store a fingerprint instead of auditing this file</td></tr>
+<tr><td>pgvector, Redis, Neo4j</td><td>Not used</td><td>No extension and no client</td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>2. Current tables</h2>
+
+<p>Class:</p>
+
+<ul><li><strong>CORE</strong> — written by a current product path.</li><li><strong>AUDIT</strong> — hash-chained append-only log.</li><li><strong>VIEW</strong> — not a table.</li></ul>
+
+<p><code>strategies</code> is <strong>NoDelete</strong>: updates are allowed, deletes are not. Every other research and live table below is <strong>AppendOnly</strong>. Market tables are ordinary tables.</p>
+
+<h3>Research (<code>Base</code>)</h3>
+
+<table><thead><tr><th>Table</th><th>ORM</th><th>Created</th><th>Later changes</th><th>Class</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>strategies</code></td><td><code>Strategy</code></td><td><code>0001</code></td><td>—</td><td>CORE</td><td>Strategy identity. <code>current_version</code> and <code>archived_at</code> are updated</td></tr>
+<tr><td><code>ingest_runs</code></td><td><code>IngestRun</code></td><td><code>0001</code></td><td>—</td><td>CORE</td><td>One extract attempt</td></tr>
+<tr><td><code>strategy_versions</code></td><td><code>StrategyVersion</code></td><td><code>0001</code></td><td>—</td><td>CORE</td><td>Immutable Markdown snapshot</td></tr>
+<tr><td><code>reports</code></td><td><code>Report</code></td><td><code>0001</code></td><td>—</td><td>CORE</td><td>One Review Crew result</td></tr>
+<tr><td><code>simulation_runs</code></td><td><code>SimulationRun</code></td><td><code>0001</code></td><td><code>0005</code> adds data-source and equity columns</td><td>CORE</td><td>One scenario window</td></tr>
+<tr><td><code>sim_trades</code></td><td><code>SimTrade</code></td><td><code>0001</code></td><td><code>0005</code> adds legs, expiry, exit date</td><td>CORE</td><td>One simulated trade</td></tr>
+<tr><td><code>audit_events</code></td><td><code>AuditEvent</code></td><td><code>0001</code></td><td>—</td><td>AUDIT</td><td>Research hash chain</td></tr>
+<tr><td><code>trade_reviews</code></td><td><code>TradeReview</code></td><td><code>0003</code></td><td><code>0004</code> restricts to <code>trade_kind = &#x27;sim&#x27;</code></td><td>CORE</td><td>Reviews of simulated trades</td></tr>
+<tr><td><code>strategy_improvements</code></td><td><code>StrategyImprovement</code></td><td><code>0003</code></td><td>—</td><td>CORE</td><td>Proposed change with evidence</td></tr>
+<tr><td><code>improvement_decisions</code></td><td><code>ImprovementDecision</code></td><td><code>0003</code></td><td>—</td><td>CORE</td><td>Accept, reject, or apply</td></tr>
+<tr><td><code>paper_orders</code></td><td><code>PaperOrder</code></td><td><code>0006</code></td><td>—</td><td>CORE</td><td>One manual paper order from the markets screen</td></tr>
+<tr><td><code>trade_journal</code></td><td>—</td><td><code>0003</code>, rebuilt in <code>0004</code></td><td>—</td><td>VIEW</td><td>Sim trades joined for <code>GET /api/journal</code></td></tr>
+</tbody></table>
+
+<h3>Live (<code>LiveBase</code>)</h3>
+
+<p>All created in <code>alembic_live</code>, not in the research head.</p>
+
+<table><thead><tr><th>Table</th><th>ORM</th><th>Creating revision</th><th>Later revisions</th><th>Class</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>deployed_strategies</code></td><td><code>DeployedStrategy</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>Frozen approved strategy</td></tr>
+<tr><td><code>broker_accounts</code></td><td><code>BrokerAccount</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>Paper or live account</td></tr>
+<tr><td><code>deployments</code></td><td><code>Deployment</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>One approval of a frozen strategy on an account</td></tr>
+<tr><td><code>deployment_events</code></td><td><code>DeploymentEvent</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>approved, started, paused, stopped, halted, and later notices</td></tr>
+<tr><td><code>trade_intents</code></td><td><code>TradeIntent</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>Entry, exit, or protect decision</td></tr>
+<tr><td><code>orders</code></td><td><code>Order</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>One broker order</td></tr>
+<tr><td><code>order_events</code></td><td><code>OrderEvent</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>Status and fill progress</td></tr>
+<tr><td><code>fills</code></td><td><code>Fill</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>One fill</td></tr>
+<tr><td><code>live_trades</code></td><td><code>LiveTrade</code></td><td><code>0001_live</code></td><td><code>0004</code> adds <code>partial</code></td><td>CORE</td><td>Closed or partially closed trade</td></tr>
+<tr><td><code>broker_charges</code></td><td><code>BrokerCharge</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>Broker-reported charges</td></tr>
+<tr><td><code>position_snapshots</code></td><td><code>PositionSnapshot</code></td><td><code>0001_live</code></td><td><code>0003</code> adds <code>deployment_id</code></td><td>CORE</td><td>Mark-to-market snapshot</td></tr>
+<tr><td><code>live_trade_reviews</code></td><td><code>LiveTradeReview</code></td><td><code>0001_live</code></td><td>—</td><td>CORE</td><td>Reviews of live trades</td></tr>
+<tr><td><code>live_audit_events</code></td><td><code>LiveAuditEvent</code></td><td><code>0001_live</code></td><td>—</td><td>AUDIT</td><td>Live hash chain</td></tr>
+<tr><td><code>trade_opinions</code></td><td><code>TradeOpinion</code></td><td><code>0002_opinions</code></td><td>—</td><td>CORE</td><td>LLM take / reduce / skip</td></tr>
+<tr><td><code>phantom_trades</code></td><td><code>PhantomTrade</code></td><td><code>0002_opinions</code></td><td>—</td><td>CORE</td><td>Lots the veto removed</td></tr>
+<tr><td><code>capital_events</code></td><td><code>CapitalEvent</code></td><td><code>0003_drawdown</code></td><td>—</td><td>CORE</td><td>Deposit or withdrawal</td></tr>
+<tr><td><code>drawdown_events</code></td><td><code>DrawdownEvent</code></td><td><code>0003_drawdown</code></td><td>—</td><td>CORE</td><td>Ladder level change</td></tr>
+<tr><td><code>broker_credentials</code></td><td><code>BrokerCredential</code></td><td><code>0005_broker_credentials</code></td><td>—</td><td>CORE</td><td>Encrypted credential field</td></tr>
+<tr><td><code>crew_heartbeats</code></td><td><code>CrewHeartbeat</code></td><td><code>0005_broker_credentials</code></td><td>—</td><td>CORE</td><td>One row per tick</td></tr>
+</tbody></table>
+
+<h3>Market (<code>MarketBase</code>)</h3>
+
+<table><thead><tr><th>Table</th><th>ORM</th><th>Role</th></tr></thead><tbody>
+<tr><td><code>index_bars</code></td><td><code>IndexBar</code></td><td>Underlying OHLC, India VIX, IV rank</td></tr>
+<tr><td><code>option_eod</code></td><td><code>OptionEod</code></td><td>One option contract close</td></tr>
+<tr><td><code>import_files</code></td><td><code>ImportFile</code></td><td>SHA-256 of a file already imported</td></tr>
+<tr><td><code>market_events</code></td><td><code>MarketEvent</code></td><td>Calendar event</td></tr>
+<tr><td><code>news_items</code></td><td><code>NewsItem</code></td><td>Headline</td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>3. Column-level analysis</h2>
+
+<p>Conventions:</p>
+
+<ul><li><code>str36</code> is <code>String(36)</code>. <code>strN</code> is <code>String(N)</code>. <code>text</code> is <code>Text</code>. <code>int</code> is <code>Integer</code>. <code>bool</code> is <code>Boolean</code>. <code>float</code> is <code>Float</code>. <code>json</code> is <code>JSON</code>. <code>money</code> is <code>Numeric(18, 4)</code>. <code>ts</code> is <code>UTCDateTime</code>.</li><li>Nullability follows the ORM. Columns without <code>nullable=True</code> are not null, except where a server default is noted.</li><li>Foreign keys use the naming convention <code>fk_&lt;table&gt;_&lt;column&gt;_&lt;referred table&gt;</code>. <code>ON DELETE</code> is not set, so PostgreSQL uses NO ACTION. SQLite foreign-key enforcement is turned on for the audited databases.</li><li>Check constraints are named <code>ck_&lt;table&gt;_&lt;name&gt;</code>.</li></ul>
+
+<h3><code>strategies</code></h3>
+
+<p>Updates: <code>current_version</code>, <code>archived_at</code>. Deletes: blocked.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK, Python UUID</td></tr>
+<tr><td><code>name</code></td><td>str200</td><td>no</td><td></td></tr>
+<tr><td><code>current_version</code></td><td>int</td><td>no</td><td>Updated when a version is added</td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>archived_at</code></td><td>ts</td><td>yes</td><td>Set by archive. The row stays</td></tr>
+</tbody></table>
+
+<h3><code>ingest_runs</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>source_type</code></td><td>str32</td><td>no</td><td>youtube, instagram, document, notebooklm, markdown</td></tr>
+<tr><td><code>source_url</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>source_text</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>source_sha256</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>hints</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>extractor</code></td><td>str32</td><td>yes</td><td>llm, fixture, or passthrough</td></tr>
+<tr><td><code>model</code></td><td>str100</td><td>yes</td><td></td></tr>
+<tr><td><code>raw_output</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>status</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>error</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>actor</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>request_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>started_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>finished_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>strategy_versions</code></h3>
+
+<p>Unique <code>(strategy_id, version)</code>.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK, autoincrement</td></tr>
+<tr><td><code>strategy_id</code></td><td>str36</td><td>no</td><td>FK <code>strategies.id</code>, indexed</td></tr>
+<tr><td><code>version</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>markdown</code></td><td>text</td><td>no</td><td></td></tr>
+<tr><td><code>content_sha256</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>frontmatter</code></td><td>json</td><td>no</td><td>Includes <code>rules</code> when present</td></tr>
+<tr><td><code>entry_rules</code></td><td>json</td><td>no</td><td>List of strings</td></tr>
+<tr><td><code>exit_rules</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>gaps</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>ingest_run_id</code></td><td>str36</td><td>yes</td><td>FK <code>ingest_runs.id</code></td></tr>
+<tr><td><code>created_by</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>reports</code></h3>
+
+<p>Index <code>ix_reports_strategy_started</code> on <code>(strategy_id, started_at)</code>.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>strategy_id</code></td><td>str36</td><td>no</td><td>FK <code>strategies.id</code></td></tr>
+<tr><td><code>strategy_version_id</code></td><td>int</td><td>no</td><td>FK <code>strategy_versions.id</code></td></tr>
+<tr><td><code>status</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>verdict_label</code></td><td>str32</td><td>yes</td><td></td></tr>
+<tr><td><code>scenarios_tested</code></td><td>int</td><td>yes</td><td></td></tr>
+<tr><td><code>scenarios_passing</code></td><td>int</td><td>yes</td><td></td></tr>
+<tr><td><code>inputs</code></td><td>json</td><td>no</td><td>Provenance snapshot</td></tr>
+<tr><td><code>payload</code></td><td>json</td><td>yes</td><td>Includes <code>hard_stop_sweep</code></td></tr>
+<tr><td><code>payload_sha256</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>error</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>actor</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>request_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>started_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>finished_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>simulation_runs</code></h3>
+
+<p>Unique <code>(report_id, scenario_index, mode)</code>.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>report_id</code></td><td>str36</td><td>no</td><td>FK <code>reports.id</code>, indexed</td></tr>
+<tr><td><code>scenario_index</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>scenario</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>mode</code></td><td>str16</td><td>no</td><td>backtest or forward</td></tr>
+<tr><td><code>window_start</code></td><td>str10</td><td>yes</td><td></td></tr>
+<tr><td><code>window_end</code></td><td>str10</td><td>yes</td><td></td></tr>
+<tr><td><code>bars_in_window</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>trade_count</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>gross_pnl</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>total_costs</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>net_pnl</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>win_rate</code></td><td>float</td><td>no</td><td></td></tr>
+<tr><td><code>max_drawdown</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>pass_net</code></td><td>bool</td><td>no</td><td></td></tr>
+<tr><td><code>trades_sha256</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>data_source</code></td><td>str32</td><td>yes</td><td>Added in <code>0005</code>. Null on older rows</td></tr>
+<tr><td><code>equity_curve</code></td><td>json</td><td>yes</td><td><code>0005</code></td></tr>
+<tr><td><code>max_drawdown_mtm</code></td><td>money</td><td>yes</td><td><code>0005</code></td></tr>
+<tr><td><code>max_drawdown_days</code></td><td>int</td><td>yes</td><td><code>0005</code></td></tr>
+<tr><td><code>by_year</code></td><td>json</td><td>yes</td><td><code>0005</code></td></tr>
+<tr><td><code>skipped</code></td><td>json</td><td>yes</td><td><code>0005</code></td></tr>
+</tbody></table>
+
+<h3><code>sim_trades</code></h3>
+
+<p>Unique <code>(simulation_run_id, seq)</code>. Index <code>ix_sim_trades_report_date</code> on <code>(report_id, trade_date)</code>.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>simulation_run_id</code></td><td>int</td><td>no</td><td>FK <code>simulation_runs.id</code></td></tr>
+<tr><td><code>report_id</code></td><td>str36</td><td>no</td><td>FK <code>reports.id</code></td></tr>
+<tr><td><code>strategy_version_id</code></td><td>int</td><td>no</td><td>FK <code>strategy_versions.id</code></td></tr>
+<tr><td><code>seq</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>trade_date</code></td><td>str10</td><td>no</td><td></td></tr>
+<tr><td><code>entry_rule</code></td><td>text</td><td>no</td><td></td></tr>
+<tr><td><code>entry_conditions</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>reason_text</code></td><td>text</td><td>no</td><td></td></tr>
+<tr><td><code>edge</code></td><td>float</td><td>no</td><td></td></tr>
+<tr><td><code>market_snapshot</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>lots</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>credit</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>max_loss</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>notional</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>orders</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>cost_breakdown</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>exit_rule</code></td><td>text</td><td>no</td><td></td></tr>
+<tr><td><code>exit_reason</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>holding_bars</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>target_pnl</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>stop_loss_pnl</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>risk_reward</code></td><td>float</td><td>no</td><td></td></tr>
+<tr><td><code>gross</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>costs</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>net</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>pnl_vs_target</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>cost_ratio</code></td><td>float</td><td>yes</td><td></td></tr>
+<tr><td><code>outcome_label</code></td><td>str16</td><td>no</td><td>win, loss, or scratch</td></tr>
+<tr><td><code>equity_after</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>drawdown_after</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>legs</code></td><td>json</td><td>yes</td><td><code>0005</code></td></tr>
+<tr><td><code>expiry</code></td><td>str10</td><td>yes</td><td><code>0005</code></td></tr>
+<tr><td><code>exit_date</code></td><td>str10</td><td>yes</td><td><code>0005</code></td></tr>
+</tbody></table>
+
+<h3><code>trade_reviews</code></h3>
+
+<p>Check <code>sim_trade_only</code>: <code>trade_kind = &#x27;sim&#x27; AND sim_trade_id IS NOT NULL</code>.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>trade_kind</code></td><td>str8</td><td>no</td><td>Must be <code>sim</code></td></tr>
+<tr><td><code>sim_trade_id</code></td><td>int</td><td>yes</td><td>FK <code>sim_trades.id</code>, indexed. Check requires it</td></tr>
+<tr><td><code>reviewer_type</code></td><td>str16</td><td>no</td><td><code>agent</code> or human</td></tr>
+<tr><td><code>reviewer</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>rules_version</code></td><td>str16</td><td>yes</td><td></td></tr>
+<tr><td><code>followed_plan</code></td><td>bool</td><td>yes</td><td></td></tr>
+<tr><td><code>process_verdict</code></td><td>str48</td><td>yes</td><td></td></tr>
+<tr><td><code>what_went_well</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>what_went_wrong</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>mistake_tags</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>lesson</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>improvement_suggestion</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>suggested_rule_change</code></td><td>json</td><td>yes</td><td></td></tr>
+<tr><td><code>confidence</code></td><td>float</td><td>yes</td><td></td></tr>
+<tr><td><code>supersedes_review_id</code></td><td>int</td><td>yes</td><td>FK <code>trade_reviews.id</code></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>strategy_improvements</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>strategy_id</code></td><td>str36</td><td>no</td><td>FK <code>strategies.id</code>, indexed</td></tr>
+<tr><td><code>from_version_id</code></td><td>int</td><td>no</td><td>FK <code>strategy_versions.id</code></td></tr>
+<tr><td><code>origin</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>report_id</code></td><td>str36</td><td>yes</td><td>FK <code>reports.id</code></td></tr>
+<tr><td><code>title</code></td><td>str200</td><td>no</td><td></td></tr>
+<tr><td><code>rationale</code></td><td>text</td><td>no</td><td></td></tr>
+<tr><td><code>proposed_change</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>evidence</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>expected_impact</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>proposed_by</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>improvement_decisions</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>improvement_id</code></td><td>int</td><td>no</td><td>FK <code>strategy_improvements.id</code>, indexed</td></tr>
+<tr><td><code>decision</code></td><td>str16</td><td>no</td><td>accepted, rejected, or applied</td></tr>
+<tr><td><code>note</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>resulting_version_id</code></td><td>int</td><td>yes</td><td>FK <code>strategy_versions.id</code>. Set when applied</td></tr>
+<tr><td><code>decided_by</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>paper_orders</code></h3>
+
+<p>Positions are not stored. <code>GET /api/paper/positions</code> nets these rows by contract.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>underlying</code></td><td>str32</td><td>no</td><td>Upper-cased symbol</td></tr>
+<tr><td><code>instrument</code></td><td>str8</td><td>no</td><td><code>EQ</code>, <code>FUT</code>, <code>CE</code>, or <code>PE</code></td></tr>
+<tr><td><code>strike</code></td><td>float</td><td>yes</td><td>Options only</td></tr>
+<tr><td><code>expiry</code></td><td>str10</td><td>yes</td><td><code>YYYY-MM-DD</code></td></tr>
+<tr><td><code>side</code></td><td>str4</td><td>no</td><td><code>BUY</code> or <code>SELL</code></td></tr>
+<tr><td><code>lots</code></td><td>int</td><td>no</td><td>Shares for <code>EQ</code></td></tr>
+<tr><td><code>lot_size</code></td><td>int</td><td>no</td><td>1 for <code>EQ</code>, else from <code>LOT_SIZES</code></td></tr>
+<tr><td><code>price</code></td><td>float</td><td>no</td><td>Price the user typed</td></tr>
+<tr><td><code>charges</code></td><td>json</td><td>no</td><td>Cost breakdown plus <code>total</code></td></tr>
+<tr><td><code>strategy_id</code></td><td>str36</td><td>yes</td><td>FK <code>strategies.id</code></td></tr>
+<tr><td><code>note</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>actor</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>audit_events</code> and <code>live_audit_events</code></h3>
+
+<p>Same columns. Unique <code>prev_hash</code> and unique <code>hash</code>. Index on <code>(entity_type, entity_id)</code> (<code>ix_audit_events_entity</code>, <code>ix_live_audit_events_entity</code>).</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>occurred_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>actor</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>request_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>action</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>entity_type</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>entity_id</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>details</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>prev_hash</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>hash</code></td><td>str64</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>deployed_strategies</code></h3>
+
+<p>No foreign key to the research database. <code>strategy_id</code> and <code>strategy_version_id</code> are copies.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>strategy_id</code></td><td>str36</td><td>no</td><td>Indexed copy</td></tr>
+<tr><td><code>strategy_version_id</code></td><td>int</td><td>no</td><td>Copy</td></tr>
+<tr><td><code>version</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>name</code></td><td>str200</td><td>no</td><td></td></tr>
+<tr><td><code>markdown</code></td><td>text</td><td>no</td><td>Frozen text</td></tr>
+<tr><td><code>content_sha256</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>rules</code></td><td>json</td><td>no</td><td>Frozen rules</td></tr>
+<tr><td><code>rules_sha256</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>report_id</code></td><td>str36</td><td>yes</td><td>Copy</td></tr>
+<tr><td><code>verdict_label</code></td><td>str32</td><td>yes</td><td></td></tr>
+<tr><td><code>approved_by</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>approved_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>broker_accounts</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>broker</code></td><td>str32</td><td>no</td><td><code>paper</code> or <code>sandbox</code> in this tree</td></tr>
+<tr><td><code>account_ref_masked</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>mode</code></td><td>str16</td><td>no</td><td>paper or live</td></tr>
+<tr><td><code>default_algo_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>deployments</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployed_strategy_id</code></td><td>str36</td><td>no</td><td>FK <code>deployed_strategies.id</code>, indexed</td></tr>
+<tr><td><code>strategy_id</code></td><td>str36</td><td>no</td><td>Indexed copy</td></tr>
+<tr><td><code>strategy_version_id</code></td><td>int</td><td>no</td><td>Copy</td></tr>
+<tr><td><code>broker_account_id</code></td><td>str36</td><td>no</td><td>FK <code>broker_accounts.id</code></td></tr>
+<tr><td><code>mode</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>sebi_algo_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>risk_limits</code></td><td>json</td><td>no</td><td>Capital, lots, drawdown, policy</td></tr>
+<tr><td><code>approved_by</code></td><td>str128</td><td>yes</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>deployment_events</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>event</code></td><td>str32</td><td>no</td><td>Latest event is the deployment state</td></tr>
+<tr><td><code>reason</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>actor</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>trade_intents</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>deployed_strategy_id</code></td><td>str36</td><td>no</td><td>FK <code>deployed_strategies.id</code></td></tr>
+<tr><td><code>strategy_version_id</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>action</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>legs</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>entry_rule</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>entry_conditions</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>reason_text</code></td><td>text</td><td>no</td><td></td></tr>
+<tr><td><code>market_snapshot</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>thesis_ref</code></td><td>str128</td><td>yes</td><td></td></tr>
+<tr><td><code>target_pnl</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>stop_loss_pnl</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>max_loss</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>risk_reward</code></td><td>float</td><td>yes</td><td></td></tr>
+<tr><td><code>confidence</code></td><td>float</td><td>yes</td><td></td></tr>
+<tr><td><code>risk_checks</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>decided_by</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>model</code></td><td>str100</td><td>yes</td><td>Set when an LLM note was attached</td></tr>
+<tr><td><code>approval</code></td><td>str16</td><td>no</td><td>auto, blocked, or vetoed</td></tr>
+<tr><td><code>approved_by</code></td><td>str128</td><td>yes</td><td></td></tr>
+<tr><td><code>decided_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>orders</code></h3>
+
+<p><code>client_order_id</code> is unique.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>trade_intent_id</code></td><td>str36</td><td>no</td><td>FK <code>trade_intents.id</code>, indexed</td></tr>
+<tr><td><code>client_order_id</code></td><td>str64</td><td>no</td><td>Unique</td></tr>
+<tr><td><code>broker_order_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>exchange_order_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>sebi_algo_id</code></td><td>str64</td><td>yes</td><td></td></tr>
+<tr><td><code>exchange</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>tradingsymbol</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>expiry</code></td><td>str10</td><td>yes</td><td></td></tr>
+<tr><td><code>strike</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>option_type</code></td><td>str4</td><td>yes</td><td></td></tr>
+<tr><td><code>side</code></td><td>str4</td><td>no</td><td></td></tr>
+<tr><td><code>quantity</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>order_type</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>product</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>limit_price</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>trigger_price</code></td><td>money</td><td>yes</td><td>Stop-limit trigger</td></tr>
+<tr><td><code>placed_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>order_events</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>order_id</code></td><td>str36</td><td>no</td><td>FK <code>orders.id</code>, indexed</td></tr>
+<tr><td><code>status</code></td><td>str32</td><td>no</td><td></td></tr>
+<tr><td><code>filled_qty</code></td><td>int</td><td>no</td><td>Default 0</td></tr>
+<tr><td><code>pending_qty</code></td><td>int</td><td>no</td><td>Default 0</td></tr>
+<tr><td><code>avg_price</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>message</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>raw</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>event_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>received_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>fills</code></h3>
+
+<p>Unique <code>(order_id, broker_trade_id)</code>.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>order_id</code></td><td>str36</td><td>no</td><td>FK <code>orders.id</code>, indexed</td></tr>
+<tr><td><code>broker_trade_id</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>quantity</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>price</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>est_cost_breakdown</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>filled_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>live_trades</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>deployed_strategy_id</code></td><td>str36</td><td>no</td><td>FK <code>deployed_strategies.id</code></td></tr>
+<tr><td><code>open_intent_id</code></td><td>str36</td><td>no</td><td>FK <code>trade_intents.id</code></td></tr>
+<tr><td><code>close_intent_id</code></td><td>str36</td><td>yes</td><td>FK <code>trade_intents.id</code></td></tr>
+<tr><td><code>strategy_version_id</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>legs</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>opened_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>closed_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>holding_minutes</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>exit_rule</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>exit_reason</code></td><td>str64</td><td>no</td><td>Includes <code>kill_switch</code> and <code>broker_stop</code></td></tr>
+<tr><td><code>gross</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>est_costs</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>actual_costs</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>net</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>slippage_vs_expected</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>pnl_vs_target</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>max_adverse_excursion</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>max_favorable_excursion</code></td><td>money</td><td>yes</td><td></td></tr>
+<tr><td><code>outcome_label</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>partial</code></td><td>bool</td><td>no</td><td><code>0004</code>. Server default false</td></tr>
+</tbody></table>
+
+<h3><code>broker_charges</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>broker_account_id</code></td><td>str36</td><td>no</td><td>FK <code>broker_accounts.id</code>, indexed</td></tr>
+<tr><td><code>trade_date</code></td><td>str10</td><td>no</td><td></td></tr>
+<tr><td><code>order_id</code></td><td>str36</td><td>yes</td><td>FK <code>orders.id</code></td></tr>
+<tr><td><code>source</code></td><td>str32</td><td>no</td><td></td></tr>
+<tr><td><code>breakdown</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>total</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>raw</code></td><td>json</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>position_snapshots</code></h3>
+
+<p><code>deployment_id</code> has no foreign key. The model comment says SQLite cannot add that key without rebuilding the append-only triggers.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>broker_account_id</code></td><td>str36</td><td>no</td><td>FK <code>broker_accounts.id</code>, indexed</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>yes</td><td>Indexed. No FK</td></tr>
+<tr><td><code>taken_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>positions</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>mtm</code></td><td>money</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>capital_events</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>kind</code></td><td>str16</td><td>no</td><td>deposit or withdrawal</td></tr>
+<tr><td><code>amount_inr</code></td><td>money</td><td>no</td><td>Always positive</td></tr>
+<tr><td><code>note</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>actor</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>drawdown_events</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>level</code></td><td>int</td><td>no</td><td>0 is normal</td></tr>
+<tr><td><code>action</code></td><td>str24</td><td>no</td><td>normal, warn, reduce_size, stop_new_entries, pause</td></tr>
+<tr><td><code>at_pct</code></td><td>float</td><td>yes</td><td></td></tr>
+<tr><td><code>drawdown_pct</code></td><td>float</td><td>no</td><td></td></tr>
+<tr><td><code>drawdown_inr</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>equity</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>peak</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>detail</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>live_trade_reviews</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>live_trade_id</code></td><td>str36</td><td>no</td><td>FK <code>live_trades.id</code>, indexed</td></tr>
+<tr><td><code>reviewer_type</code></td><td>str16</td><td>no</td><td></td></tr>
+<tr><td><code>reviewer</code></td><td>str128</td><td>no</td><td><code>llm:&lt;model&gt;</code> for an agent lesson</td></tr>
+<tr><td><code>followed_plan</code></td><td>bool</td><td>yes</td><td></td></tr>
+<tr><td><code>process_verdict</code></td><td>str48</td><td>yes</td><td></td></tr>
+<tr><td><code>what_went_well</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>what_went_wrong</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>mistake_tags</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>lesson</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>improvement_suggestion</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>suggested_rule_change</code></td><td>json</td><td>yes</td><td></td></tr>
+<tr><td><code>confidence</code></td><td>float</td><td>yes</td><td></td></tr>
+<tr><td><code>supersedes_review_id</code></td><td>int</td><td>yes</td><td>FK <code>live_trade_reviews.id</code></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>trade_opinions</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>trade_intent_id</code></td><td>str36</td><td>yes</td><td>FK <code>trade_intents.id</code>, indexed</td></tr>
+<tr><td><code>mode</code></td><td>str16</td><td>no</td><td>shadow or veto</td></tr>
+<tr><td><code>status</code></td><td>str16</td><td>no</td><td>ok or error</td></tr>
+<tr><td><code>decision</code></td><td>str8</td><td>yes</td><td>take, reduce, or skip</td></tr>
+<tr><td><code>lots</code></td><td>int</td><td>yes</td><td></td></tr>
+<tr><td><code>rules_lots</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>final_lots</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>applied</code></td><td>bool</td><td>no</td><td>True only when the opinion changed the order</td></tr>
+<tr><td><code>reasons</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>risk_flags</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>confidence</code></td><td>float</td><td>yes</td><td></td></tr>
+<tr><td><code>model</code></td><td>str100</td><td>yes</td><td></td></tr>
+<tr><td><code>prompt_sha256</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>context</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>lesson_review_ids</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>error</code></td><td>text</td><td>yes</td><td></td></tr>
+<tr><td><code>latency_ms</code></td><td>int</td><td>yes</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>phantom_trades</code></h3>
+
+<p><code>trade_intent_id</code> is unique.</p>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>str36</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>trade_intent_id</code></td><td>str36</td><td>no</td><td>FK <code>trade_intents.id</code>, unique</td></tr>
+<tr><td><code>trade_opinion_id</code></td><td>str36</td><td>no</td><td>FK <code>trade_opinions.id</code></td></tr>
+<tr><td><code>kind</code></td><td>str16</td><td>no</td><td>vetoed or reduced</td></tr>
+<tr><td><code>lots</code></td><td>int</td><td>no</td><td></td></tr>
+<tr><td><code>legs</code></td><td>json</td><td>no</td><td></td></tr>
+<tr><td><code>opened_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>closed_at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>exit_reason</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>gross</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>est_costs</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>net</code></td><td>money</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td></td></tr>
+</tbody></table>
+
+<h3><code>broker_credentials</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>broker_account_id</code></td><td>str36</td><td>no</td><td>FK <code>broker_accounts.id</code>, indexed</td></tr>
+<tr><td><code>field</code></td><td>str64</td><td>no</td><td></td></tr>
+<tr><td><code>ciphertext</code></td><td>text</td><td>yes</td><td>Fernet. Null when revoked</td></tr>
+<tr><td><code>fingerprint</code></td><td>str16</td><td>yes</td><td>12-character sha256 prefix in API responses</td></tr>
+<tr><td><code>revoked</code></td><td>bool</td><td>no</td><td>Server default false</td></tr>
+<tr><td><code>created_by</code></td><td>str128</td><td>no</td><td></td></tr>
+<tr><td><code>created_at</code></td><td>ts</td><td>no</td><td>Latest row per field wins</td></tr>
+</tbody></table>
+
+<h3><code>crew_heartbeats</code></h3>
+
+<table><thead><tr><th>Column</th><th>Type</th><th>Null</th><th>Notes</th></tr></thead><tbody>
+<tr><td><code>id</code></td><td>int</td><td>no</td><td>PK</td></tr>
+<tr><td><code>deployment_id</code></td><td>str36</td><td>no</td><td>FK <code>deployments.id</code>, indexed</td></tr>
+<tr><td><code>at</code></td><td>ts</td><td>no</td><td></td></tr>
+<tr><td><code>feed</code></td><td>str16</td><td>no</td><td>replay or broker</td></tr>
+<tr><td><code>outcome</code></td><td>str32</td><td>yes</td><td></td></tr>
+<tr><td><code>pid</code></td><td>int</td><td>yes</td><td></td></tr>
+</tbody></table>
+
+<h3>Market columns</h3>
+
+<p><code>index_bars</code> PK <code>(underlying, date)</code>. Columns: <code>close</code>, <code>vix</code>, <code>iv_rank</code>, <code>open</code>, <code>high</code>, <code>low</code> (all float, null allowed except the key).</p>
+
+<p><code>option_eod</code> PK <code>(underlying, date, expiry, strike, option_type)</code>. Other columns: <code>close</code>, <code>settle</code>, <code>volume</code> (int, default 0), <code>open_interest</code>, <code>lot_size</code>, <code>underlying_price</code>.</p>
+
+<p><code>import_files</code> PK <code>sha256</code> str64. Columns: <code>name</code> str300, <code>kind</code> str32, <code>rows</code> int, <code>first_date</code>, <code>last_date</code>, <code>imported_at</code>.</p>
+
+<p><code>market_events</code> unique <code>(date, kind, title)</code>. Columns: <code>id</code>, <code>date</code> (indexed), <code>kind</code>, <code>title</code>, <code>underlying</code>, <code>source</code>.</p>
+
+<p><code>news_items</code>: <code>id</code>, <code>source</code>, <code>title</code>, <code>url</code> (unique, str1000), <code>published_at</code> (indexed), <code>fetched_at</code>, <code>symbol</code>.</p>
+
+<p>---</p>
+
+<h2>4. Relationships</h2>
+
+<p>Research, from child to parent:</p>
+
+<ul><li><code>strategy_versions.strategy_id</code> → <code>strategies</code></li><li><code>strategy_versions.ingest_run_id</code> → <code>ingest_runs</code></li><li><code>reports.strategy_id</code> → <code>strategies</code></li><li><code>reports.strategy_version_id</code> → <code>strategy_versions</code></li><li><code>simulation_runs.report_id</code> → <code>reports</code></li><li><code>sim_trades.simulation_run_id</code> → <code>simulation_runs</code></li><li><code>sim_trades.report_id</code> → <code>reports</code></li><li><code>sim_trades.strategy_version_id</code> → <code>strategy_versions</code></li><li><code>trade_reviews.sim_trade_id</code> → <code>sim_trades</code></li><li><code>trade_reviews.supersedes_review_id</code> → <code>trade_reviews</code></li><li><code>strategy_improvements.strategy_id</code> → <code>strategies</code></li><li><code>strategy_improvements.from_version_id</code> → <code>strategy_versions</code></li><li><code>strategy_improvements.report_id</code> → <code>reports</code></li><li><code>improvement_decisions.improvement_id</code> → <code>strategy_improvements</code></li><li><code>improvement_decisions.resulting_version_id</code> → <code>strategy_versions</code></li><li><code>paper_orders.strategy_id</code> → <code>strategies</code></li></ul>
+
+<p>Live, from child to parent:</p>
+
+<ul><li><code>deployments.deployed_strategy_id</code> → <code>deployed_strategies</code></li><li><code>deployments.broker_account_id</code> → <code>broker_accounts</code></li><li><code>deployment_events.deployment_id</code> → <code>deployments</code></li><li><code>trade_intents.deployment_id</code> → <code>deployments</code></li><li><code>trade_intents.deployed_strategy_id</code> → <code>deployed_strategies</code></li><li><code>orders.trade_intent_id</code> → <code>trade_intents</code></li><li><code>order_events.order_id</code> → <code>orders</code></li><li><code>fills.order_id</code> → <code>orders</code></li><li><code>live_trades.deployment_id</code> → <code>deployments</code></li><li><code>live_trades.deployed_strategy_id</code> → <code>deployed_strategies</code></li><li><code>live_trades.open_intent_id</code> and <code>close_intent_id</code> → <code>trade_intents</code></li><li><code>broker_charges.broker_account_id</code> → <code>broker_accounts</code></li><li><code>broker_charges.order_id</code> → <code>orders</code></li><li><code>position_snapshots.broker_account_id</code> → <code>broker_accounts</code></li><li><code>capital_events.deployment_id</code> → <code>deployments</code></li><li><code>drawdown_events.deployment_id</code> → <code>deployments</code></li><li><code>live_trade_reviews.live_trade_id</code> → <code>live_trades</code></li><li><code>live_trade_reviews.supersedes_review_id</code> → <code>live_trade_reviews</code></li><li><code>trade_opinions.deployment_id</code> → <code>deployments</code></li><li><code>trade_opinions.trade_intent_id</code> → <code>trade_intents</code></li><li><code>phantom_trades</code> → <code>deployments</code>, <code>trade_intents</code>, <code>trade_opinions</code></li><li><code>broker_credentials.broker_account_id</code> → <code>broker_accounts</code></li><li><code>crew_heartbeats.deployment_id</code> → <code>deployments</code></li><li><code>live_audit_events</code> has no foreign keys</li></ul>
+
+<p><code>position_snapshots.deployment_id</code> and every <code>strategy_id</code> / <code>strategy_version_id</code> / <code>report_id</code> column on a live table are strings with no foreign key.</p>
+
+<p>Market tables have no foreign keys.</p>
+
+<p>---</p>
+
+<h2>5. Identifiers that cross databases</h2>
+
+<table><thead><tr><th>Value</th><th>Written in research</th><th>Copied into live</th></tr></thead><tbody>
+<tr><td><code>strategies.id</code></td><td>PK</td><td><code>deployed_strategies.strategy_id</code>, <code>deployments.strategy_id</code></td></tr>
+<tr><td><code>strategy_versions.id</code></td><td>PK</td><td><code>deployed_strategies.strategy_version_id</code>, <code>deployments.strategy_version_id</code>, intents and live trades</td></tr>
+<tr><td><code>reports.id</code></td><td>PK</td><td><code>deployed_strategies.report_id</code></td></tr>
+<tr><td>Content hash</td><td><code>strategy_versions.content_sha256</code></td><td><code>deployed_strategies.content_sha256</code></td></tr>
+<tr><td>Rules hash</td><td>Inside version frontmatter; recomputed at approval</td><td><code>deployed_strategies.rules_sha256</code></td></tr>
+</tbody></table>
+
+<p>The Trade Crew recomputes both hashes from the frozen row and halts on a mismatch.</p>
+
+<p>---</p>
+
+<h2>6. Data lifecycle</h2>
+
+<ul><li>Inserts are the normal write. Append-only tables reject ORM <code>UPDATE</code> and <code>DELETE</code> and the matching SQL through triggers installed by each migration (<code>backend/app/db/triggers.py</code>).</li><li><code>strategies</code> allows update and rejects delete. Archive sets <code>archived_at</code>.</li><li>A correction to a review is a new row with <code>supersedes_review_id</code>.</li><li>An applied improvement inserts <code>improvement_decisions</code> and a new <code>strategy_versions</code> row. It does not edit the old version.</li><li>Credential rotation inserts a new <code>broker_credentials</code> row. Revocation inserts a row with <code>revoked</code> true and no ciphertext.</li><li>Market rows may be updated. <code>import_files.sha256</code> skips a file that was already imported.</li><li><code>trade_journal</code> is a view over simulated trades. Live trades are read from the live database by <code>JournalStore</code> and merged in Python.</li></ul>
+
+<p>---</p>
+
+<h2>7. Database boundaries</h2>
+
+<table><thead><tr><th>Data</th><th>Where it lives</th></tr></thead><tbody>
+<tr><td>Strategy text and review history</td><td>Research</td></tr>
+<tr><td>Manual paper orders</td><td>Research (<code>paper_orders</code>). Not the live <code>orders</code> table</td></tr>
+<tr><td>Delayed quotes and candles</td><td>Not stored. Fetched from Yahoo per request</td></tr>
+<tr><td>Orders, fills, positions, credentials</td><td>Live</td></tr>
+<tr><td>NSE closes, events, headlines</td><td>Market</td></tr>
+<tr><td>Original video or HTML bytes</td><td>Not stored. Extracted text is on <code>ingest_runs.source_text</code></td></tr>
+<tr><td>Sandbox working state</td><td>JSON files under <code>SANDBOX_STATE_DIR</code>, not a table</td></tr>
+<tr><td>API tokens</td><td><code>API_TOKENS</code> hashes in the environment, not a table</td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>8. Mermaid ER diagram</h2>
+
+<pre><code>erDiagram
+  strategies ||--o{ strategy_versions : has
+  ingest_runs ||--o{ strategy_versions : produced
+  strategies ||--o{ reports : reviewed
+  strategy_versions ||--o{ reports : of
+  reports ||--o{ simulation_runs : contains
+  simulation_runs ||--o{ sim_trades : contains
+  sim_trades ||--o{ trade_reviews : reviewed
+  strategies ||--o{ strategy_improvements : proposes
+  strategy_improvements ||--o{ improvement_decisions : decided
+  strategies |o--o{ paper_orders : tags</code></pre>
+
+<pre><code>erDiagram
+  deployed_strategies ||--o{ deployments : freezes
+  broker_accounts ||--o{ deployments : hosts
+  deployments ||--o{ deployment_events : status
+  deployments ||--o{ trade_intents : decides
+  trade_intents ||--o{ orders : sends
+  orders ||--o{ order_events : status
+  orders ||--o{ fills : fills
+  deployments ||--o{ live_trades : books
+  deployments ||--o{ capital_events : cash
+  deployments ||--o{ drawdown_events : ladder
+  deployments ||--o{ trade_opinions : opinion
+  trade_opinions ||--o{ phantom_trades : counterfactual
+  broker_accounts ||--o{ broker_credentials : secrets
+  deployments ||--o{ crew_heartbeats : ticks</code></pre>
+
+<p>---</p>
+
+<h2>9. Source evidence</h2>
+
+<table><thead><tr><th>Claim</th><th>File</th></tr></thead><tbody>
+<tr><td>Research models</td><td><code>backend/app/db/models/core.py</code>, <code>sim.py</code>, <code>journal.py</code></td></tr>
+<tr><td>Live models</td><td><code>backend/app/db/models/live.py</code></td></tr>
+<tr><td>Market models</td><td><code>backend/app/market/models.py</code></td></tr>
+<tr><td>Append-only and no-delete</td><td><code>backend/app/db/base.py</code>, <code>guards.py</code>, <code>triggers.py</code></td></tr>
+<tr><td>Research head</td><td><code>backend/alembic/versions/0006_paper_orders.py</code></td></tr>
+<tr><td>Live split</td><td><code>backend/alembic/versions/0004_split_live.py</code></td></tr>
+<tr><td>Live head</td><td><code>backend/alembic_live/versions/0005_broker_credentials.py</code></td></tr>
+<tr><td>Money and timestamps</td><td><code>backend/app/db/types.py</code></td></tr>
+<tr><td>View</td><td><code>backend/alembic/versions/0004_split_live.py</code> (<code>SIM_JOURNAL_VIEW</code>)</td></tr>
+</tbody></table></body></html>

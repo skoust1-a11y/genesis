@@ -1,0 +1,357 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>DATABASE_TABLE_REFERENCE</title><style>
+body { font-family: Helvetica, Arial, sans-serif; color: #1c1917; line-height: 1.45;
+       max-width: 920px; margin: 32px auto; padding: 0 24px; font-size: 12.5px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #d6d3d1; padding: 4px 6px; vertical-align: top; text-align: left; }
+th { background: #f5f5f4; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+pre { background: #f5f5f4; padding: 10px; overflow: auto; white-space: pre-wrap; }
+img { max-width: 100%; height: auto; margin: 8px 0; }
+blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1; color: #44403c; }
+</style></head><body><h1>Database Table Reference</h1>
+
+<p>How Trading Strategy Lab uses its tables. Traced from the SQLAlchemy models, Alembic revisions, stores, and API routes. Column types are in <a href="CURRENT_DATABASE_ARCHITECTURE.md">CURRENT_DATABASE_ARCHITECTURE.md</a>.</p>
+
+<p>The research database maps <strong>11</strong> tables plus the <code>trade_journal</code> view. The live database maps <strong>19</strong> tables. The market database maps <strong>5</strong> tables. All of them have a current writer. Nothing in the head schema is an unused leftover table. Live tables that <code>0002_live_schema</code> created inside the research database are dropped by <code>0004_split_live</code>.</p>
+
+<p>Analysis date: 2026-10-10.</p>
+
+<h2>Executive summary</h2>
+
+<table><thead><tr><th>Table</th><th>Database</th><th>Purpose</th><th>Feature</th></tr></thead><tbody>
+<tr><td><code>strategies</code></td><td>Research</td><td>Identity of a strategy. Updated for the current version and for archive</td><td>Lab</td></tr>
+<tr><td><code>ingest_runs</code></td><td>Research</td><td>One extract, including model and raw output</td><td>Ingest</td></tr>
+<tr><td><code>strategy_versions</code></td><td>Research</td><td>Immutable Markdown and rules</td><td>Lab</td></tr>
+<tr><td><code>reports</code></td><td>Research</td><td>Review Crew verdict and payload</td><td>Review</td></tr>
+<tr><td><code>simulation_runs</code></td><td>Research</td><td>One backtest or forward window</td><td>Review</td></tr>
+<tr><td><code>sim_trades</code></td><td>Research</td><td>One simulated trade</td><td>Journal</td></tr>
+<tr><td><code>trade_reviews</code></td><td>Research</td><td>Review of a simulated trade</td><td>Journal</td></tr>
+<tr><td><code>strategy_improvements</code></td><td>Research</td><td>Proposed rule change and its evidence</td><td>Improvements</td></tr>
+<tr><td><code>improvement_decisions</code></td><td>Research</td><td>Human decision on a proposal</td><td>Improvements</td></tr>
+<tr><td><code>paper_orders</code></td><td>Research</td><td>One manual paper order placed from the markets screen</td><td>Markets</td></tr>
+<tr><td><code>notifications</code></td><td>Research</td><td>Alerts and notifications log for audit and reassessment</td><td>Alerts / Inbox</td></tr>
+<tr><td><code>audit_events</code></td><td>Research</td><td>Hash-chained research audit log</td><td>Audit</td></tr>
+<tr><td><code>deployed_strategies</code></td><td>Live</td><td>Frozen copy of an approved version</td><td>Approval</td></tr>
+<tr><td><code>broker_accounts</code></td><td>Live</td><td>Broker, masked account ref, mode</td><td>Brokers</td></tr>
+<tr><td><code>deployments</code></td><td>Live</td><td>Frozen strategy plus risk limits on an account</td><td>Deploy</td></tr>
+<tr><td><code>deployment_events</code></td><td>Live</td><td>Status history. The latest row is the state</td><td>Deploy</td></tr>
+<tr><td><code>trade_intents</code></td><td>Live</td><td>A decision to enter, exit, protect, or block</td><td>Trade Crew</td></tr>
+<tr><td><code>orders</code></td><td>Live</td><td>One order sent to the adapter</td><td>Orders</td></tr>
+<tr><td><code>order_events</code></td><td>Live</td><td>Status changes while an order is polled</td><td>Orders</td></tr>
+<tr><td><code>fills</code></td><td>Live</td><td>A fill</td><td>Orders</td></tr>
+<tr><td><code>live_trades</code></td><td>Live</td><td>A closed or partially closed live trade</td><td>Journal</td></tr>
+<tr><td><code>broker_charges</code></td><td>Live</td><td>Charges the broker reported</td><td>Orders</td></tr>
+<tr><td><code>position_snapshots</code></td><td>Live</td><td>Marked open positions after a tick</td><td>Equity</td></tr>
+<tr><td><code>capital_events</code></td><td>Live</td><td>Deposit or withdrawal</td><td>Money</td></tr>
+<tr><td><code>drawdown_events</code></td><td>Live</td><td>A step on the drawdown ladder</td><td>Drawdown</td></tr>
+<tr><td><code>live_trade_reviews</code></td><td>Live</td><td>Review of a live trade, including LLM lessons</td><td>Journal</td></tr>
+<tr><td><code>live_audit_events</code></td><td>Live</td><td>Hash-chained live audit log</td><td>Audit</td></tr>
+<tr><td><code>trade_opinions</code></td><td>Live</td><td>LLM take, reduce, or skip</td><td>Opinions</td></tr>
+<tr><td><code>phantom_trades</code></td><td>Live</td><td>What removed lots would have done</td><td>Opinions</td></tr>
+<tr><td><code>broker_credentials</code></td><td>Live</td><td>Latest encrypted value of one credential field</td><td>Credentials</td></tr>
+<tr><td><code>crew_heartbeats</code></td><td>Live</td><td>Proof the crew ticked</td><td>Supervisor</td></tr>
+<tr><td><code>index_bars</code></td><td>Market</td><td>Index OHLC, VIX, IV rank</td><td>Backtest and live context</td></tr>
+<tr><td><code>option_eod</code></td><td>Market</td><td>Option closes</td><td>Backtest</td></tr>
+<tr><td><code>import_files</code></td><td>Market</td><td>Files already imported</td><td>Importers</td></tr>
+<tr><td><code>market_events</code></td><td>Market</td><td>Event calendar</td><td>Blackouts and time exits</td></tr>
+<tr><td><code>news_items</code></td><td>Market</td><td>Headlines</td><td>LLM context</td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>1. Database overview</h2>
+
+<p>Application code opens three SQLAlchemy engines (<code>backend/app/db/session.py</code> and <code>backend/app/market/store.py</code>).</p>
+
+<ul><li><strong>Research</strong> holds ingest, versions, reports, simulations, reviews, improvements, manual paper orders, and <code>audit_events</code>.</li><li><strong>Live</strong> holds everything that happens after approval. It does not foreign-key back to research. Approval copies the version text, rules, and hashes.</li><li><strong>Market</strong> holds NSE reference data. It is not append-only. Reports store a fingerprint of what was imported.</li></ul>
+
+<p><code>GET /api/journal</code> reads the research view <code>trade_journal</code> and live <code>live_trades</code>, then returns one list. Live rows are skipped when the live database is not migrated.</p>
+
+<p>Alembic bookkeeping (<code>alembic_version</code>) is omitted below.</p>
+
+<p>---</p>
+
+<h2>2. Table documentation</h2>
+
+<h3>strategies</h3>
+
+<p><code>strategies</code> is the only research row that changes after insert. <code>current_version</code> moves forward when a version is saved. <code>POST /api/strategies/{id}/archive</code> sets <code>archived_at</code>. Deletes are rejected.</p>
+
+<ul><li><strong>Written by:</strong> <code>StrategyStore</code> in <code>backend/app/strategies/store.py</code>.</li><li><strong>Read by:</strong> strategy list and detail routes, review, approval preview.</li></ul>
+
+<h3>ingest_runs</h3>
+
+<p>One row per extract attempt. <code>extractor</code>, <code>model</code>, and <code>raw_output</code> are the reproducibility record for the LLM step.</p>
+
+<ul><li><strong>Written by:</strong> <code>IngestRunStore</code> from <code>POST /api/ingest/extract</code>, <code>POST /api/ingest/clarify</code>, and the demo path. A clarify run stores the original hints plus the author&#x27;s answers.</li><li><strong>Read by:</strong> <code>GET /api/ingest-runs/{id}</code>.</li></ul>
+
+<h3>strategy_versions</h3>
+
+<p>The Markdown that was approved or reviewed. Later edits are new rows. <code>content_sha256</code> covers the text. Rules live in <code>frontmatter</code>.</p>
+
+<ul><li><strong>Written by:</strong> ingest, clarify, and an improvement decision of <code>applied</code>.</li><li><strong>Read by:</strong> review, approval preview, and the UI version picker.</li></ul>
+
+<h3>reports</h3>
+
+<p>One Review Crew execution. <code>inputs</code> is the provenance blob (costs, settings, market-data fingerprint, engine version, rules version, git commit, app version). <code>payload</code> holds the verdict narrative and <code>hard_stop_sweep</code>. <code>verdict_label</code> is the scenario verdict only.</p>
+
+<ul><li><strong>Written by:</strong> <code>ReportStore</code> after <code>run_review_crew</code>.</li><li><strong>Read by:</strong> report routes, approval (a completed report must exist).</li></ul>
+
+<h3>simulation_runs</h3>
+
+<p>One scenario in one mode (<code>backtest</code> or <code>forward</code>). Unique on <code>(report_id, scenario_index, mode)</code>.</p>
+
+<ul><li><strong>Written by:</strong> the report store from the crew&#x27;s <code>sim_runs</code>.</li><li><strong>Read by:</strong> <code>GET /api/reports/{id}/simulations</code>.</li></ul>
+
+<h3>sim_trades</h3>
+
+<p>The trade journal&#x27;s research side: why, how, vision, and outcome. <code>outcome_label</code> is <code>win</code>, <code>loss</code>, or <code>scratch</code>.</p>
+
+<ul><li><strong>Written by:</strong> the report store.</li><li><strong>Read by:</strong> <code>GET /api/reports/{id}/trades</code>, the CSV route, and the <code>trade_journal</code> view.</li></ul>
+
+<h3>trade_reviews</h3>
+
+<p>Reviews of simulated trades only (<code>ck</code> <code>sim_trade_only</code>). The crew inserts <code>reviewer_type = agent</code>. Humans insert through <code>POST /api/trades/sim/{trade_id}/reviews</code>. A correction is a new row with <code>supersedes_review_id</code>.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/app/agents/review_crew/reviewer.py</code> and <code>JournalStore</code>.</li><li><strong>Read by:</strong> trade review list and the journal&#x27;s latest verdict and tags.</li></ul>
+
+<h3>strategy_improvements</h3>
+
+<p>A proposed change. <code>evidence</code> includes the trade keys. The hard-stop recommendation is one of these rows. An LLM rationale is appended to <code>rationale</code> when a key is configured. The proposal itself is deterministic.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/app/agents/review_crew/improver.py</code> during the review run.</li><li><strong>Read by:</strong> <code>GET /api/strategies/{id}/improvements</code>.</li></ul>
+
+<h3>improvement_decisions</h3>
+
+<p><code>accepted</code>, <code>rejected</code>, or <code>applied</code>. <code>applied</code> requires Markdown and sets <code>resulting_version_id</code>. <code>rejected</code> and <code>applied</code> are final in the API.</p>
+
+<ul><li><strong>Written by:</strong> <code>POST /api/improvements/{id}/decisions</code>.</li><li><strong>Read by:</strong> the improvements list, which derives status from these rows.</li></ul>
+
+<h3>paper_orders</h3>
+
+<p>A manual paper order from <code>/markets</code>. Separate from the Trade Crew and from the live <code>orders</code> table. <code>charges</code> is computed at insert. Positions are not stored; they are netted from these rows by average cost.</p>
+
+<ul><li><strong>Written by:</strong> <code>POST /api/paper/orders</code> in <code>backend/app/api/market.py</code>, with a <code>paper.order_placed</code> audit event.</li><li><strong>Read by:</strong> <code>GET /api/paper/orders</code> and <code>GET /api/paper/positions</code> (<code>net_positions</code> in <code>backend/app/paper.py</code>).</li></ul>
+
+<h3>notifications</h3>
+
+<p>Alerts and system notifications dispatched to external channels (Telegram, SMTP) and in-app notifications. Preserved for operational reassessment and audit. <code>NoDelete</code> blocks row deletion, while allowing <code>read_at</code> status updates.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/app/alerts.py</code> (<code>notify</code>, <code>record</code>) and <code>POST /api/notifications</code>.</li><li><strong>Read by:</strong> <code>GET /api/notifications</code>, updated by <code>POST /api/notifications/{id}/read</code> and <code>POST /api/notifications/read-all</code>.</li></ul>
+
+<h3>audit_events</h3>
+
+<p>Every research write that the stores choose to audit. <code>hash</code> chains to <code>prev_hash</code>. <code>GET /api/audit/verify</code> recomputes the chain.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/app/audit/log.py</code>.</li><li><strong>Read by:</strong> <code>GET /api/audit</code> and <code>/verify</code>.</li></ul>
+
+<h3>deployed_strategies</h3>
+
+<p>The copy the Trade Crew is allowed to trust. Includes Markdown, <code>rules</code>, <code>content_sha256</code>, and <code>rules_sha256</code>.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/app/live/approvals.py</code> in the same transaction as the deployment.</li><li><strong>Read by:</strong> the crew&#x27;s verify step and deployment detail.</li></ul>
+
+<h3>broker_accounts</h3>
+
+<p>A named account. <code>broker</code> must be registered and must support <code>mode</code>. Creating a live account requires a token.</p>
+
+<ul><li><strong>Written by:</strong> <code>POST /api/live/broker-accounts</code>.</li><li><strong>Read by:</strong> approval and the deploy page.</li></ul>
+
+<h3>deployments</h3>
+
+<p>The approved risk limits, including drawdown and policy, frozen as JSON. Status is not a column. It is the latest <code>deployment_events.event</code>.</p>
+
+<ul><li><strong>Written by:</strong> approval.</li><li><strong>Read by:</strong> crew, supervisor, <code>/api/live/deployments</code>.</li></ul>
+
+<h3>deployment_events</h3>
+
+<p>Append-only status. Trading requires the latest event to be <code>started</code>. <code>stopped</code> and <code>halted</code> are final. Floor and veto notices are also events and do not by themselves change that rule; the crew or supervisor writes a real status event when it pauses or starts.</p>
+
+<ul><li><strong>Written by:</strong> approval, start, pause, stop, the crew on halt, and the supervisor on floor resume.</li><li><strong>Read by:</strong> every gate check.</li></ul>
+
+<h3>trade_intents</h3>
+
+<p>The decision record. <code>approval</code> is <code>auto</code> (orders sent), <code>blocked</code> (a risk check failed), or <code>vetoed</code> (the LLM skip). Protective stops use a <code>protect</code> intent.</p>
+
+<ul><li><strong>Written by:</strong> <code>LiveStore</code> from the Trade Crew.</li><li><strong>Read by:</strong> <code>GET /api/live/deployments/{id}/intents</code>, reconciliation, exits.</li></ul>
+
+<h3>orders, order_events, fills</h3>
+
+<p>The order lifecycle in <code>backend/app/trading/orders.py</code>. Hedges are ordered before shorts. Status polls become <code>order_events</code>. Fills are unique per <code>(order_id, broker_trade_id)</code>.</p>
+
+<ul><li><strong>Written by:</strong> the order manager inside the crew.</li><li><strong>Read by:</strong> <code>GET /api/live/orders/{id}</code>, charge and position logic.</li></ul>
+
+<h3>live_trades</h3>
+
+<p>A completed close, or a partial close when <code>partial</code> is true. <code>exit_reason</code> records <code>kill_switch</code>, <code>broker_stop</code>, <code>unwind</code>, and the strategy or policy exit that fired.</p>
+
+<ul><li><strong>Written by:</strong> the crew when a position closes.</li><li><strong>Read by:</strong> journal, equity, opinion evaluation, <code>GET /api/live/live-trades</code>.</li></ul>
+
+<h3>broker_charges</h3>
+
+<p>Charges the adapter reports, separate from the estimated cost model on the fill.</p>
+
+<ul><li><strong>Written by:</strong> the crew when the adapter returns charges.</li><li><strong>Read by:</strong> live trade actual cost.</li></ul>
+
+<h3>position_snapshots</h3>
+
+<p>Open positions and their mark, written after a tick. Equity uses the latest snapshot&#x27;s unrealized P&amp;L.</p>
+
+<ul><li><strong>Written by:</strong> the crew.</li><li><strong>Read by:</strong> <code>GET /api/live/equity</code>, <code>GET /api/live/positions</code>, drawdown.</li></ul>
+
+<h3>capital_events</h3>
+
+<p>Deposits and withdrawals after approval. Amounts are positive. Kind says which way. Equity and peak move by the same amount.</p>
+
+<ul><li><strong>Written by:</strong> <code>POST /api/live/deployments/{id}/capital-events</code>.</li><li><strong>Read by:</strong> equity and <code>GET .../capital-events</code>.</li></ul>
+
+<h3>drawdown_events</h3>
+
+<p>One row each time the ladder level changes, including a return to normal.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/app/live/drawdown.py</code> from the crew tick.</li><li><strong>Read by:</strong> <code>GET /api/live/deployments/{id}/drawdown</code>.</li></ul>
+
+<h3>live_trade_reviews</h3>
+
+<p>Same review shape as <code>trade_reviews</code>, for live trades. LLM lessons use <code>reviewer_type = agent</code> and <code>reviewer = llm:&lt;model&gt;</code>.</p>
+
+<ul><li><strong>Written by:</strong> <code>POST /api/trades/live/{trade_id}/reviews</code> and the crew lesson writer.</li><li><strong>Read by:</strong> review history and later opinions (<code>lesson_review_ids</code>).</li></ul>
+
+<h3>live_audit_events</h3>
+
+<p>The live database&#x27;s own hash chain, including credential fingerprints and approval details. Values of secrets are not stored.</p>
+
+<ul><li><strong>Written by:</strong> <code>LiveStore</code>.</li><li><strong>Read by:</strong> <code>GET /api/live/audit</code> and <code>/verify</code>.</li></ul>
+
+<h3>trade_opinions</h3>
+
+<p>Stored for <code>shadow</code> and <code>veto</code>. <code>applied</code> is true only when the opinion changed the lots that were sent. Errors are stored and the rules stand.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/app/agents/trade_crew/opinion.py</code>.</li><li><strong>Read by:</strong> <code>GET /api/live/opinions</code> and the evaluation route.</li></ul>
+
+<h3>phantom_trades</h3>
+
+<p>The lots a veto skipped or reduced, marked until the exit rule would have closed them. Written once, at exit.</p>
+
+<ul><li><strong>Written by:</strong> the crew when opinions are in veto.</li><li><strong>Read by:</strong> <code>GET /api/live/phantom-trades</code> and opinion evaluation.</li></ul>
+
+<h3>broker_credentials</h3>
+
+<p>Append-only secret store. The latest row for a field is the value. A revoked row drops that field so lookup continues to <code>BROKER_&lt;BROKER&gt;_&lt;FIELD&gt;</code> in the environment.</p>
+
+<ul><li><strong>Written by:</strong> <code>PUT</code> and <code>DELETE /api/live/broker-accounts/{id}/credentials</code>.</li><li><strong>Read by:</strong> adapter construction. The GET route returns field, source, fingerprint, and time. It does not return ciphertext.</li></ul>
+
+<h3>crew_heartbeats</h3>
+
+<p>One row per tick with feed, outcome, and pid.</p>
+
+<ul><li><strong>Written by:</strong> the crew at the end of a tick.</li><li><strong>Read by:</strong> deployment list (<code>crew_running</code>) and the supervisor&#x27;s missed-heartbeat alert.</li></ul>
+
+<h3>index_bars, option_eod, import_files</h3>
+
+<p>NSE end-of-day import. <code>import_files</code> is how a re-run skips a file. Index highs and lows feed the liquidity-sweep entry fields. VIX closes feed IV rank and the odds gate.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/scripts/import_nse_eod.py</code>.</li><li><strong>Read by:</strong> the simulator, the policy backtest, and the broker feed&#x27;s previous-day range.</li></ul>
+
+<h3>market_events</h3>
+
+<p>RBI, budget, FOMC, results, and optional board meetings.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/scripts/import_events.py</code>.</li><li><strong>Read by:</strong> entry blackouts and policy event exits. An empty calendar fails closed when a blackout rule is set.</li></ul>
+
+<h3>news_items</h3>
+
+<p>Headlines only, with publish time and fetch time. Feeds are not a backfill.</p>
+
+<ul><li><strong>Written by:</strong> <code>backend/scripts/fetch_news.py</code>.</li><li><strong>Read by:</strong> LLM opinion context, filtered to items published at or before the decision.</li></ul>
+
+<p>---</p>
+
+<h2>3. Group tables by domain</h2>
+
+<table><thead><tr><th>Domain</th><th>Tables</th></tr></thead><tbody>
+<tr><td>Strategy identity</td><td><code>strategies</code>, <code>strategy_versions</code>, <code>ingest_runs</code></td></tr>
+<tr><td>Review</td><td><code>reports</code>, <code>simulation_runs</code>, <code>sim_trades</code>, <code>trade_reviews</code>, <code>strategy_improvements</code>, <code>improvement_decisions</code></td></tr>
+<tr><td>Manual paper trading</td><td><code>paper_orders</code></td></tr>
+<tr><td>Research audit</td><td><code>audit_events</code></td></tr>
+<tr><td>Approval</td><td><code>deployed_strategies</code>, <code>broker_accounts</code>, <code>deployments</code>, <code>deployment_events</code></td></tr>
+<tr><td>Execution</td><td><code>trade_intents</code>, <code>orders</code>, <code>order_events</code>, <code>fills</code>, <code>live_trades</code>, <code>broker_charges</code></td></tr>
+<tr><td>Risk and money</td><td><code>position_snapshots</code>, <code>capital_events</code>, <code>drawdown_events</code></td></tr>
+<tr><td>LLM opinions</td><td><code>trade_opinions</code>, <code>phantom_trades</code>, <code>live_trade_reviews</code></td></tr>
+<tr><td>Live operations</td><td><code>broker_credentials</code>, <code>crew_heartbeats</code>, <code>live_audit_events</code></td></tr>
+<tr><td>Market reference</td><td><code>index_bars</code>, <code>option_eod</code>, <code>import_files</code>, <code>market_events</code>, <code>news_items</code></td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>4. Application flow to table mapping</h2>
+
+<table><thead><tr><th>Flow</th><th>Tables written</th></tr></thead><tbody>
+<tr><td>Ingest or clarify</td><td><code>ingest_runs</code>, <code>strategies</code>, <code>strategy_versions</code>, <code>audit_events</code></td></tr>
+<tr><td>Manual paper order</td><td><code>paper_orders</code>, <code>audit_events</code></td></tr>
+<tr><td>Review</td><td><code>reports</code>, <code>simulation_runs</code>, <code>sim_trades</code>, <code>trade_reviews</code>, <code>strategy_improvements</code>, <code>audit_events</code></td></tr>
+<tr><td>Apply improvement</td><td><code>improvement_decisions</code>, <code>strategy_versions</code>, <code>strategies</code> (version pointer), <code>audit_events</code></td></tr>
+<tr><td>Approve</td><td><code>deployed_strategies</code>, <code>deployments</code>, <code>deployment_events</code>, <code>live_audit_events</code>, and one research <code>audit_events</code> row</td></tr>
+<tr><td>Trade Crew tick</td><td><code>trade_intents</code>, <code>orders</code>, <code>order_events</code>, <code>fills</code>, <code>live_trades</code>, <code>position_snapshots</code>, <code>drawdown_events</code>, <code>crew_heartbeats</code>, <code>live_audit_events</code>. Opinions and phantom trades only when that feature is on</td></tr>
+<tr><td>Kill switch</td><td><code>deployment_events</code>, then order cancels and, if flatten, <code>live_trades</code></td></tr>
+<tr><td>Credential rotate</td><td><code>broker_credentials</code>, <code>live_audit_events</code></td></tr>
+<tr><td>NSE import</td><td><code>index_bars</code>, <code>option_eod</code>, <code>import_files</code></td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>5. Table dependency map</h2>
+
+<p>Research parents, in insert order: <code>strategies</code> and <code>ingest_runs</code>, then <code>strategy_versions</code>, then <code>reports</code>, then <code>simulation_runs</code>, then <code>sim_trades</code>, then <code>trade_reviews</code>. Improvements point at a strategy, a version, and optionally a report. Decisions point at an improvement and optionally a new version. <code>paper_orders</code> optionally points at a strategy.</p>
+
+<p>Live parents, in insert order: <code>broker_accounts</code> and <code>deployed_strategies</code>, then <code>deployments</code>, then events, intents, orders, fills, and trades. Credentials and heartbeats point at accounts and deployments. They can exist before any trade.</p>
+
+<p>Market tables are independent of both.</p>
+
+<p>---</p>
+
+<h2>6. Important identifiers</h2>
+
+<table><thead><tr><th>Identifier</th><th>Meaning</th></tr></thead><tbody>
+<tr><td><code>strategies.id</code></td><td>Stable strategy id. Copied onto live rows. Not a foreign key there</td></tr>
+<tr><td><code>strategy_versions.id</code></td><td>Integer snapshot id. Approval stores a copy</td></tr>
+<tr><td><code>content_sha256</code></td><td>Hash of the Markdown. Crew halts if the frozen copy no longer matches</td></tr>
+<tr><td><code>rules_sha256</code></td><td>Hash of the rules object. The UI must send it back as <code>confirm_rules_sha256</code></td></tr>
+<tr><td><code>deployments.id</code></td><td>The id the supervisor and the crew process use</td></tr>
+<tr><td><code>client_order_id</code></td><td>Idempotent order id unique in <code>orders</code></td></tr>
+<tr><td><code>audit hash</code></td><td><code>sha256(prev_hash + canonical JSON)</code>. One chain per audited database</td></tr>
+<tr><td><code>import_files.sha256</code></td><td>File already imported into the market database</td></tr>
+<tr><td>Credential fingerprint</td><td>Shown in API and audit. Not the secret</td></tr>
+</tbody></table>
+
+<p>---</p>
+
+<h2>7. Vector data</h2>
+
+<p>There is no embedding column, no <code>tsvector</code>, and no vector extension. Search is not a feature of this schema. Strategy text is stored as Markdown and JSON rules.</p>
+
+<p>---</p>
+
+<h2>8. Tables that are no longer in the research database</h2>
+
+<p><code>0002_live_schema</code> created broker, deployment, order, and live-trade tables in the research database. <code>0004_split_live</code> drops them and rebuilds <code>trade_journal</code> over simulated trades only. A database migrated to head does not contain those research-side live tables. The live database&#x27;s <code>0001_live</code> is the replacement, and later live revisions add opinions, drawdown, partial trades, credentials, and heartbeats.</p>
+
+<p>---</p>
+
+<h2>9. Source references</h2>
+
+<table><thead><tr><th>Area</th><th>File</th></tr></thead><tbody>
+<tr><td>Models</td><td><code>backend/app/db/models/</code></td></tr>
+<tr><td>Journal merge</td><td><code>backend/app/journal/store.py</code></td></tr>
+<tr><td>Live writes</td><td><code>backend/app/live/store.py</code></td></tr>
+<tr><td>Approval</td><td><code>backend/app/live/approvals.py</code></td></tr>
+<tr><td>Market create</td><td><code>backend/app/market/store.py</code></td></tr>
+<tr><td>View SQL</td><td><code>backend/alembic/versions/0004_split_live.py</code></td></tr>
+</tbody></table>
+
+<h2>Documentation verification</h2>
+
+<ul><li>Table names match <code>__tablename__</code> on the ORM classes exported from <code>backend/app/db/models/__init__.py</code> and <code>backend/app/market/models.py</code>.</li><li><code>LIVE_APPEND_ONLY_TABLES</code> lists the same 19 live tables.</li><li>Research append-only list matches the ten append-only research tables. <code>strategies</code> is no-delete rather than append-only.</li><li>No service writes a table that is absent from this list.</li></ul></body></html>

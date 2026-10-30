@@ -1,0 +1,172 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>CURRENT_SYSTEM_ARCHITECTURE_ANALYSIS</title><style>
+body { font-family: Helvetica, Arial, sans-serif; color: #1c1917; line-height: 1.45;
+       max-width: 920px; margin: 32px auto; padding: 0 24px; font-size: 12.5px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #d6d3d1; padding: 4px 6px; vertical-align: top; text-align: left; }
+th { background: #f5f5f4; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+pre { background: #f5f5f4; padding: 10px; overflow: auto; white-space: pre-wrap; }
+img { max-width: 100%; height: auto; margin: 8px 0; }
+blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1; color: #44403c; }
+</style></head><body><h1>Current System Architecture Analysis</h1>
+
+<p>Factual specification of the Genesis Institutional Trading &amp; Strategy Intelligence Platform as implemented in this repository. This document serves as the technical specification for architecture, runtime flows, and diagram models.</p>
+
+<p><strong>Source of truth:</strong> <code>frontend/src</code>, <code>backend/app</code>, <code>backend/alembic</code>, <code>backend/alembic_live</code>, <code>backend/pyproject.toml</code>, <code>frontend/package.json</code>, <code>scripts/</code>, <code>trades/</code>, and <code>.env.example</code>.</p>
+
+<p>*Analysis &amp; System Specification Date: 2026-10-30.*</p>
+
+<p>---</p>
+
+<h2>1. Current System Components</h2>
+
+<h3>1. Frontend Client</h3>
+
+<p>| Field | Value |</p>
+<p>| :--- | :--- |</p>
+<p>| Name | Next.js UI |</p>
+<p>| Responsibility | Executive Dashboard (index quotes, paper positions, live PnL), Markets (interactive candle charts, non-repainting BOS/CHoCH swings, FVG imbalances, dynamic trendlines, option chain, manual paper orders), Strategies (catalog and 5-Pillar Strategy Analyzer), Strategy Lab (<code>/strategy-lab</code> interactive research), Lab (<code>/lab</code> ingest, clarify, review crew, simulated trades), Forward-Tested (<code>/forward-tested</code> trade journal), Deploy (<code>/deploy</code> policy, backtest, approval), Deployments (<code>/deployments</code> pause, stop, token-gated kill switch flatten), and Login (<code>/login</code>) |</p>
+<p>| Technology | Next.js 15, React 19, Tailwind CSS 4, <code>lightweight-charts</code> |</p>
+<p>| Main files | <code>frontend/src/app/layout.tsx</code>, <code>page.tsx</code>, <code>markets/page.tsx</code>, <code>strategies/page.tsx</code>, <code>strategy-lab/page.tsx</code>, <code>lab/page.tsx</code>, <code>forward-tested/page.tsx</code>, <code>deploy/page.tsx</code>, <code>deployments/page.tsx</code>, <code>login/page.tsx</code>, <code>lib/api.ts</code>, <code>lib/market.ts</code>, <code>lib/policy.ts</code> |</p>
+<p>| Sync/async | Browser <code>fetch</code> over HTTP REST |</p>
+<p>| Invoked by | Operator / User web browser |</p>
+<p>| Invokes | FastAPI at <code>NEXT_PUBLIC_API_URL</code> (default <code>http://127.0.0.1:8841</code>) |</p>
+<p>| Storage | <code>localStorage</code> keys <code>tsl.actor</code> and <code>tsl.token</code> |</p>
+
+<h3>2. Backend API Process</h3>
+
+<p>| Field | Value |</p>
+<p>| :--- | :--- |</p>
+<p>| Name | FastAPI application |</p>
+<p>| Responsibility | HTTP REST API for market quotes &amp; candles, chart structure analytics, option chain, paper orders, strategy ingestion &amp; gap clarification, Review Crew executions, live approvals, deployment lifecycles, cryptographic audit chains, notifications, and auth |</p>
+<p>| Technology | FastAPI, Uvicorn, Pydantic v2, SQLAlchemy |</p>
+<p>| Main files | <code>backend/app/main.py</code>, <code>backend/app/api/routes.py</code>, <code>journal.py</code>, <code>audit.py</code>, <code>live.py</code>, <code>market.py</code>, <code>notifications.py</code>, <code>auth.py</code>, <code>common.py</code> |</p>
+<p>| Invoked by | Next.js Frontend and platform automation scripts (<code>GET /api/health</code>) |</p>
+<p>| Middleware order | <code>CORSMiddleware</code> → <code>AuditContextMiddleware</code> (<code>X-Request-ID</code>, <code>X-Actor</code>) → <code>RequestLoggingMiddleware</code> (rotating subsystem logger) |</p>
+
+<h3>3. Ingest and Extraction Engine</h3>
+
+<p>| Field | Value |</p>
+<p>| :--- | :--- |</p>
+<p>| Name | Strategy Ingest &amp; Extraction |</p>
+<p>| Responsibility | Fetch source content from URLs/text and extract executable Markdown strategy documents with <code>rules:</code> blocks |</p>
+<p>| Technology | <code>youtube-transcript-api</code>, <code>httpx</code>, BeautifulSoup with <code>lxml</code>, LangChain chat models |</p>
+<p>| Main files | <code>backend/app/ingest/youtube.py</code>, <code>instagram.py</code>, <code>doc.py</code>, <code>store.py</code>, <code>backend/app/extract/extractor.py</code>, <code>backend/app/strategies/clarify.py</code> |</p>
+<p>| Invoked by | <code>POST /api/ingest/extract</code>, <code>POST /api/ingest/clarify</code>, <code>POST /api/demo/run</code> |</p>
+<p>| External deps | YouTube, Instagram, web documents. OpenAI or Anthropic when API keys are configured |</p>
+<p>| Storage | <code>ingest_runs</code>, <code>strategies</code>, and <code>strategy_versions</code> in Research DB |</p>
+
+<h3>4. Review Crew (LangGraph Research Engine)</h3>
+
+<p>| Field | Value |</p>
+<p>| :--- | :--- |</p>
+<p>| Name | Review Crew |</p>
+<p>| Responsibility | Deterministic multi-scenario backtesting, stress testing, capital hard-stop sweeps (2-5%), per-trade forensic reviews, verdict synthesis, and improvement proposals with Indian options cost schedules |</p>
+<p>| Technology | LangGraph <code>StateGraph</code> |</p>
+<p>| Main files | <code>backend/app/agents/review_crew/graph.py</code>, <code>reviewer.py</code>, <code>hard_stop.py</code>, <code>improver.py</code>, <code>backend/app/engine/sim.py</code>, <code>backend/app/engine/costs.py</code> |</p>
+<p>| Invoked by | <code>POST /api/review/run</code> and Strategy Lab |</p>
+<p>| Node order | <code>audit</code> → <code>scenarios</code> → <code>simulate</code> → <code>hard_stop</code> → <code>trade_review</code> → <code>verdict</code> → <code>improve</code> |</p>
+<p>| Storage | <code>reports</code>, <code>simulation_runs</code>, <code>sim_trades</code>, <code>trade_reviews</code>, <code>strategy_improvements</code> |</p>
+
+<h3>5. The 5 Autonomous Trading Crews (<code>backend/app/trading/</code>)</h3>
+
+<p>The live trading architecture is decoupled into 5 specialized autonomous crews managed by <code>scripts/live_scanner.py</code> and <code>scripts/genesis.sh</code>:</p>
+
+<p>1. <strong>PreMarketCrew (<code>backend/app/trading/pre_market_crew/</code>)</strong>:</p>
+<p>   - <code>PreMarketManager</code>: Runs daily from 08:30 to 09:14 IST.</p>
+<p>   - <code>GapAgent</code>: Assesses GIFT NIFTY vs Previous Day Close (PDC) gap bias and opening trap odds.</p>
+<p>   - <code>GammaAgent</code>: Analyzes option chain Call/Put walls, PCR, and dealer pinning Max Pain.</p>
+<p>   - <code>EventRiskAgent</code>: Checks macro economic calendar (RBI MPC, CPI, FED) for event blackout restrictions.</p>
+<p>   - Outputs <code>trades/pre_market_plan.json</code> and dispatches the 09:05 IST Battleplan to Telegram.</p>
+
+<p>2. <strong>ScannerCrew (<code>backend/app/trading/scanner_crew/</code>)</strong>:</p>
+<p>   - <code>ScannerManager</code>: Runs continuously during market hours (09:15 - 15:30 IST).</p>
+<p>   - <code>FeedAgent</code>: Delta-only multi-timeframe polling (1m, 2m, 5m, 15m, 30m) with ETF session VWAP proxy.</p>
+<p>   - <code>LevelsAgent</code>: Pins dynamic PDH, PDL, PDC, Opening Range (OR-30: 09:15-09:45), and psychological strike levels.</p>
+<p>   - <code>ConsolidationAgent</code>: Midday compression box &amp; ATR deadband detector (Lunch Lull 11:30-13:00 filter).</p>
+<p>   - <code>NewsAgent</code>: Evaluates live news sentiment and macro catalyst risks.</p>
+<p>   - <code>DetectorAgent</code>: Multi-strategy pattern scanner for Breakout &amp; Retest, Liquidity Sweep (PDH/PDL raid), and Trendline Reversal.</p>
+<p>   - Emits real-time <code>ScanSnapshot</code> and verified <code>CandidateSetup</code> objects.</p>
+
+<p>3. <strong>TradeCrew (<code>backend/app/trading/crew/</code>)</strong>:</p>
+<p>   - <code>TradeManager</code>: Master live trade orchestrator.</p>
+<p>   - <code>TrendAgent</code>: Calculates macro trend slope and aligns dynamic R:R targets (+1.8R to +4.5R).</p>
+<p>   - <code>RiskAgent</code>: Enforces daily loss limits, consecutive loss circuit breakers, and 50% Capital Safety Wall.</p>
+<p>   - <code>OrderFlowAgent</code>: Detects institutional whale volume spikes and absorption traps to issue pre-entry vetoes.</p>
+<p>   - <code>EntryAgent</code>: Executes micro-wick entries with strictly OTM option strikes (1-OTM standard, 2-OTM super-trend).</p>
+<p>   - <code>ExitAgent</code>: Unconditional Target 3 full close, 5M structural trailing stop, and opposing sweep auto-flip.</p>
+<p>   - <code>AlertAgent</code>: Dispatches live Telegram trade tickets and threaded CMP heartbeat updates.</p>
+<p>   - <code>JournalAgent</code>: Manages active trade cache and commits atomic ACID records to <code>trades.db</code> SQLite SSOT.</p>
+
+<p>4. <strong>ExecutionCrew (<code>backend/app/trading/execution_crew/</code>)</strong>:</p>
+<p>   - <code>ExecutionManager</code>: Coordinates order routing and broker bridges.</p>
+<p>   - <code>SmartRoutingAgent</code>: Tranche order execution (30% market fill + 70% limit chase) to minimize slippage.</p>
+<p>   - <code>BrokerBridgeAgent</code>: Pluggable adapter bridge for Paper and Live broker execution.</p>
+<p>   - <code>ReconciliationAgent</code>: Zero-drift position reconciliation ensuring database state matches broker holdings.</p>
+
+<p>5. <strong>PostMarketCrew (<code>backend/app/trading/post_market_crew/</code>)</strong>:</p>
+<p>   - <code>PostMarketManager</code>: Dispatched automatically at 15:31 IST daily.</p>
+<p>   - <code>AutopsyAgent</code>: Reconstructs the day&#x27;s intraday tape, audits exit efficiency, and logs missed setups.</p>
+<p>   - <code>ParameterAgent</code>: Executes walk-forward edge testing and parameter tuning for tomorrow&#x27;s session.</p>
+<p>   - <code>SafetyWallAgent</code>: Sweeps net realized profits and locks 50% permanently into the protected Capital Floor.</p>
+<p>   - <code>CodeQualityAgent</code>: Audits application logs, system warnings, and latency bottlenecks.</p>
+<p>   - <code>BriefingAgent</code>: Writes <code>reports/daily_audit_YYYY-MM-DD.md</code> and dispatches the Executive Digest to Telegram.</p>
+
+<h3>6. TradeStore SSOT &amp; Excel Synchronization (<code>backend/app/db/trade_store.py</code>)</h3>
+
+<ul><li>High-performance SQLite database (<code>data/trades.db</code>) operating in WAL (Write-Ahead Logging) mode.</li><li>Provides atomic transactions for concurrent multi-process access (Scanner, FastAPI, Exporter).</li><li><code>scripts/maintain_trades_excel.py</code> automatically synchronizes the SQLite store with institutional Excel workbooks in <code>trades/</code>:</li></ul>
+<p>  - <code>trades/live_and_forward_trades.xlsx</code>: Master executive dashboard and live trade ledger.</p>
+<p>  - <code>trades/todays_live_trades.xlsx</code>: Isolated intraday session trade ledger.</p>
+<p>  - <code>trades/by_strategy/*.xlsx</code>: Strategy-specific workbooks.</p>
+
+<h3>7. Non-Repainting Market Structure Engine (<code>backend/app/market/chart_analytics.py</code>)</h3>
+
+<ul><li>Computes non-repainting pivot highs and lows using rolling 2-left / 2-right bar verification.</li><li>Identifies Market Structure Breaks (<code>BOS</code>) and Changes of Character (<code>CHoCH</code>).</li><li>Maps Equal Highs (<code>EQH</code>), Equal Lows (<code>EQL</code>), and Fair Value Gaps (<code>FVG</code>).</li><li>Calculates dynamic ascending support and descending resistance trendlines.</li></ul>
+
+<h3>8. Platform Management CLI (<code>scripts/genesis.sh</code>)</h3>
+
+<p>Unified bash control script managing background services:</p>
+<ul><li><code>./scripts/genesis.sh start</code>: Starts Backend (8841), Frontend (3000), and Live Scanner Daemon.</li><li><code>./scripts/genesis.sh stop</code>: Gracefully terminates all background services.</li><li><code>./scripts/genesis.sh restart</code>: Clean restart of all services.</li><li><code>./scripts/genesis.sh status</code>: Detailed PID health and HTTP status check.</li><li><code>./scripts/genesis.sh logs [backend|frontend|scanner]</code>: Tails process logs in real-time.</li></ul>
+
+<p>---</p>
+
+<h2>2. Multi-Tier Persistence Architecture</h2>
+
+<pre><code>flowchart TD
+    subgraph StorageTier[&quot;Genesis Multi-Tier Persistence Layout&quot;]
+        direction TB
+        R_DB[(&quot;1. Research DB (DATABASE_URL)&lt;br/&gt;SQLite/Postgres · Alembic 0006&lt;br/&gt;strategies, versions, reports, sim_trades,&lt;br/&gt;trade_reviews, paper_orders, notifications,&lt;br/&gt;SHA256 audit_events&quot;)]
+        L_DB[(&quot;2. Live DB (LIVE_DATABASE_URL)&lt;br/&gt;SQLite/Postgres · Alembic live 0005&lt;br/&gt;deployed_strategies (frozen hashes), deployments,&lt;br/&gt;orders, fills, live_trades, credentials (Fernet),&lt;br/&gt;SHA256 live_audit_events&quot;)]
+        T_DB[(&quot;3. TradeStore SSOT (data/trades.db)&lt;br/&gt;SQLite WAL Mode&lt;br/&gt;live_and_forward_trades, PnL,&lt;br/&gt;active_strategy_params, safety_wall_state,&lt;br/&gt;daily_risk_config&quot;)]
+        M_DB[(&quot;4. Market DB (MARKET_DATABASE_URL)&lt;br/&gt;SQLite · Unaudited Reference Store&lt;br/&gt;index_bars, option_eod, events, news&quot;)]
+        XL[(&quot;5. trades/ Excel Workbooks&lt;br/&gt;live_and_forward_trades.xlsx&lt;br/&gt;todays_live_trades.xlsx&lt;br/&gt;by_strategy/*.xlsx&quot;)]
+    end</code></pre>
+
+<p>---</p>
+
+<h2>3. Present vs Absent Implementation Status</h2>
+
+<p>| Feature / Capability | Status | Implementation Evidence |</p>
+<p>| :--- | :--- | :--- |</p>
+<p>| <strong>5 Autonomous Trading Crews</strong> | Present | <code>backend/app/trading/{pre_market_crew, scanner_crew, crew, execution_crew, post_market_crew}/</code> |</p>
+<p>| <strong>Multi-Timeframe Live Scanner</strong> | Present | <code>scripts/live_scanner.py</code>, <code>scripts/genesis.sh</code> |</p>
+<p>| <strong>TradeStore SQLite SSOT (WAL)</strong> | Present | <code>backend/app/db/trade_store.py</code>, <code>data/trades.db</code> |</p>
+<p>| <strong>Excel Synchronizer</strong> | Present | <code>scripts/maintain_trades_excel.py</code>, <code>trades/</code> |</p>
+<p>| <strong>3-Tier Sizing &amp; 50% Safety Wall</strong>| Present | <code>backend/app/trading/scaling_law.py</code>, <code>trades/daily_risk_config.json</code> |</p>
+<p>| <strong>Market Structure Engine (BOS/FVG)</strong>| Present | <code>backend/app/market/chart_analytics.py</code>, <code>frontend/src/components/CandleChart.tsx</code> |</p>
+<p>| <strong>Strategy Lab &amp; Ingest Engine</strong> | Present | <code>backend/app/ingest/</code>, <code>backend/app/extract/</code>, <code>frontend/src/app/lab/</code> |</p>
+<p>| <strong>Deterministic Review Crew</strong> | Present | <code>backend/app/agents/review_crew/graph.py</code> |</p>
+<p>| <strong>Telegram &amp; Email Dispatch</strong> | Present | <code>backend/app/alerts.py</code>, <code>backend/app/trading/crew/alert_agent.py</code> |</p>
+<p>| <strong>Paper &amp; Sandbox Brokers</strong> | Present | <code>backend/app/brokers/paper.py</code>, <code>backend/app/brokers/sandbox.py</code> |</p>
+<p>| <strong>Dual Cryptographic Hash Chains</strong> | Present | <code>backend/app/audit/</code>, <code>backend/app/live/audit.py</code> |</p>
+<p>| <strong>LLM Trade Execution Authority</strong> | <strong>Absent (By Design)</strong> | Order paths are strictly deterministic in Python code; LLMs have zero trade initiation capability |</p>
+<p>| <strong>Exchange Broker Adapters</strong> | Open Extension | Plug into <code>BrokerBridgeAgent</code> / <code>backend/app/brokers/</code> |</p>
+
+<p>---</p>
+
+<h2>4. Visual Diagrams Reference</h2>
+
+<ul><li><a href="diagrams/architecture.png">System Architecture</a></li><li><a href="diagrams/crew-architecture.png">5 Autonomous Crews Ecosystem</a></li><li><a href="diagrams/live-scanner-flow.png">Live Scanner &amp; Execution Flow</a></li><li><a href="diagrams/workflow.png">Review Crew &amp; Trade Crew Workflow</a></li><li><a href="diagrams/database.png">Database Schema Layout</a></li></ul></body></html>

@@ -1,0 +1,126 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>INSTITUTIONAL_SCALING_LAW_AND_SAFETY_WALL</title><style>
+body { font-family: Helvetica, Arial, sans-serif; color: #1c1917; line-height: 1.45;
+       max-width: 920px; margin: 32px auto; padding: 0 24px; font-size: 12.5px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #d6d3d1; padding: 4px 6px; vertical-align: top; text-align: left; }
+th { background: #f5f5f4; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+pre { background: #f5f5f4; padding: 10px; overflow: auto; white-space: pre-wrap; }
+img { max-width: 100%; height: auto; margin: 8px 0; }
+blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1; color: #44403c; }
+</style></head><body><h1>Institutional Scale-Up Law, Safety Wall, &amp; 10-Lot Roadmap</h1>
+
+<p>This specification defines the institutional money management framework, capital preservation rules (&quot;Safety Wall&quot;), and automated lot sizing progression implemented in <a href="file:///Users/skoust/Documents/MyProjects/genesis/backend/app/trading/scaling_law.py"><code>backend/app/trading/scaling_law.py</code></a> for the Genesis Trade Agent and Live Scanner.</p>
+
+<p>---</p>
+
+<h2>1. Executive Summary &amp; Sizing Policy</h2>
+
+<p>All entries, stops, levels, and targets are computed strictly on <strong>NIFTY 50 Spot (<code>^NSEI</code>)</strong>. Weekly NIFTY index options (65 qty / lot) serve solely as the execution vehicle.</p>
+
+<h3>Baseline Capital Sizing:</h3>
+<ul><li><strong>₹50,000 Seed Capital:</strong> Starts at <strong>Tier 2 (2 Lots / 130 Qty)</strong>. Risk per trade = ~₹2,275 (4.55% of capital).</li><li><strong>₹100,000 Seed Capital:</strong> Starts at <strong>Tier 4 (4 Lots / 260 Qty)</strong>. Risk per trade = ~₹4,550 (4.55% of capital).</li></ul>
+
+<p>---</p>
+
+<h2>2. Inviolable &quot;Safety Wall&quot; Architecture</h2>
+
+<p>&gt; <strong>Rule:</strong> Risk capital and the Safety Wall are strictly decoupled. The Safety Wall is funded <strong>100% by booked profits</strong> and can <strong>never be risked or drawn down</strong>.</p>
+
+<p>1. <strong>50% Profit Ratchet:</strong> Whenever a trade is closed at a profit, <strong>50% of the net profit</strong> is transferred into the locked <strong>Safety Wall Reserve</strong>.</p>
+<p>2. <strong>One-Way Floor:</strong> If a loss occurs, the loss is deducted *only* from the active trading capital. The Safety Wall balance is mathematically inviolable.</p>
+<p>3. <strong>Compound Growth:</strong> The remaining 50% of profit remains in active capital to fund tier scale-up milestones.</p>
+
+<pre><code>Total Equity = Active Trading Capital + Locked Safety Wall
+Risk Per Trade &lt;= 4.5% of Active Trading Capital</code></pre>
+
+<p>---</p>
+
+<h2>3. The 4-Gate Scale-Up Law</h2>
+
+<p>An automated scale-up (+1 Lot) is <strong>strictly forbidden</strong> until <strong>all 4 gates</strong> are simultaneously satisfied:</p>
+
+<pre><code>graph TD
+    A[Current Lot Tier Active] --&gt; B{Gate 1: Min 15 Closed Trades?}
+    B -- No --&gt; A
+    B -- Yes --&gt; C{Gate 2: Net R &gt;= +12.0R at Current Tier?}
+    C -- No --&gt; A
+    C -- Yes --&gt; D{Gate 3: Account Capital at New All-Time High?}
+    D -- No --&gt; A
+    D -- Yes --&gt; E{Gate 4: Capital &gt;= Next Lot Milestone?}
+    E -- No --&gt; A
+    E -- Yes --&gt; F[🚀 Scale Up +1 Lot &amp; Reset Tier Counters]</code></pre>
+
+<p>1. <strong>Gate 1 (Statistical Sample Depth):</strong> Minimum <strong>15 closed trades</strong> executed at the current lot tier. No scaling up on a short lucky streak.</p>
+<p>2. <strong>Gate 2 (Edge Verification):</strong> Accumulated net performance at the current tier must reach <strong>&gt;= +12.0R</strong>.</p>
+<p>3. <strong>Gate 3 (High-Water Mark Proof):</strong> Account capital must be at a <strong>fresh All-Time High (ATH)</strong>.</p>
+<p>4. <strong>Gate 4 (Capital Milestone):</strong> Total account capital must meet or exceed the institutional capital milestone for the next lot tier.</p>
+
+<p>Upon scaling up, the tier trade count and tier R counter reset to zero for the new tier.</p>
+
+<p>---</p>
+
+<h2>4. Emergency Downshift Trapdoor &amp; Circuit Breaker</h2>
+
+<h3>A. The Downshift Trapdoor (-4.0R)</h3>
+<p>If an account encounters a drawdown of <strong>&lt;= -4.0R</strong> within the current tier:</p>
+<ul><li>Sizing is <strong>immediately reduced by 1 lot</strong> (down to minimum 1 lot).</li><li>This protects the account from cascading drawdowns during hostile regime shifts.</li></ul>
+
+<h3>B. Daily Intraday Circuit Breakers</h3>
+<p>If either of the following conditions is hit during an intraday session:</p>
+<p>1. <strong>2 consecutive losing trades</strong> in the session.</p>
+<p>2. Cumulative daily loss reaches <strong>&lt;= -2.0R</strong>.</p>
+<ul><li>The Trade Agent enters <strong>LOCKDOWN MODE</strong> for the remainder of the trading day. No new orders are permitted until 09:15 IST the next morning.</li></ul>
+
+<p>---</p>
+
+<h2>5. Milestone Progression to 10 Lots (650 Qty)</h2>
+
+<p>| Tier | Lots | Total Qty | Minimum Capital Required | Average 1R Risk (₹) | Risk % of Capital | Standard Win (+2.2R) (₹) | Monthly Run-Rate (+9.5R) (₹) |</p>
+<p>| :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |</p>
+<p>| <strong>Tier 1</strong> | 1 Lot | 65 | ₹25,000 | ₹1,137.50 | 4.55% | ₹2,502.50 | ₹10,806 |</p>
+<p>| <strong>Tier 2</strong> | 2 Lots | 130 | <strong>₹50,000</strong> | ₹2,275.00 | 4.55% | ₹5,005.00 | ₹21,612 |</p>
+<p>| <strong>Tier 3</strong> | 3 Lots | 195 | ₹75,000 | ₹3,412.50 | 4.55% | ₹7,507.50 | ₹32,418 |</p>
+<p>| <strong>Tier 4</strong> | 4 Lots | 260 | <strong>₹100,000</strong> | ₹4,550.00 | 4.55% | ₹10,010.00 | ₹43,225 |</p>
+<p>| <strong>Tier 5</strong> | 5 Lots | 325 | ₹140,000 | ₹5,687.50 | 4.06% | ₹12,512.50 | ₹54,031 |</p>
+<p>| <strong>Tier 6</strong> | 6 Lots | 390 | ₹185,000 | ₹6,825.00 | 3.69% | ₹15,015.00 | ₹64,837 |</p>
+<p>| <strong>Tier 7</strong> | 7 Lots | 455 | ₹230,000 | ₹7,962.50 | 3.46% | ₹17,517.50 | ₹75,644 |</p>
+<p>| <strong>Tier 8</strong> | 8 Lots | 520 | ₹275,000 | ₹9,100.00 | 3.31% | ₹20,020.00 | ₹86,450 |</p>
+<p>| <strong>Tier 9</strong> | 9 Lots | 585 | ₹315,000 | ₹10,237.50 | 3.25% | ₹22,522.50 | ₹97,256 |</p>
+<p>| <strong>Tier 10</strong> | <strong>10 Lots</strong> | <strong>650</strong> | <strong>₹350,000</strong> | <strong>₹11,375.00</strong> | <strong>3.25%</strong> | <strong>₹25,025.00</strong> | <strong>₹1,08,062+</strong> |</p>
+
+<p>---</p>
+
+<h2>6. Timeline: When Can We Afford 10 Lots?</h2>
+
+<h3>Scenario B: Starting at ₹100,000 (4 Lots)</h3>
+<ul><li><strong>Starting Sizing:</strong> 4 Lots (260 Qty).</li><li><strong>Target Capital:</strong> ₹3,50,000 (+₹2,50,000 net profit).</li><li><strong>Projected Time Horizon:</strong> <strong>3.5 to 4 Months (approx. 75–85 trading sessions)</strong>.</li><li><strong>Milestones:</strong></li></ul>
+<p>  - *Month 1:* 4 Lots -&gt; Reach ₹1,43,000 -&gt; Unlock Tier 5.</p>
+<p>  - *Month 2:* 5 &amp; 6 Lots -&gt; Reach ₹2,05,000 -&gt; Unlock Tier 7.</p>
+<p>  - *Month 3:* 7 &amp; 8 Lots -&gt; Reach ₹2,85,000 -&gt; Unlock Tier 9.</p>
+<p>  - *Month 3.5 - 4:* <strong>Unlock 10 Lots at ₹3,50,000</strong>.</p>
+<ul><li><strong>At 10 Lots:</strong></li></ul>
+<p>  - Capital: ₹3,50,000 (Safety Wall: ~₹1,25,000 locked).</p>
+<p>  - Margin per trade: ~₹91,000 (leaves ₹2,59,000 free cash buffer).</p>
+<p>  - Monthly net return: <strong>₹1,08,000+ per month</strong> (exceeds ₹1 Lakh/month goal).</p>
+
+<h3>Scenario A: Starting at ₹50,000 (2 Lots)</h3>
+<ul><li><strong>Starting Sizing:</strong> 2 Lots (130 Qty).</li><li><strong>Target Capital:</strong> ₹3,50,000 (+₹3,00,000 net profit).</li><li><strong>Projected Time Horizon:</strong> <strong>5.5 to 6 Months (approx. 115–125 trading sessions)</strong>.</li><li>Reaches ₹1 Lakh/month run-rate around Month 4–5 as it crosses Tier 8.</li></ul>
+
+<p>---</p>
+
+<h2>7. Trade Agent Code Integration</h2>
+
+<p>The Trade Agent imports and executes this policy directly via:</p>
+<pre><code>from app.trading.scaling_law import (
+    initialize_tier_state,
+    record_trade,
+    evaluate_scaling,
+    check_daily_circuit_breaker,
+    calculate_10_lots_roadmap,
+)</code></pre>
+
+<ul><li>Live scanner checks <code>check_daily_circuit_breaker()</code> before issuing new alerts.</li><li>Live order manager verifies <code>evaluate_scaling()</code> and assigns authorized lots to each <code>TradeIntent</code>.</li><li>Master Excel journals log <code>Safety Wall Locked (₹)</code> and <code>Active Risk Capital (₹)</code>.</li></ul></body></html>

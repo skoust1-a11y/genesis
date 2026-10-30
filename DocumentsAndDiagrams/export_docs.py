@@ -18,11 +18,13 @@ ROOT = Path(__file__).resolve().parent
 CHROME = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 SOURCES = [
     "Readme.md",
-    "FINAL_REPORT.md",
+    "CURRENT_ARCHITECTURE_AND_AGENT_FLOWS.md",
     "CURRENT_SYSTEM_ARCHITECTURE_ANALYSIS.md",
     "CURRENT_DATABASE_ARCHITECTURE.md",
     "DATABASE_TABLE_REFERENCE.md",
+    "INSTITUTIONAL_SCALING_LAW_AND_SAFETY_WALL.md",
     "LIBRARIES_AND_DEPENDENCIES.md",
+    "FINAL_REPORT.md",
 ]
 
 CSS = """

@@ -1,0 +1,8 @@
+{
+  "base_capital": 50000.0,
+  "safety_wall_reserve": 41786.0,
+  "effective_capital": 91786.0,
+  "tomorrow_approved_lots": 3,
+  "daily_losses_count": 0,
+  "is_safety_wall_locked": false
+}

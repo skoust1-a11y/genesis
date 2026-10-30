@@ -86,23 +86,41 @@ def send_signal(settings: Settings, subject: str, body: str) -> list[str]:
 
 
 def send_telegram_signal(settings: Settings, text: str, reply_to_message_id: int | None = None) -> int | None:
-    """Delivers a formatted Markdown message to Telegram signals channel and returns the message_id for threading."""
+    """Delivers a formatted message to Telegram signals channel with automated retries and fallback."""
+    import time
     target_chat = signal_chat_id(settings)
     if not (settings.alert_telegram_bot_token and target_chat):
         return None
-    try:
-        payload: dict[str, object] = {"chat_id": target_chat, "text": text[:4000], "parse_mode": "Markdown"}
-        if reply_to_message_id:
-            payload["reply_to_message_id"] = reply_to_message_id
-        res = httpx.post(
-            f"https://api.telegram.org/bot{settings.alert_telegram_bot_token}/sendMessage",
-            json=payload,
-            timeout=10,
-        )
-        if res.status_code == 200:
-            return res.json().get("result", {}).get("message_id")
-    except Exception as exc:
-        log.error("send_telegram_signal failed: %s: %s", type(exc).__name__, exc)
+
+    url = f"https://api.telegram.org/bot{settings.alert_telegram_bot_token}/sendMessage"
+    payload: dict[str, object] = {"chat_id": target_chat, "text": text[:4000]}
+    if reply_to_message_id:
+        payload["reply_to_message_id"] = reply_to_message_id
+
+    # 3-attempt retry loop with backoff
+    for attempt in range(1, 4):
+        try:
+            # Try Markdown first
+            payload["parse_mode"] = "Markdown"
+            res = httpx.post(url, json=payload, timeout=15)
+            if res.status_code == 200:
+                return res.json().get("result", {}).get("message_id")
+
+            # If Markdown parsing failed (400 Bad Request), retry without Markdown
+            if res.status_code == 400:
+                payload.pop("parse_mode", None)
+                res_plain = httpx.post(url, json=payload, timeout=15)
+                if res_plain.status_code == 200:
+                    return res_plain.json().get("result", {}).get("message_id")
+
+            log.warning("Telegram send attempt %d returned HTTP %s: %s", attempt, res.status_code, res.text)
+        except Exception as exc:
+            log.warning("Telegram send attempt %d failed: %s: %s", attempt, type(exc).__name__, exc)
+
+        if attempt < 3:
+            time.sleep(1.5 * attempt)
+
+    log.error("send_telegram_signal completely failed after 3 attempts")
     return None
 
 

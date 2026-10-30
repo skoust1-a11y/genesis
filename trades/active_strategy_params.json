@@ -1,0 +1,7 @@
+{
+  "micro_wick_stop_buffer": 8.0,
+  "dynamic_rr_ceiling": 4.0,
+  "adx_breakout_threshold": 18.0,
+  "otm_steps": 2,
+  "updated_at": "2026-10-30T18:17:00"
+}

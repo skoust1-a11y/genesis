@@ -38,3 +38,7 @@ backend/*.png
 backend/sample_message.txt
 trades/.*
 *_backup.py
+*.bak
+*.lock
+.*.lock
+backend/trades/

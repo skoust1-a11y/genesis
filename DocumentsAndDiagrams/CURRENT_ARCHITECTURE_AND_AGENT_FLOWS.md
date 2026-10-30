@@ -1,283 +1,254 @@
-# Genesis: Current System Architecture & Agent Flows Specification
+# Genesis: System Architecture & Autonomous Agent Flows Specification
 
-*Source of truth: Active repository code (`backend/app/`, `frontend/src/`, `backend/deploy/`, `backend/scripts/`)*  
-*Last updated: 2026-10-22*
-
----
-
-## 1. System Overview & Core Agents Matrix
-
-The Genesis platform has evolved from a basic backtest-and-review engine into a multi-agent quantitative trading ecosystem comprising:
-
-| Component / Agent | Implementation File(s) | Architecture / Tech | Role & Execution Context |
-| :--- | :--- | :--- | :--- |
-| **Trade Crew** | `backend/app/agents/trade_crew/graph.py` | LangGraph StateGraph | Live & paper trading decision loop. Runs as an isolated worker subprocess per active deployment. Rules in code decide; LLM only has optional shadow/veto authority. |
-| **Review Crew** | `backend/app/agents/review_crew/graph.py` | LangGraph StateGraph | Deterministic multi-scenario backtesting, stress testing, capital hard-stop sweep, per-trade post-mortem review, and improvement proposal generation. |
-| **Loss Analyzer Agent** | `backend/app/loss_analyzer.py` | Deterministic Autopsy + LLM Expert | Automated forensic analysis for losing trades (VWAP loss, false breakout traps, noon chop, volatility spikes). Triggers LLM expert interventions on 3-loss streaks. |
-| **Strategy Analyzer Agent**| `backend/app/strategies/analyzer.py` | Multi-Pillar Institutional Auditor | 5-pillar institutional strategy audit (Edge, Risk-Reward, Feasibility, Capital Floor, Execution Risk) and catalog evaluation for `/strategies`. |
-| **Liquidity Signals Daemon** | `backend/app/liquidity_signals.py` | Background Daemon (`launchd`/`systemd`) | Real-time 5m/15m NIFTY liquidity sweep detection (PDH/PDL raid, 15m MSS, VWAP reclaim, lunch-lull filter, ATM option strike picker, and alert delivery). |
-| **Equal Signals Daemon** | `backend/app/equal_signals.py` | Background Daemon (`launchd`/`systemd`) | Real-time detection of Equal Highs (EQH) and Equal Lows (EQL) liquidity pool sweeps. |
-| **Market Structure Engine**| `backend/app/market/chart_analytics.py` | Non-repainting Analytics Engine | Mathematically verified swing points (`HH`, `HL`, `LH`, `LL`, `EQH`, `EQL`), Market Structure Break (`BOS`), Change of Character (`CHoCH`), Dynamic Trendlines, and FVG zones. |
-| **Supervisor** | `backend/app/live/supervisor.py` | Process Controller | Supervises all active Trade Crew deployments, restarts crashes with exponential backoff (5s to 5m), monitors capital floor pauses. |
-| **FastAPI Backend** | `backend/app/main.py`, `backend/app/api/` | FastAPI / Pydantic v2 | Port 8841. Exposes endpoints for Ingest, Review, Strategies & Analyzer, Market Analytics, Paper Trading, and Live Control Plane. |
-| **Next.js Frontend** | `frontend/src/` | Next.js 15, React 19, Tailwind CSS | Port 8842 (or 3000). Features `/`, `/markets`, `/strategies`, `/strategy-lab`, `/lab`, `/deploy`, `/deployments`. |
+*Source of truth: Active repository code (`backend/app/`, `frontend/src/`, `scripts/`, `trades/`)*  
+*Last updated: 2026-10-30*
 
 ---
 
-## 2. Agent Flow Diagrams
+## 1. System Overview & Core Autonomous Crews Matrix
 
-### A. Trade Crew Agent Tick Flow (`backend/app/agents/trade_crew/graph.py`)
+Genesis is an institutional quantitative trading, strategy research, and automated execution platform engineered for the Indian equity derivatives markets (NSE NIFTY and BANKNIFTY index options). 
 
-Each tick executes the state graph sequentially. The tick stops early if any guard or gate triggers.
+The platform is organized around **5 Autonomous Specialized Crews** operating continuously across the trading day, accompanied by a deterministic **Review Crew**, a research **Strategy Lab**, and an immutable multi-tier persistence tier.
+
+| Crew / Component | Core Manager & Agents | Implementation Files | Execution Window | Role & Responsibilities |
+| :--- | :--- | :--- | :--- | :--- |
+| **1. PreMarketCrew** | `PreMarketManager`<br/>- `GapAgent`<br/>- `GammaAgent`<br/>- `EventRiskAgent` | `backend/app/trading/pre_market_crew/` | 08:30 – 09:14 IST | Ingests GIFT NIFTY vs PDC gap bias, computes Call/Put dealer gamma walls, calculates Max Pain & PCR, checks macro event blackouts (RBI MPC, CPI, FED), formats `trades/pre_market_plan.json`, and dispatches the 09:05 IST Battleplan to Telegram. |
+| **2. ScannerCrew** | `ScannerManager`<br/>- `FeedAgent`<br/>- `LevelsAgent`<br/>- `ConsolidationAgent`<br/>- `NewsAgent`<br/>- `DetectorAgent` | `backend/app/trading/scanner_crew/` | 09:15 – 15:30 IST<br/>(1m, 2m, 5m, 15m) | Multi-timeframe delta polling & ETF VWAP proxy, dynamic level projection (PDH, PDL, PDC, OR-30, round strikes), compression box & ATR deadband filtering (Lunch Lull 11:30-13:00), macro sentiment screening, and pattern detection across Breakout & Retest, Liquidity Sweep, and Trendline Reversal. Emits real-time `ScanSnapshot`. |
+| **3. TradeCrew** | `TradeManager`<br/>- `TrendAgent`<br/>- `RiskAgent`<br/>- `OrderFlowAgent`<br/>- `EntryAgent`<br/>- `ExitAgent`<br/>- `AlertAgent`<br/>- `JournalAgent` | `backend/app/trading/crew/` | Live Market Hours (Continuous) | Evaluates macro trend slopes and dynamic R:R targets (+1.8R to +4.5R), enforces daily loss circuit breakers and the 50% Capital Safety Wall, checks whale volume absorption traps, triggers micro-wick entries with strictly OTM option strikes, manages Target 1/2/3 partial book & trail, dispatches Telegram tickets, and commits ACID transactions to the `trades.db` SQLite SSOT. |
+| **4. ExecutionCrew** | `ExecutionManager`<br/>- `SmartRoutingAgent`<br/>- `BrokerBridgeAgent`<br/>- `ReconciliationAgent` | `backend/app/trading/execution_crew/` | Order Dispatch & Fills | Splits orders into 30% market fill + 70% limit-chasing tranches to minimize slippage, bridges to live broker APIs or zero-slippage paper emulator, and performs real-time zero-drift position reconciliation between broker account and local database. |
+| **5. PostMarketCrew** | `PostMarketManager`<br/>- `AutopsyAgent`<br/>- `ParameterAgent`<br/>- `SafetyWallAgent`<br/>- `CodeQualityAgent`<br/>- `BriefingAgent` | `backend/app/trading/post_market_crew/` | 15:31+ IST Daily | Reconstructs the day's intraday tape, audits execution against hypothetical perfection, flags missed trades, runs walk-forward parameter sweeps, locks 50% of net profits into the permanent Capital Safety Wall, checks system logs & latency bottlenecks, writes `reports/daily_audit_YYYY-MM-DD.md`, and dispatches the Executive Digest to Telegram. |
+| **Review Crew** | LangGraph StateGraph | `backend/app/agents/review_crew/` | On-Demand (Lab) | 7-step deterministic backtest & forward-test engine with Indian cost models (STT, exchange fees, GST, SEBI, stamp duty, slippage), hard-stop capital sweeps (2-5%), trade-by-trade post-mortems, and evidence-backed improvement proposals. |
+| **Strategy Analyzer** | `InstitutionalStrategyAnalyzer` | `backend/app/strategies/analyzer.py` | On-Demand (API) | Evaluates strategies against the 5 Institutional Pillars (Edge, Risk-Reward, Feasibility, Capital Floor, Execution Risk) and generates catalog scorecards. |
+| **Loss Forensic Agent**| `LossAnalyzer` | `backend/app/loss_analyzer.py` | Event-Triggered | Automated autopsy on any losing trade; escalates to an LLM Senior Trading Partner upon encountering 3 consecutive losses. |
+| **Market Analytics** | `chart_analytics.py` | `backend/app/market/chart_analytics.py` | Real-Time / API | Computes non-repainting swing pivots (HH, HL, LH, LL, EQH, EQL), Market Structure Break (`BOS`), Change of Character (`CHoCH`), Fair Value Gaps (`FVG`), and Dynamic Trendlines. |
+| **Supervisor Daemon**| `Supervisor` | `backend/app/live/supervisor.py` | Background Daemon | Manages worker subprocesses for active deployments with exponential backoff crash recovery (5s to 5m) and capital floor monitoring. |
+
+---
+
+## 2. End-to-End Daily Operational Lifecycle
 
 ```mermaid
 flowchart TD
-    subgraph TradeCrew["Trade Crew Tick (LangGraph StateGraph)"]
+    subgraph PreSession["Phase 1: Pre-Market Preparation (08:30 - 09:14 IST)"]
         direction TB
-        start([Start Tick]) --> verify[1. verify]
-        
-        verify -->|Snapshot hash mismatch| stop_halt1[Halt: Snapshot Tampered]
-        verify -->|Snapshot Valid| gate[2. gate]
-        
-        gate -->|Deployment paused or stopped| stop_idle[Idle / Exit Tick]
-        gate -->|Deployment active| hours[3. hours]
-        
-        hours -->|Outside NSE trading hours| stop_closed[Market Closed]
-        hours -->|NSE session open| observe[4. observe]
-        
-        observe -->|Missing or stale market quotes| stop_stale[No/Stale Quotes]
-        observe -->|Quotes Valid| reconcile[5. reconcile]
-        
-        reconcile -->|Broker pos != Live DB pos| stop_recon[Halt: Desync Error]
-        reconcile -->|Positions In Sync| exits[6. exits]
-        
-        exits -->|Close order fails| stop_exit_err[Halt: Close Order Error]
-        exits -->|Exits evaluated & executed| drawdown[7. drawdown]
-        
-        drawdown -->|Drawdown ladder or floor breached| stop_pause[Pause: Floor Breached]
-        drawdown -->|Drawdown within limits| daily[8. daily]
-        
-        daily -->|Profit target hit / close_all fail| stop_daily[Daily Target / Halt]
-        daily -->|Under daily targets| entry[9. entry]
-        
-        entry -->|No signal / already holding| stop_nosig[Idle: No Entry Signal]
-        entry -->|Signal Triggered| risk[10. risk]
-        
-        risk -->|Sizing, R:R, Max Lots, Odds Gates| opinion[11. opinion]
-        
-        opinion -->|LLM Shadow / Veto Evaluation| explain[12. explain]
-        
-        explain -->|Append explanatory note to reason_text| execute[13. execute]
-        
-        execute -->|Place Hedges First -> Protective Stops| finish([End Tick])
+        P0[08:30 IST: PreMarketManager Wakes] --> P1[GapAgent: Ingest GIFT NIFTY & PDC]
+        P1 --> P2[GammaAgent: Option Chain Call/Put Walls & Max Pain]
+        P2 --> P3[EventRiskAgent: Calendar & High-Impact Catalysts]
+        P3 --> P4[Compile trades/pre_market_plan.json]
+        P4 --> P5[09:05 IST: Dispatch Morning Battleplan to Telegram]
     end
 
-    classDef stopClass fill:#fee2e2,stroke:#ef4444,stroke-width:1.5px,color:#991b1b;
-    classDef stepClass fill:#f0fdf4,stroke:#22c55e,stroke-width:1.5px,color:#14532d;
-    class stop_halt1,stop_idle,stop_closed,stop_stale,stop_recon,stop_exit_err,stop_pause,stop_daily,stop_nosig stopClass;
-    class verify,gate,hours,observe,reconcile,exits,drawdown,daily,entry,risk,opinion,explain,execute stepClass;
+    subgraph LiveSession["Phase 2: Live Scanning & Execution (09:15 - 15:30 IST)"]
+        direction TB
+        L0[09:15 IST: Live Scanner Daemon Active] --> L1[FeedAgent: Multi-Timeframe Delta Polling 1m, 5m, 15m]
+        L1 --> L2[LevelsAgent: Map PDH, PDL, OR-30 & Psychological Strikes]
+        L2 --> L3[ConsolidationAgent & NewsAgent: Lunch Lull & Event Blackout Filter]
+        L3 --> L4[DetectorAgent: Multi-Strategy Pattern Recognition]
+        
+        L4 -->|CandidateSetup| L5{TradeManager Evaluation}
+        L5 --> L6[TrendAgent: Macro Regime & Dynamic R:R]
+        L6 --> L7[RiskAgent: 3-Tier Sizing & Safety Wall Check]
+        L7 --> L8[OrderFlowAgent: Whale Volume Absorption Trap Veto]
+        
+        L8 -->|Approved Decision| L9[ExecutionCrew: Smart Routing Tranches & Broker Bridge]
+        L9 --> L10[AlertAgent: Dispatch Telegram Ticket & CMP Threads]
+        L10 --> L11[JournalAgent: ACID Commit to trades.db SQLite WAL & Excel Sync]
+        
+        L11 --> L12[ExitAgent: Target 1 / 2 / 3 Execution & 5M Trail]
+    end
+
+    subgraph PostSession["Phase 3: Post-Market Forensic Audit (15:31+ IST)"]
+        direction TB
+        A0[15:31 IST: PostMarketManager Wakes] --> A1[AutopsyAgent: Tape Reconstruction & Exit Audit]
+        A1 --> A2[ParameterAgent: Walk-Forward R:R Optimization]
+        A2 --> A3[SafetyWallAgent: Lock 50% Realized Profit into Capital Reserve]
+        A3 --> A4[CodeQualityAgent: Latency & Memory Audit]
+        A4 --> A5[BriefingAgent: Generate reports/daily_audit_*.md]
+        A5 --> A6[Dispatch Daily Executive Digest to Telegram]
+        A6 --> A7[Persist daily_risk_config.json for Tomorrow]
+    end
+
+    PreSession --> LiveSession
+    LiveSession --> PostSession
+
+    classDef pre fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#1e3a8a;
+    classDef live fill:#f0fdf4,stroke:#22c55e,stroke-width:1.5px,color:#14532d;
+    classDef post fill:#fff1f2,stroke:#f43f5e,stroke-width:1.5px,color:#9f1239;
+    class P0,P1,P2,P3,P4,P5 pre;
+    class L0,L1,L2,L3,L4,L5,L6,L7,L8,L9,L10,L11,L12 live;
+    class A0,A1,A2,A3,A4,A5,A6,A7 post;
 ```
 
 ---
 
-### B. Review Crew Agent Flow (`backend/app/agents/review_crew/graph.py`)
+## 3. Detailed Agent Flow Diagrams
 
-Invoked via `POST /api/review/run` inside the Strategy Lab.
+### A. Live Scanner & Multi-Timeframe Pattern Detection Loop
+
+The daemon (`scripts/live_scanner.py`) executes continuously across configured timeframes (default: `1m, 5m, 15m`).
 
 ```mermaid
 flowchart TD
-    subgraph ReviewCrew["Review Crew Engine (LangGraph StateGraph)"]
+    subgraph ScannerLoop["ScannerCrew Multi-Timeframe Loop"]
         direction TB
-        rc_start([Start Review]) --> audit[1. audit]
-        audit -->|Validates rules structure & syntax| scenarios[2. scenarios]
-        scenarios -->|Generates baseline & stress-test parameter combos| simulate[3. simulate]
-        simulate -->|Backtests on NSE EOD bars with Indian cost schedules| hard_stop[4. hard_stop]
-        hard_stop -->|Sweeps 2%, 3%, 4%, 5% capital stop levels| trade_review[5. trade_review]
-        trade_review -->|Deterministic post-mortem review per simulated trade| verdict[6. verdict]
-        verdict -->|Profitable / Conditional / Too few trades / Not profitable| improve[7. improve]
-        improve -->|Proposes evidence-backed improvements + LLM rationale| rc_end([Save Report to Research DB])
+        tick_start([Market Tick Arrival]) --> feed[FeedAgent: Fetch 1m/5m/15m OHLCV & VWAP]
+        feed --> hours_check{09:15 <= Time <= 15:30?}
+        hours_check -->|No| sleep_out[Sleep Interval & Continue]
+        
+        hours_check -->|Yes| levels[LevelsAgent: Compute PDH, PDL, OR-30, Strikes]
+        levels --> struct[chart_analytics: Compute Swings, BOS, CHoCH, FVGs]
+        
+        struct --> filter_deadband{Consolidation / Lunch Lull?}
+        filter_deadband -->|Chop & Deadband| sleep_out
+        filter_deadband -->|Clear Trend / Volatility| news_check{News Event Risk Blackout?}
+        news_check -->|Catalyst Blackout| sleep_out
+        
+        news_check -->|Normal Conditions| detector[DetectorAgent: Evaluate Candidate Setups]
+        
+        detector --> strat_a[Strategy 1: Breakout & Retest OR-30/PD]
+        detector --> strat_b[Strategy 2: Trendline 3rd Point Reversal]
+        detector --> strat_c[Strategy 3: Liquidity Sweep PDH/PDL Raid]
+        
+        strat_a & strat_b & strat_c --> setup_found{Setup Triggered?}
+        setup_found -->|No| sleep_out
+        setup_found -->|Yes| emit_snap[Emit ScanSnapshot to TradeManager]
     end
 
-    classDef reviewClass fill:#eff6ff,stroke:#3b82f6,stroke-width:1.5px,color:#1e3a8a;
-    class audit,scenarios,simulate,hard_stop,trade_review,verdict,improve reviewClass;
+    classDef loopClass fill:#f0fdf4,stroke:#16a34a,stroke-width:1.4px,color:#14532d;
+    classDef checkClass fill:#fffbeb,stroke:#d97706,stroke-width:1.4px,color:#92400e;
+    class feed,levels,struct,detector,strat_a,strat_b,strat_c,emit_snap loopClass;
+    class hours_check,filter_deadband,news_check,setup_found checkClass;
 ```
 
 ---
 
-### C. Loss Forensic Autopsy & Consecutive Loss Expert Agent (`backend/app/loss_analyzer.py`)
+### B. Trade Crew Decision & Execution Lifecycle
 
-Runs whenever a trade incurs a loss, and escalates to an LLM Senior Risk Partner on consecutive losing streaks.
+When `TradeManager` receives an actionable candidate setup, it coordinates sizing, validation, and order routing:
 
 ```mermaid
 flowchart TD
-    subgraph LossAutopsy["Loss Autopsy & Expert Agent"]
+    subgraph TradeCrewDecision["Trade Execution Lifecycle"]
         direction TB
-        loss_in([Trade Loss Recorded]) --> vwap_chk[Check VWAP Loss Time]
-        vwap_chk --> trap_chk[Check False Breakout / Trap]
-        trap_chk --> lunch_chk[Check Noon Chop 11:30-13:00]
-        lunch_chk --> vix_chk[Check Volatility Spike / Stagnation]
-        vix_chk --> diag[Generate Deterministic Forensic Diagnosis]
+        in_setup([CandidateSetup Received]) --> trend_eval[TrendAgent: Evaluate 15m Trend & Dynamic R:R]
+        trend_eval --> order_flow{OrderFlowAgent: Absorption Trap?}
         
-        diag --> streak_chk{Loss Streak >= 3?}
-        streak_chk -->|No| send_single[Dispatch Single Loss Alert to Telegram/Email]
-        streak_chk -->|Yes: 3 Consecutive Losses| llm_expert[Invoke LLM Senior Trading Coach]
-        llm_expert --> format_expert[Synthesize Root Cause, Regime Shift & Action Plan]
-        format_expert --> send_expert[Dispatch HIGH PRIORITY Alert + Pause Warning]
+        order_flow -->|Whale Volume Climax Opposing Signal| veto_trap[Veto: Institutional Trap Detected]
+        order_flow -->|Clear Order Flow| risk_eval[RiskAgent: Check Daily Limits & Circuit Breaker]
+        
+        risk_eval --> daily_loss{Consecutive Losses >= 3 or Daily Max?}
+        daily_loss -->|Limit Exceeded| halt_daily[Halt: Daily Risk Circuit Breaker Active]
+        
+        daily_loss -->|Within Risk Profile| sizing[Scaling Law: 3-Tier Sizing & Safety Wall Check]
+        sizing --> strike_picker[EntryAgent: Strictly OTM Contract Picker]
+        
+        strike_picker --> exec_route[ExecutionCrew: Smart Routing 30% Mkt / 70% Limit]
+        exec_route --> broker[BrokerBridgeAgent: Place Paper or Live Orders]
+        
+        broker --> recon[ReconciliationAgent: Verify Fill Count & Slippage Saved]
+        recon --> alert[AlertAgent: Dispatch Telegram Ticket & Thread CMP]
+        alert --> journal[JournalAgent: Commit to trades.db SQLite WAL & Sync Excel]
+        
+        journal --> exit_mgr[ExitAgent: Monitor Target 1, 2, 3 & 5M Trail]
+        exit_mgr -->|Target 1 Hit| book_half[Book 50% & Move SL to Cost]
+        exit_mgr -->|Target 2 Hit| trail_swing[Book 25% & Trail 5M Swings]
+        exit_mgr -->|Target 3 Hit| full_exit[Unconditional 100% Exit]
+        exit_mgr -->|Opposing Sweep Formed| auto_flip[Auto-Flip: Immediate Market Exit]
     end
 
-    classDef alertClass fill:#fef3c7,stroke:#f59e0b,stroke-width:1.5px,color:#92400e;
-    classDef llmClass fill:#fdf4ff,stroke:#d946ef,stroke-width:1.5px,color:#701a75;
-    class vwap_chk,trap_chk,lunch_chk,vix_chk,diag alertClass;
-    class llm_expert,format_expert,send_expert llmClass;
+    classDef execClass fill:#eff6ff,stroke:#2563eb,stroke-width:1.4px,color:#1e3a8a;
+    classDef haltClass fill:#fef2f2,stroke:#ef4444,stroke-width:1.4px,color:#991b1b;
+    class trend_eval,risk_eval,sizing,strike_picker,exec_route,broker,recon,alert,journal,exit_mgr,book_half,trail_swing,full_exit,auto_flip execClass;
+    class veto_trap,halt_daily haltClass;
 ```
 
 ---
 
-### D. Real-Time Liquidity Sweep Daemon Flow (`backend/app/liquidity_signals.py`)
+### C. Review Crew Research Engine (LangGraph StateGraph)
 
-Runs every 5 minutes during the market session via macOS `launchd` / `systemd`.
+Invoked via the Strategy Lab (`POST /api/review/run`) to backtest and forward-test strategies with Indian options charges.
 
 ```mermaid
 flowchart TD
-    subgraph LiquidityDaemon["Liquidity Signals Loop (Daemon)"]
+    subgraph ReviewCrewGraph["Review Crew (LangGraph 7-Step Engine)"]
         direction TB
-        tick_start([5-Minute Bar Close]) --> fetch_bar[Fetch NIFTY 5m Bar & NIFTYBEES VWAP]
-        fetch_bar --> time_gate{09:30 <= Time <= 14:30?}
-        time_gate -->|No| sleep_out[Sleep until next 5m]
-        time_gate -->|Yes| lunch_gate{Inside Lunch Lull 11:30-13:00?}
-        lunch_gate -->|Yes & skip_lunch| sleep_out
-        lunch_gate -->|No| vix_gate{11.5 <= INDIA VIX <= 22.0?}
-        vix_gate -->|No| sleep_out
-        vix_gate -->|Yes| sweep_chk{Sweep of PDH or PDL?}
-        
-        sweep_chk -->|PDL Sweep & Bullish Reclaim| long_chk[15m MSS + Close > VWAP + Close > Day Open]
-        sweep_chk -->|PDH Sweep & Bearish Reclaim| short_chk[5m MSS + Close < VWAP + Close < Day Open]
-        sweep_chk -->|No Sweep| sleep_out
-        
-        long_chk & short_chk --> risk_filt{Risk >= 30 pts & Daily Limit OK?}
-        risk_filt -->|No| sleep_out
-        risk_filt -->|Yes| strike_sel[Select ATM Option Strike & Calculate 3R Target]
-        strike_sel --> gen_chart[Generate Technical Chart Visualization]
-        gen_chart --> dispatch[Dispatch Signal + Chart to Telegram & SMTP]
+        rc_start([Start Strategy Review]) --> audit[1. audit: Validate Markdown & rules: block syntax]
+        audit --> scenarios[2. scenarios: Generate baseline & stress-test parameter combos]
+        scenarios --> simulate[3. simulate: Replay on NSE historical EOD data with Indian charges]
+        simulate --> hard_stop[4. hard_stop: Sweep 2%, 3%, 4%, 5% capital stop levels]
+        hard_stop --> trade_review[5. trade_review: Per-trade forensic post-mortem]
+        trade_review --> verdict[6. verdict: Profitable / Conditional / Too few trades / Not profitable]
+        verdict --> improve[7. improve: Evidence-backed improvement proposals + LLM lessons]
+        improve --> rc_end([Persist Report & Hash in Research DB])
     end
 
-    classDef daemonClass fill:#ecfdf5,stroke:#10b981,stroke-width:1.5px,color:#065f46;
-    class fetch_bar,time_gate,lunch_gate,vix_gate,sweep_chk,long_chk,short_chk,risk_filt,strike_sel,gen_chart,dispatch daemonClass;
+    classDef rcClass fill:#eff6ff,stroke:#3b82f6,stroke-width:1.4px,color:#1e3a8a;
+    class audit,scenarios,simulate,hard_stop,trade_review,verdict,improve rcClass;
 ```
 
 ---
 
-## 3. High-Level System Architecture Diagram
+## 4. Quantitative Risk & Sizing Architecture
+
+### A. The 3-Tier Execution Framework
+Genesis eliminates static lot sizing in favor of a mathematically rigorous 3-Tier sizing model configured in `trades/daily_risk_config.json`:
+
+1. **Tier 1: Standard Momentum (3 Lots 1-OTM)**
+   - Contract: Strictly 1 strike Out-of-the-Money (50 to 100 points away from spot).
+   - Lot Size: 3 lots (195 index shares).
+   - Purpose: Captures high delta expansion during verified momentum breaks while minimizing theta decay.
+2. **Tier 2: Super-Trend Expansion (4 Lots 2-OTM)**
+   - Contract: 2 strikes Out-of-the-Money.
+   - Lot Size: 4 lots (260 index shares).
+   - Purpose: Deployed during multi-timeframe aligned institutional trends; delivers convex gamma upside.
+3. **Tier 3: Scalp / Counter-Trend Mode (2 Lots ATM)**
+   - Contract: At-the-Money (highest delta sensitivity).
+   - Lot Size: 2 lots (130 index shares).
+   - Purpose: Fast absorption trades with tight 20-30 pt spot invalidation.
+
+### B. Institutional 50% Capital Safety Wall
+To prevent give-back of trading profits, Genesis enforces the **Capital Safety Wall**:
+
+$$\text{Safety Wall Reserve} = 0.50 \times \max(0, \text{Cumulative Net Realized Profits})$$
+$$\text{Tradeable Risk Capital} = \text{Base Capital} + 0.50 \times \text{Cumulative Net Realized Profits}$$
+
+- 50% of all accumulated profits are permanently locked into the capital floor.
+- Drawdowns are calculated strictly against the tradeable surplus. If the floor is touched, trading is automatically halted.
+
+---
+
+## 5. Storage Tier & Single Source of Truth (SSOT)
 
 ```mermaid
 flowchart TB
-    subgraph Frontend["Frontend Client (Next.js 15 / React 19) - Port 8842"]
-        UI_Dash["/ (Dashboard & Paper PnL)"]
-        UI_Mkt["/markets (CandleChart, FVG, Trendlines, Liquidity)"]
-        UI_Strat["/strategies (Strategies Catalog & Analyzer)"]
-        UI_LabPlay["/strategy-lab (Strategy Builder & Research)"]
-        UI_Lab["/lab (Ingest, Clarify, Review, Journal)"]
-        UI_Deploy["/deploy & /deployments (Approvals & Ops)"]
+    subgraph ApplicationWorkers["Application & Worker Layer"]
+        FastAPI["FastAPI Backend (Port 8841)"]
+        LiveScanner["Live Scanner Daemon (live_scanner.py)"]
+        SupervisorDaemon["Supervisor (supervisor.py)"]
+        ExcelMaintainer["maintain_trades_excel.py"]
     end
 
-    subgraph BackendAPI["FastAPI Process - Port 8841"]
-        MW["Middleware (CORS, AuditContext, Bearer Auth)"]
-        API_Mkt["/api/market & /api/paper (Quotes, Candles, Analytics, Orders)"]
-        API_Strat["/api/strategies/catalog & /api/strategies/analyze"]
-        API_Lab["/api/ingest, /api/review/run, /api/demo/run"]
-        API_Live["/api/live (Approvals, Deployments, Kill Switch)"]
-        API_Audit["/api/audit & /api/live/audit (Cryptographic Hash Chains)"]
+    subgraph DataStorage["Persistence & Ledger Layer"]
+        ResearchDB[("Research DB (genesis.db)<br/>Alembic 0006<br/>strategies, reports, sim_trades,<br/>audit_events hash chain")]
+        LiveDB[("Live DB (live.db)<br/>Alembic live 0005<br/>deployments, orders, fills,<br/>live_audit_events hash chain")]
+        TradeStore[("TradeStore SSOT (trades.db)<br/>SQLite WAL Mode<br/>live_and_forward_trades, PnL,<br/>active_strategy_params, safety_wall")]
+        MarketDB[("Market DB (market.db)<br/>NSE EOD index_bars, option_eod,<br/>historical events, bhavcopies")]
+        ExcelFiles[("trades/ Workbooks<br/>live_and_forward_trades.xlsx<br/>todays_live_trades.xlsx<br/>by_strategy/*.xlsx")]
     end
 
-    subgraph BackgroundDaemons["Background Daemons & Workers"]
-        Sup["Supervisor (python -m app.live supervise)"]
-        TC_Subproc["Trade Crew Subprocess (1 per active deployment)"]
-        Liq_Daemon["Liquidity Signals Daemon (com.genesis.liquidity-signals)"]
-        Eq_Daemon["Equal Signals Daemon (com.genesis.equal-signals)"]
-        Loss_Agent["Loss Analyzer & Autopsy Engine"]
-        
-        Sup -->|manages lifecycle & backoff| TC_Subproc
-        TC_Subproc -->|on trade loss| Loss_Agent
-        Liq_Daemon -->|on trade loss| Loss_Agent
-    end
-
-    subgraph Storage["Tri-Database Storage Tier"]
-        DB_Res[("Research Database<br/>(Alembic: 0006_paper_orders)<br/>strategies, versions, reports, sim_trades,<br/>trade_reviews, paper_orders, audit_events")]
-        DB_Live[("Live Database<br/>(Alembic: 0005_broker_credentials)<br/>deployed_strategies, deployments, orders, fills,<br/>live_trades, credentials (Fernet), live_audit_events")]
-        DB_Mkt[("Market Database<br/>(Unaudited Reference Store)<br/>index_bars, option_eod, market_events, news_items")]
-    end
-
-    subgraph ExternalIntegrations["External APIs & Services"]
-        Ext_Yahoo["Yahoo Finance (Delayed Quotes & Historical Candles)"]
-        Ext_LLM["LLM Provider (OpenAI / Anthropic via LangChain)"]
-        Ext_Brokers["Broker Adapters (Paper & Sandbox Registries)"]
-        Ext_Sources["Source Sites (YouTube, Instagram, Web Documents)"]
-        Ext_Alerts["Notifications (Telegram Bot & SMTP Email)"]
-    end
-
-    %% UI to Backend
-    Frontend -->|HTTP REST / Bearer Token / X-Actor| MW
-    MW --> API_Mkt & API_Strat & API_Lab & API_Live & API_Audit
-
-    %% API to Database
-    API_Mkt --> DB_Res
-    API_Mkt --> Ext_Yahoo
-    API_Strat --> DB_Res
-    API_Strat --> Ext_LLM
-    API_Lab --> DB_Res
-    API_Lab --> DB_Mkt
-    API_Lab --> Ext_LLM
-    API_Lab --> Ext_Sources
-    API_Live --> DB_Live
-    API_Live --> DB_Res
-
-    %% Workers to DB & Externals
-    TC_Subproc --> DB_Live
-    TC_Subproc --> DB_Mkt
-    TC_Subproc --> Ext_Brokers
-    TC_Subproc --> Ext_LLM
-    Liq_Daemon --> DB_Mkt
-    Liq_Daemon --> Ext_Yahoo
-    Liq_Daemon --> Ext_Alerts
-    Eq_Daemon --> Ext_Yahoo
-    Eq_Daemon --> Ext_Alerts
-    Loss_Agent --> Ext_LLM
-    Loss_Agent --> Ext_Alerts
+    FastAPI --> ResearchDB
+    FastAPI --> LiveDB
+    FastAPI --> MarketDB
+    LiveScanner --> TradeStore
+    LiveScanner --> LiveDB
+    SupervisorDaemon --> LiveDB
+    LiveScanner --> ExcelFiles
+    ExcelMaintainer --> TradeStore
+    ExcelMaintainer --> ExcelFiles
 ```
 
----
-
-## 4. Market Structure & Chart Analytics Architecture
-
-The engine in `backend/app/market/chart_analytics.py` powers the interactive chart in `/markets`:
-
-```mermaid
-flowchart LR
-    Bars[Raw 5m / 15m OHLCV Bars] --> SwingDetect[Swing High / Low Detection (2L/2R)]
-    SwingDetect --> Classify[Classification: HH, HL, LH, LL, EQH, EQL]
-    
-    Classify --> BOS[BOS & CHoCH Event Detection]
-    Classify --> Trendlines[Ascending Support & Descending Resistance Lines]
-    Bars --> FVG[Fair Value Gap (FVG) Detection]
-    Bars --> OB[Order Block Identification]
-    Bars --> VWAP[Robust Session VWAP (ETF Proxy)]
-    
-    BOS & Trendlines & FVG & OB & VWAP --> Aggregator[enrich_chart_payload]
-    Aggregator --> APIOut[FastAPI /api/market/candles Response]
-    APIOut --> FrontendChart[CandleChart.tsx + TradingDecisionDashboard.tsx]
-```
-
----
-
-## 5. Security, Auditability, and Invariants
-
-1. **Deterministic Execution**:
-   - Trading decisions (entries, sizing, exits, trailing stops) are computed strictly in deterministic Python code.
-   - The LLM cannot place, modify, or close trades. It has optional *Shadow* (observation) or *Veto* (skip/reduce approved entry) capabilities only.
-2. **Cryptographic Provenance**:
-   - When a strategy is approved for deployment, its exact `content_sha256` and `rules_sha256` are frozen into `deployed_strategies`.
-   - The Trade Crew verifies these hashes on every single tick; any tampering or discrepancy immediately halts trading.
-3. **Dual Append-Only Hash Chains**:
-   - Every mutation in the Research DB writes to `audit_events`.
-   - Every mutation in the Live DB writes to `live_audit_events`.
-   - Each audit event includes `hash = sha256(prev_hash + canonical_json_payload)`, allowing mathematical proof of tamper resistance via `GET /api/audit/verify` and `GET /api/live/audit/verify`.
+### Invariants & Non-Repudiation
+1. **Zero LLM Trade Authority**: Trading entries and exits are strictly executed by deterministic algorithms in code. The LLM has zero authority to open, modify, or close a trade.
+2. **Cryptographic Provenance**: Every approved deployment freezes `content_sha256` and `rules_sha256`. The execution engine validates these hashes on every tick.
+3. **Dual Cryptographic Hash Chains**: Every state mutation produces a record in `audit_events` or `live_audit_events` with `hash = sha256(prev_hash + canonical_json_payload)`, verifiable via `GET /api/audit/verify`.

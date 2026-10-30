@@ -1,0 +1,257 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1240" height="880" viewBox="0 0 1240 880">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; fill: #1c1917; }
+    .bg { fill: #fafaf9; }
+    .box { fill: #ffffff; stroke: #44403c; stroke-width: 1.4; rx: 6px; }
+    .step { fill: #ffffff; stroke: #0284c7; stroke-width: 1.3; rx: 6px; }
+    .decision { fill: #fffbeb; stroke: #d97706; stroke-width: 1.3; rx: 6px; }
+    .halt { fill: #fef2f2; stroke: #dc2626; stroke-width: 1.3; rx: 6px; }
+    .success { fill: #f0fdf4; stroke: #16a34a; stroke-width: 1.3; rx: 6px; }
+    .grp { fill: #f8fafc; stroke: #94a3b8; stroke-width: 1.2; rx: 8px; }
+    .ln { stroke: #334155; stroke-width: 1.4; fill: none; marker-end: url(#arr); }
+    .ln-red { stroke: #dc2626; stroke-width: 1.2; stroke-dasharray: 4 3; fill: none; marker-end: url(#arr-red); }
+    .h { font-size: 20px; font-weight: 700; fill: #0f172a; }
+    .sub { font-size: 13px; fill: #64748b; }
+    .t { font-size: 12px; font-weight: 700; fill: #0f172a; }
+    .d { font-size: 10px; fill: #475569; }
+    .lbl { font-size: 10px; font-weight: 600; }
+  </style>
+  <defs>
+    <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#334155"/>
+    </marker>
+    <marker id="arr-red" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+      <path d="M0,0 L7,3 L0,6 Z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1240" height="880" class="bg"/>
+
+  <!-- Header -->
+  <text x="40" y="38" class="h">Genesis: Live Multi-Timeframe Scanner &amp; Execution Pipeline</text>
+  <text x="40" y="58" class="sub">Continuous tick loop (scripts/live_scanner.py) · 1m, 2m, 5m, 15m scanning across Indian Market hours (09:15 - 15:30 IST)</text>
+
+  <!-- Column 1: Market Feed & Level Projection -->
+  <rect class="grp" x="40" y="80" width="260" height="760"/>
+  <text x="56" y="106" class="t" fill="#0369a1" font-size="14px">Phase 1: Ingest &amp; Projection</text>
+
+  <rect class="step" x="56" y="124" width="228" height="60"/>
+  <text x="68" y="144" class="t">1. Multi-Timeframe Polling</text>
+  <text x="68" y="160" class="d">FeedAgent pulls 1m, 5m, 15m OHLCV</text>
+  <text x="68" y="174" class="d">Calculates real-time VWAP proxy</text>
+
+  <path class="ln" d="M170 184 V210"/>
+
+  <rect class="step" x="56" y="210" width="228" height="64"/>
+  <text x="68" y="230" class="t">2. Dynamic Level Mapping</text>
+  <text x="68" y="246" class="d">LevelsAgent pins PDH, PDL, PDC,</text>
+  <text x="68" y="258" class="d">Opening Range (OR-30: 09:15-09:45),</text>
+  <text x="68" y="270" class="d">50-pt &amp; 100-pt psychological strikes</text>
+
+  <path class="ln" d="M170 274 V300"/>
+
+  <rect class="step" x="56" y="300" width="228" height="64"/>
+  <text x="68" y="320" class="t">3. Market Structure Analytics</text>
+  <text x="68" y="336" class="d">chart_analytics.py computes non-repainting</text>
+  <text x="68" y="348" class="d">Swings (HH/HL/LH/LL), BOS, CHoCH,</text>
+  <text x="68" y="360" class="d">FVG imbalances &amp; Dynamic Trendlines</text>
+
+  <path class="ln" d="M170 364 V400"/>
+
+  <!-- Column 1 -> Column 2 Filter Gates -->
+  <rect class="decision" x="56" y="400" width="228" height="60"/>
+  <text x="68" y="420" class="t">4. Session Time Gate</text>
+  <text x="68" y="436" class="d">Is 09:15 &lt;= Time &lt;= 15:30 IST?</text>
+  <text x="68" y="450" class="d">Skip early noise / pre-market</text>
+
+  <path class="ln" d="M170 460 V500"/>
+
+  <rect class="decision" x="56" y="500" width="228" height="64"/>
+  <text x="68" y="520" class="t">5. Consolidation / Lunch Gate</text>
+  <text x="68" y="536" class="d">ConsolidationAgent: ATR deadband</text>
+  <text x="68" y="548" class="d">11:30 - 13:00 Lunch Lull check</text>
+  <text x="68" y="560" class="d">(Allows waterfall break if active)</text>
+
+  <path class="ln" d="M170 564 V600"/>
+
+  <rect class="decision" x="56" y="600" width="228" height="60"/>
+  <text x="68" y="620" class="t">6. News &amp; Macro Gate</text>
+  <text x="68" y="636" class="d">NewsAgent: Event risk blackout</text>
+  <text x="68" y="648" class="d">VIX boundary check (11.5 - 22.0)</text>
+
+  <path class="ln" d="M170 660 V710"/>
+
+  <rect class="step" x="56" y="710" width="228" height="50" fill="#e0f2fe"/>
+  <text x="68" y="730" class="t" fill="#0369a1">Emit ScanSnapshot</text>
+  <text x="68" y="746" class="d">Ready for strategy pattern detectors</text>
+
+  <!-- Arrow Col 1 -> Col 2 -->
+  <path class="ln" d="M284 735 H320"/>
+
+  <!-- Column 2: Pattern Detectors -->
+  <rect class="grp" x="320" y="80" width="300" height="760"/>
+  <text x="336" y="106" class="t" fill="#15803d" font-size="14px">Phase 2: Strategy Pattern Detectors</text>
+
+  <!-- Strategy 1: Breakout & Retest -->
+  <rect class="step" x="336" y="124" width="268" height="96"/>
+  <text x="348" y="144" class="t" fill="#166534">Strategy A: Breakout &amp; Retest</text>
+  <text x="348" y="160" class="d">1. Candle closes beyond OR-30 or PDH/PDL</text>
+  <text x="348" y="174" class="d">2. Retest candle wicks back into breakout level</text>
+  <text x="348" y="188" class="d">3. Micro-wick rejection confirms resumption</text>
+  <text x="348" y="202" class="d">Target: +2.0R to +3.5R</text>
+
+  <!-- Strategy 2: Trendline Reversal -->
+  <rect class="step" x="336" y="236" width="268" height="96"/>
+  <text x="348" y="256" class="t" fill="#166534">Strategy B: Trendline Reversal</text>
+  <text x="348" y="272" class="d">1. 3 verified touches on ascending/descending line</text>
+  <text x="348" y="286" class="d">2. 3rd point trap / false breakout exhaustion</text>
+  <text x="348" y="300" class="d">3. Sharp reversal back into channel</text>
+  <text x="348" y="314" class="d">Target: Opposing trendline / +3.0R</text>
+
+  <!-- Strategy 3: Liquidity Sweep -->
+  <rect class="step" x="336" y="348" width="268" height="96"/>
+  <text x="348" y="368" class="t" fill="#166534">Strategy C: Liquidity Sweep (PDH/PDL Raid)</text>
+  <text x="348" y="384" class="d">1. Stop run above PDH or below PDL (Turtle Soup)</text>
+  <text x="348" y="398" class="d">2. Immediate 5m / 15m MSS candle close back inside</text>
+  <text x="348" y="412" class="d">3. Reclaim of Session VWAP + Day Open</text>
+  <text x="348" y="426" class="d">Target: Opposing boundary / +3.5R</text>
+
+  <!-- Synthesis into CandidateSetup -->
+  <rect class="step" x="336" y="464" width="268" height="74" fill="#dcfce7"/>
+  <text x="348" y="484" class="t" fill="#14532d">DetectorAgent Synthesis</text>
+  <text x="348" y="500" class="d">Validates spot price, exact entry wick,</text>
+  <text x="348" y="514" class="d">invalidation stop loss, and R:R &gt;= 1.8R</text>
+  <text x="348" y="528" class="d">Emits verified CandidateSetup</text>
+
+  <path class="ln" d="M470 538 V564"/>
+
+  <!-- Trend Slope & Dynamic RR Evaluation -->
+  <rect class="step" x="336" y="564" width="268" height="80"/>
+  <text x="348" y="584" class="t">TrendAgent Evaluation</text>
+  <text x="348" y="600" class="d">Determines macro regime (Bull, Bear, Range)</text>
+  <text x="348" y="614" class="d">Aligns R:R targets: Target 1 (1.8R),</text>
+  <text x="348" y="628" class="d">Target 2 (2.5R), Target 3 (3.5R - 4.5R)</text>
+
+  <path class="ln" d="M470 644 V674"/>
+
+  <!-- Order Flow Veto -->
+  <rect class="decision" x="336" y="674" width="268" height="76"/>
+  <text x="348" y="694" class="t">OrderFlowAgent Veto Check</text>
+  <text x="348" y="710" class="d">Checks for institutional absorption traps</text>
+  <text x="348" y="724" class="d">If volume climax opposes direction -&gt; VETO</text>
+  <text x="348" y="738" class="d">Passed -&gt; Trade forwarded to Risk Engine</text>
+
+  <!-- Arrow Col 2 -> Col 3 -->
+  <path class="ln" d="M604 712 H640"/>
+
+  <!-- Column 3: Sizing, Safety Wall & Execution -->
+  <rect class="grp" x="640" y="80" width="310" height="760"/>
+  <text x="656" y="106" class="t" fill="#b45309" font-size="14px">Phase 3: Sizing &amp; Safety Wall</text>
+
+  <!-- 3-Tier Execution Framework -->
+  <rect class="step" x="656" y="124" width="278" height="120" fill="#fefce8" stroke="#ca8a04"/>
+  <text x="668" y="144" class="t" fill="#854d0e">3-Tier Execution Framework</text>
+  <text x="668" y="162" class="d">Tier 1: Standard Momentum (3 Lots 1-OTM)</text>
+  <text x="668" y="176" class="d">  Strictly 1 strike OTM (50-100 pts away)</text>
+  <text x="668" y="192" class="d">Tier 2: Super-Trend Run (4 Lots 2-OTM)</text>
+  <text x="668" y="206" class="d">  High convex gamma expansion runner</text>
+  <text x="668" y="222" class="d">Tier 3: Scalp Mode (2 Lots ATM)</text>
+  <text x="668" y="236" class="d">  Delta-heavy quick absorption strike</text>
+
+  <path class="ln" d="M795 244 V270"/>
+
+  <!-- 50% Safety Wall -->
+  <rect class="step" x="656" y="270" width="278" height="96" fill="#fef2f2" stroke="#ef4444"/>
+  <text x="668" y="290" class="t" fill="#991b1b">Institutional 50% Capital Safety Wall</text>
+  <text x="668" y="308" class="d">1. Calculates cumulative net realized profits</text>
+  <text x="668" y="322" class="d">2. Permanently locks 50% into Capital Floor</text>
+  <text x="668" y="336" class="d">3. Trades only with remaining 50% profit reserve</text>
+  <text x="668" y="350" class="d">4. Zero risk of giving back all gains!</text>
+
+  <path class="ln" d="M795 366 V392"/>
+
+  <!-- Daily Risk Limits -->
+  <rect class="decision" x="656" y="392" width="278" height="74"/>
+  <text x="668" y="412" class="t">Daily Risk &amp; Loss Circuit Breaker</text>
+  <text x="668" y="428" class="d">Max Daily Trades: 3</text>
+  <text x="668" y="442" class="d">Max Consecutive Losses: 2 -&gt; Soft Lock</text>
+  <text x="668" y="456" class="d">3 Losses -&gt; Mandatory Hard Stop</text>
+
+  <path class="ln" d="M795 466 V492"/>
+
+  <!-- Execution Manager -->
+  <rect class="step" x="656" y="492" width="278" height="96"/>
+  <text x="668" y="512" class="t">ExecutionManager Dispatch</text>
+  <text x="668" y="528" class="d">SmartRoutingAgent: Split order into tranches</text>
+  <text x="668" y="542" class="d">30% immediate fill + 70% limit chase</text>
+  <text x="668" y="556" class="d">BrokerBridgeAgent: Paper / Live adapter</text>
+  <text x="668" y="570" class="d">ReconciliationAgent: Validates fill count</text>
+
+  <path class="ln" d="M795 588 V614"/>
+
+  <!-- Target 3 & Trailing Stop -->
+  <rect class="step" x="656" y="614" width="278" height="106"/>
+  <text x="668" y="634" class="t">ExitAgent Lifecycle Management</text>
+  <text x="668" y="650" class="d">Target 1 (+1.8R): Book 50% &amp; Move SL to Cost</text>
+  <text x="668" y="664" class="d">Target 2 (+2.5R): Book 25% &amp; Trail 5M swing</text>
+  <text x="668" y="678" class="d">Target 3 (+3.5R): Unconditional full close</text>
+  <text x="668" y="692" class="d">Auto-Flip: Closes immediately on opposing</text>
+  <text x="668" y="706" class="d">structural sweep signal</text>
+
+  <!-- Arrow Col 3 -> Col 4 -->
+  <path class="ln" d="M934 667 H970"/>
+
+  <!-- Column 4: Alerts, Logging & Post-Market -->
+  <rect class="grp" x="970" y="80" width="230" height="760"/>
+  <text x="986" y="106" class="t" fill="#7c3aed" font-size="14px">Phase 4: Alerts &amp; Audit</text>
+
+  <!-- Telegram Ticket Dispatch -->
+  <rect class="success" x="986" y="124" width="198" height="90"/>
+  <text x="998" y="144" class="t" fill="#15803d">Telegram AlertAgent</text>
+  <text x="998" y="160" class="d">Dispatches instant Entry Ticket</text>
+  <text x="998" y="174" class="d">Threads CMP heartbeat updates</text>
+  <text x="998" y="188" class="d">Target 1, 2, 3 hit notifications</text>
+  <text x="998" y="202" class="d">Exit &amp; Net P&amp;L summary</text>
+
+  <path class="ln" d="M1085 214 V240"/>
+
+  <!-- SQLite SSOT -->
+  <rect class="step" x="986" y="240" width="198" height="84"/>
+  <text x="998" y="260" class="t">JournalAgent &amp; SSOT</text>
+  <text x="998" y="276" class="d">Writes atomic transaction to</text>
+  <text x="998" y="290" class="d">data/trades.db (SQLite WAL)</text>
+  <text x="998" y="304" class="d">Updates active_trades cache</text>
+  <text x="998" y="316" class="d">Zero state desynchronization</text>
+
+  <path class="ln" d="M1085 324 V350"/>
+
+  <!-- Excel Sync -->
+  <rect class="step" x="986" y="350" width="198" height="84"/>
+  <text x="998" y="370" class="t">Excel Synchronizer</text>
+  <text x="998" y="386" class="d">Synchronizes trades/ folder:</text>
+  <text x="998" y="400" class="d">live_and_forward_trades.xlsx</text>
+  <text x="998" y="414" class="d">todays_live_trades.xlsx</text>
+  <text x="998" y="426" class="d">by_strategy/*.xlsx</text>
+
+  <path class="ln" d="M1085 434 V464"/>
+
+  <!-- Post-Market 15:31 -->
+  <rect class="step" x="986" y="464" width="198" height="150" fill="#fff1f2" stroke="#e11d48"/>
+  <text x="998" y="484" class="t" fill="#be123c">15:31 PostMarketCrew</text>
+  <text x="998" y="502" class="d">Triggered at 15:31 IST:</text>
+  <text x="998" y="518" class="d">1. AutopsyAgent tape audit</text>
+  <text x="998" y="534" class="d">2. ParameterAgent walk-forward</text>
+  <text x="998" y="550" class="d">3. SafetyWall profit reserve</text>
+  <text x="998" y="566" class="d">4. Code quality &amp; latency check</text>
+  <text x="998" y="582" class="d">5. reports/daily_audit_*.md</text>
+  <text x="998" y="598" class="d">6. Telegram Executive Digest</text>
+
+  <path class="ln" d="M1085 614 V644"/>
+
+  <!-- Ready for Next Session -->
+  <rect class="success" x="986" y="644" width="198" height="60"/>
+  <text x="998" y="664" class="t" fill="#15803d">Tomorrow Battleplan Ready</text>
+  <text x="998" y="680" class="d">active_strategy_params.json</text>
+  <text x="998" y="694" class="d">daily_risk_config.json updated</text>
+</svg>

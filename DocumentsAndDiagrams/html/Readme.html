@@ -1,0 +1,108 @@
+<!DOCTYPE html><html><head><meta charset='utf-8'><title>Readme</title><style>
+body { font-family: Helvetica, Arial, sans-serif; color: #1c1917; line-height: 1.45;
+       max-width: 920px; margin: 32px auto; padding: 0 24px; font-size: 12.5px; }
+h1 { font-size: 22px; margin: 0 0 8px; }
+h2 { font-size: 16px; margin-top: 28px; border-bottom: 1px solid #d6d3d1; padding-bottom: 4px; }
+h3 { font-size: 14px; margin-top: 20px; }
+table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+th, td { border: 1px solid #d6d3d1; padding: 4px 6px; vertical-align: top; text-align: left; }
+th { background: #f5f5f4; }
+code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; }
+pre { background: #f5f5f4; padding: 10px; overflow: auto; white-space: pre-wrap; }
+img { max-width: 100%; height: auto; margin: 8px 0; }
+blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1; color: #44403c; }
+</style></head><body><h1>Genesis: Institutional Trading &amp; Strategy Intelligence Platform</h1>
+
+<p>Factual product brief and system specification for the Genesis platform. Component, schema, and dependency details live in the companion documents in this folder. Operational procedures live in <a href="../backend/README.md">backend/README.md</a> and the root <a href="../README.md">README.md</a>.</p>
+
+<p><strong>Source of truth:</strong> Application code (<code>backend/app/</code>, <code>frontend/src/</code>, <code>scripts/</code>, <code>trades/</code>), Alembic revisions, SQLite WAL schemas, and <code>.env.example</code>.</p>
+
+<p>*Analysis &amp; System Specification Date: 2026-10-30.*</p>
+
+<p>---</p>
+
+<h2>1. Problem Statement &amp; Evolution</h2>
+
+<p>A retail options strategy idea typically arrives as a video, a social media post, a web article, or a Markdown note. Transforming that unstructured concept into a mathematically backtested, forward-tested strategy with realistic Indian options charges, reviewing it trade-by-trade, and deploying it into live market conditions has historically been fragmented, manual, and prone to execution slippage.</p>
+
+<p>Genesis resolves this by providing an institutional quantitative pipeline spanning <strong>Strategy Research &amp; Lab</strong>, <strong>Automated Review &amp; Ingestion</strong>, <strong>Real-Time Market Structure Analytics</strong>, and <strong>5 Autonomous Trading Crews</strong> running continuous live operations.</p>
+
+<p>---</p>
+
+<h2>2. Core Platform Capabilities</h2>
+
+<p>1. <strong>Strategy Lab &amp; Multi-Source Ingestion</strong>:</p>
+<p>   - Ingests trading strategies from YouTube, Instagram, web documents (HTML), NotebookLM, or Markdown.</p>
+<p>   - Extracts structured Markdown with an executable <code>rules:</code> block.</p>
+<p>   - Detects specification gaps and asks clarifying questions, iteratively re-extracting with author responses.</p>
+
+<p>2. <strong>Deterministic Review Crew</strong>:</p>
+<p>   - Executes a 7-step LangGraph StateGraph: syntax audit, parameter scenario building, historical backtesting with Indian options charges (brokerage, STT, exchange fees, GST, SEBI, stamp duty, slippage), hard-stop capital sweeps (2% to 5%), trade-by-trade post-mortems, verdict synthesis, and improvement proposals.</p>
+
+<p>3. <strong>5 Specialized Autonomous Trading Crews</strong>:</p>
+<p>   - <strong>PreMarketCrew (08:30 – 09:14 IST)</strong>: Gap analysis, Call/Put gamma walls, Max Pain, PCR, event risk screening, and morning battleplan generation.</p>
+<p>   - <strong>ScannerCrew (09:15 – 15:30 IST)</strong>: Real-time multi-timeframe delta polling (1m, 2m, 5m, 15m), VWAP proxy, dynamic level projection, ATR deadband/lunch-lull filtering, and multi-strategy pattern detection.</p>
+<p>   - <strong>TradeCrew (Live Market Hours)</strong>: Macro trend slope evaluation, dynamic R:R (+1.8R to +4.5R), whale volume absorption trap veto, 3-Tier sizing, strictly OTM strike selection, Telegram ticket dispatch, and trade journaling.</p>
+<p>   - <strong>ExecutionCrew</strong>: Smart routing tranches (30% market / 70% limit chase), broker bridge (Paper and Live), and zero-drift position reconciliation.</p>
+<p>   - <strong>PostMarketCrew (15:31+ IST)</strong>: Intraday tape reconstruction, exit audits, walk-forward parameter sweeps, 50% Capital Safety Wall profit locking, code quality audit, and daily executive digest.</p>
+
+<p>4. <strong>Non-Repainting Market Structure Engine</strong>:</p>
+<p>   - Mathematical swing high/low detection (2L/2R), Market Structure Break (<code>BOS</code>), Change of Character (<code>CHoCH</code>), Fair Value Gaps (<code>FVG</code>), dynamic trendlines, and session VWAP.</p>
+
+<p>5. <strong>Institutional Risk &amp; Sizing Engine</strong>:</p>
+<p>   - <strong>3-Tier Execution Framework</strong>: 3 Lots 1-OTM (standard momentum), 4 Lots 2-OTM (super-trend runner), and 2 Lots ATM (scalp mode).</p>
+<p>   - <strong>50% Capital Safety Wall</strong>: Permanently locks 50% of cumulative net realized profits into a protected floor, eliminating the risk of giving back gains.</p>
+<p>   - <strong>Daily Circuit Breakers</strong>: Max 3 daily trades, soft pause on 2 consecutive losses, mandatory hard stop on 3 losses.</p>
+
+<p>6. <strong>Single Source of Truth (SSOT) &amp; Excel Sync</strong>:</p>
+<p>   - High-throughput SQLite WAL database (<code>data/trades.db</code>) provides atomic, concurrent ACID transactions.</p>
+<p>   - Automatically synchronizes institutional Excel workbooks under <code>trades/</code> (<code>live_and_forward_trades.xlsx</code>, <code>todays_live_trades.xlsx</code>, and <code>by_strategy/</code>).</p>
+
+<p>7. <strong>Cryptographic Provenance &amp; Dual Audit Chains</strong>:</p>
+<p>   - Strategies approved for live deployment freeze <code>content_sha256</code> and <code>rules_sha256</code>, verified on every tick.</p>
+<p>   - Dual SHA-256 hash chains (<code>audit_events</code> and <code>live_audit_events</code>) guarantee mathematical proof of tamper resistance via <code>GET /api/audit/verify</code>.</p>
+
+<p>---</p>
+
+<h2>3. Documents in This Directory</h2>
+
+<p>| Document | Role &amp; Description |</p>
+<p>| :--- | :--- |</p>
+<p>| <a href="CURRENT_ARCHITECTURE_AND_AGENT_FLOWS.md">CURRENT_ARCHITECTURE_AND_AGENT_FLOWS.md</a> | Exhaustive specification of the 5 Autonomous Crews, operational lifecycles, and Mermaid flowcharts. |</p>
+<p>| <a href="CURRENT_SYSTEM_ARCHITECTURE_ANALYSIS.md">CURRENT_SYSTEM_ARCHITECTURE_ANALYSIS.md</a> | Component-by-component architectural audit, endpoint mapping, and middleware stacks. |</p>
+<p>| <a href="CURRENT_DATABASE_ARCHITECTURE.md">CURRENT_DATABASE_ARCHITECTURE.md</a> | Schema definitions, table columns, indices, and constraints across all databases. |</p>
+<p>| <a href="DATABASE_TABLE_REFERENCE.md">DATABASE_TABLE_REFERENCE.md</a> | Detailed table reference, field descriptions, and read/write access patterns. |</p>
+<p>| <a href="INSTITUTIONAL_SCALING_LAW_AND_SAFETY_WALL.md">INSTITUTIONAL_SCALING_LAW_AND_SAFETY_WALL.md</a> | Mathematical proof and implementation of the 50% Safety Wall and 3-Tier sizing model. |</p>
+<p>| <a href="LIBRARIES_AND_DEPENDENCIES.md">LIBRARIES_AND_DEPENDENCIES.md</a> | Exhaustive dependency analysis of libraries imported across backend and frontend. |</p>
+<p>| <a href="FINAL_REPORT.md">FINAL_REPORT.md</a> | Comprehensive engineering and academic report conforming to NIIT guidelines. |</p>
+
+<p>---</p>
+
+<h2>4. Visual Architectural Diagrams</h2>
+
+<p>All architectural diagrams are maintained as vector SVGs and rendered into high-resolution PNGs in <a href="diagrams/">diagrams/</a>:</p>
+
+<p>| Diagram | Description | Links |</p>
+<p>| :--- | :--- | :--- |</p>
+<p>| <strong>Full Platform Architecture</strong> | High-level system architecture showing Next.js UI, FastAPI, Daemons, Multi-Tier Storage, and Externals. | <a href="diagrams/architecture.png">SVG</a> · <a href="diagrams/architecture.png">PNG</a> |</p>
+<p>| <strong>5 Autonomous Crews Ecosystem</strong> | The 5 specialized crews (PreMarket, Scanner, Trade, Execution, PostMarket) and their 21 agents. | <a href="diagrams/crew-architecture.png">SVG</a> · <a href="diagrams/crew-architecture.png">PNG</a> |</p>
+<p>| <strong>Live Scanner &amp; Execution Flow</strong> | Multi-timeframe polling, dynamic levels, pattern detection, sizing, safety wall, and post-market loop. | <a href="diagrams/live-scanner-flow.png">SVG</a> · <a href="diagrams/live-scanner-flow.png">PNG</a> |</p>
+<p>| <strong>Review Crew &amp; Trade Crew Workflow</strong> | Workflow comparison between Research Lab Review Crew and live deployment Trade Crew. | <a href="diagrams/workflow.png">SVG</a> · <a href="diagrams/workflow.png">PNG</a> |</p>
+<p>| <strong>Multi-Tier Database Architecture</strong> | Schema relationships between Research DB, Live DB, TradeStore SSOT, and Market DB. | <a href="diagrams/database.png">SVG</a> · <a href="diagrams/database.png">PNG</a> |</p>
+<p>| <strong>Lab Ingest Flow</strong> | Ingestion, gap clarification, backtest replay, and report generation sequence. | <a href="diagrams/flow-lab.png">SVG</a> · <a href="diagrams/flow-lab.png">PNG</a> |</p>
+<p>| <strong>Live Trading Gate Flow</strong> | Policy validation, snapshot hashing, live execution gates, and position reconciliation. | <a href="diagrams/flow-live.png">SVG</a> · <a href="diagrams/flow-live.png">PNG</a> |</p>
+<p>| <strong>Paper Trading Flow</strong> | Interactive chart execution, delayed quotes, Indian charge deduction, and paper position tracking. | <a href="diagrams/flow-paper.png">SVG</a> · <a href="diagrams/flow-paper.png">PNG</a> |</p>
+
+<p>To regenerate PNGs, HTML, DOCX, and PDF exports from the Markdown sources, run:</p>
+<pre><code>python3 DocumentsAndDiagrams/export_docs.py</code></pre>
+
+<p>---</p>
+
+<h2>5. Getting Started &amp; Operations</h2>
+
+<ul><li>Complete setup, port bindings, CLI commands, and environment variables are documented in the root <a href="../README.md">README.md</a>.</li><li>Quick service management:</li></ul>
+<p>  ```bash</p>
+<p>  ./scripts/genesis.sh start    # Starts Backend (8841), Frontend (3000), and Live Scanner Daemon</p>
+<p>  ./scripts/genesis.sh status   # Inspect health and running process PIDs</p>
+<p>  ./scripts/genesis.sh logs     # Tail unified system logs</p>
+<p>  ```</p></body></html>
