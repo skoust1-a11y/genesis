@@ -42,6 +42,10 @@ class TradeSignal:
     rationale: str
     regime: str
     adx: float
+    base_timeframe: str = "30M"
+    liquidity_pool: str = "UNSPECIFIED"
+    lookout_duration_mins: int = 120
+    lookout_status: str = "TRIGGERED"
 
 
 class EntryAgent:
@@ -118,6 +122,10 @@ class EntryAgent:
                     rationale=f"PDH Sweep & Rejection Wick at {pdh:.1f}. Dynamic R:R {regime.recommended_target_r:.1f}R",
                     regime=regime.regime,
                     adx=regime.adx,
+                    base_timeframe="30M",
+                    liquidity_pool="BSL_SWEEP",
+                    lookout_duration_mins=180,
+                    lookout_status="TRIGGERED",
                 )
 
         # 2. Bullish Sweep of PDL (Long / CALL)
@@ -160,6 +168,10 @@ class EntryAgent:
                     rationale=f"PDL Sweep & Rejection Wick at {pdl:.1f}. Dynamic R:R {regime.recommended_target_r:.1f}R",
                     regime=regime.regime,
                     adx=regime.adx,
+                    base_timeframe="30M",
+                    liquidity_pool="SSL_SWEEP",
+                    lookout_duration_mins=180,
+                    lookout_status="TRIGGERED",
                 )
 
         return None
@@ -216,6 +228,11 @@ class EntryAgent:
                 rationale=f"Midday Waterfall: High-volume breakdown below morning floor {morning_floor:.1f}",
                 regime="VOLATILE_EXPANSION",
                 adx=regime.adx,
+                base_timeframe="15M",
+                liquidity_pool="SSL_EXPANSION",
+                lookout_duration_mins=90,
+                lookout_status="TRIGGERED",
             )
+
 
         return None

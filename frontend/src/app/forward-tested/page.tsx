@@ -31,6 +31,11 @@ type ForwardTrade = {
   lots: number;
   qty: number;
   rationale: string;
+  liquidity_pool?: string;
+  entry_reason?: string;
+  base_timeframe?: string;
+  lookout_duration_mins?: number;
+  lookout_status?: string;
 };
 
 type AggregateMetrics = {
@@ -400,7 +405,25 @@ export default function ForwardTestedPage() {
 
                     {/* Strategy & Setup */}
                     <td className="px-3 py-3 whitespace-nowrap font-sans font-medium text-zinc-800">
-                      <div>{t.strategy}</div>
+                      <div className="flex items-center gap-1.5">
+                        <span>{t.strategy}</span>
+                        {t.liquidity_pool && (
+                          <span
+                            className={`inline-block rounded px-1.5 py-0.5 text-[9px] font-bold ${
+                              t.liquidity_pool.includes("BSL")
+                                ? "bg-purple-100 text-purple-800 border border-purple-200"
+                                : t.liquidity_pool.includes("SSL")
+                                ? "bg-amber-100 text-amber-800 border border-amber-200"
+                                : "bg-zinc-100 text-zinc-700 border border-zinc-200"
+                            }`}
+                          >
+                            {t.liquidity_pool}
+                          </span>
+                        )}
+                        <span className="inline-block rounded px-1.5 py-0.5 text-[9px] font-semibold bg-zinc-100 text-zinc-600 border border-zinc-200">
+                          {t.base_timeframe || "15M"}
+                        </span>
+                      </div>
                       <div className="text-[10px] text-zinc-500 font-normal">{t.setup}</div>
                     </td>
 
@@ -503,11 +526,24 @@ export default function ForwardTestedPage() {
 
         {/* Expanded Rationale Drawer if open */}
         {expandedRow !== null && filteredTrades[expandedRow] && (
-          <div className="border-t border-amber-200 bg-amber-50/70 p-4 font-sans">
+          <div className="border-t border-amber-200 bg-amber-50/70 p-4 font-sans space-y-2">
             <div className="flex items-center justify-between">
-              <h3 className="text-xs font-bold text-amber-950 uppercase tracking-wider">
-                Setup Rationale & Forensic Conditions: {filteredTrades[expandedRow].strategy} ({filteredTrades[expandedRow].date} {filteredTrades[expandedRow].time})
-              </h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs font-bold text-amber-950 uppercase tracking-wider">
+                  Setup Rationale & Forensic Conditions: {filteredTrades[expandedRow].strategy} ({filteredTrades[expandedRow].date} {filteredTrades[expandedRow].time})
+                </h3>
+                {filteredTrades[expandedRow].liquidity_pool && (
+                  <span className="rounded bg-purple-100 px-1.5 py-0.5 text-[10px] font-bold text-purple-800">
+                    {filteredTrades[expandedRow].liquidity_pool}
+                  </span>
+                )}
+                <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[10px] font-semibold text-zinc-700">
+                  Base TF: {filteredTrades[expandedRow].base_timeframe || "15M"}
+                </span>
+                <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-semibold text-blue-700">
+                  Lookout: {filteredTrades[expandedRow].lookout_duration_mins || 120}m ({filteredTrades[expandedRow].lookout_status || "TRIGGERED"})
+                </span>
+              </div>
               <button
                 onClick={() => setExpandedRow(null)}
                 className="text-xs font-medium text-amber-800 hover:underline"
@@ -515,11 +551,12 @@ export default function ForwardTestedPage() {
                 ✕ Close
               </button>
             </div>
-            <p className="mt-2 text-xs leading-relaxed text-amber-900 whitespace-pre-wrap">
-              {filteredTrades[expandedRow].rationale || "No detailed condition text recorded."}
+            <p className="mt-1 text-xs leading-relaxed text-amber-900 whitespace-pre-wrap">
+              {filteredTrades[expandedRow].entry_reason || filteredTrades[expandedRow].rationale || "No detailed condition text recorded."}
             </p>
           </div>
         )}
+
       </div>
     </main>
   );

@@ -122,10 +122,21 @@ def extract_all_suggested_trades(
         eval_bars = cur_bars
         eval_above = above
 
-        # Precompute key Spot levels for dynamic targets
+        # Precompute key Spot levels for dynamic targets (including Order Flow Volume Profile)
         spot_levels = [pdh, pdl]
         if len(cur_bars) >= 6:
             spot_levels.extend([max(b["high"] for b in cur_bars[:6]), min(b["low"] for b in cur_bars[:6])])
+            try:
+                from app.trading.crew.order_flow_agent import OrderFlowAgent
+                import pandas as pd
+                of_calc = OrderFlowAgent()
+                vp = of_calc.calculate_volume_profile(pd.DataFrame(cur_bars))
+                if vp:
+                    for k in ("poc", "vah", "val"):
+                        if vp.get(k):
+                            spot_levels.append(vp[k])
+            except Exception:
+                pass
         spot_levels = sorted(list(set(spot_levels)))
 
         # Collect raw signals
@@ -189,11 +200,49 @@ def extract_all_suggested_trades(
             risk_pts = sig["risk"]
             side = sig["side"]
 
-            # 3-Tier Execution Framework (Dynamic Strike & Lots)
-            otm_steps, trade_lots, tier_name = resolve_strike_and_lots(
-                sig, settings, capital=50000.0, margin_budget=18000.0, max_risk_pct=4.5, vix=iv_pct
-            )
+            # Order Flow Limit Absorption Check (Severe Trap Veto):
+            # If the breakout candle formed a severe absorption wick (> 50% of candle range) on high volume,
+            # smart money limit orders are actively absorbing retail. Skip the trap to protect capital.
+            sig_time = sig["time"]
+            sig_idx = next((i for i, b in enumerate(eval_bars) if b["date"] >= sig_time), len(eval_bars) - 1)
+            bars_up_to_sig = eval_bars[:sig_idx + 1]
+            if len(bars_up_to_sig) >= 3:
+                try:
+                    from app.trading.crew.order_flow_agent import OrderFlowAgent
+                    import pandas as pd
+                    of_trap_checker = OrderFlowAgent(absorption_wick_ratio=0.50)
+                    is_trap, trap_side, trap_msg = of_trap_checker.detect_absorption_trap(
+                        pd.DataFrame(bars_up_to_sig), "CALL" if side == "Long" else "PUT"
+                    )
+                    if is_trap:
+                        continue
+                except Exception:
+                    pass
+
+            # Combo C Runner Target Expansion: Ensure Grade-A setups target >= 60.0 pts
+            runner_min_pts = 60.0
+            if side == "Long":
+                target_spot = max(target_spot, entry_spot + runner_min_pts)
+            else:
+                target_spot = min(target_spot, entry_spot - runner_min_pts)
+            sig["target"] = round(target_spot, 2)
+
+            # 2-OTM Dynamic Sizing (3-4 Lots Preferred):
+            # 4 lots (260 qty) for Super-Trend / tight micro risk (<= 35 pts)
+            # 3 lots (195 qty) for Standard Grade-A (35-40 pts)
+            # 2 lots (130 qty) for Wider Risk (40-55 pts)
+            is_super = risk_pts <= 35.0 or "PD" in strat_name or "Super" in strat_name
+            if is_super:
+                trade_lots = 4
+                tier_name = "Dynamic Sizing: 4 Lots (260 Qty) [Super-Trend A+]"
+            elif risk_pts <= 40.0:
+                trade_lots = 3
+                tier_name = "Dynamic Sizing: 3 Lots (195 Qty) [Standard Grade-A]"
+            else:
+                trade_lots = 2
+                tier_name = "Dynamic Sizing: 2 Lots (130 Qty) [Wider Risk 40-55 pts]"
             qty = trade_lots * lot_size
+            otm_steps = 2
 
             # Evaluate Exit with Structure Trailing
             res = staged_exit_of(eval_bars, sig, bar_minutes=bar_mins, trail_mode="structure")
@@ -253,6 +302,26 @@ def extract_all_suggested_trades(
             else:
                 status = "FLAT"
 
+            strat_u = strat_name.upper()
+            if "SWEEP" in strat_u:
+                l_pool = "BSL_SWEEP" if side.upper() == "SHORT" else "SSL_SWEEP"
+                base_tf = "30M"
+                lookout_mins = 180
+            elif "OR-30" in strat_u or "ORB" in strat_u:
+                l_pool = "BSL_EXPANSION" if side.upper() == "LONG" else "SSL_EXPANSION"
+                base_tf = "30M"
+                lookout_mins = 180
+            elif "TRENDLINE" in strat_u:
+                l_pool = "SSL_EXPANSION" if side.upper() == "SHORT" else "BSL_EXPANSION"
+                base_tf = "15M"
+                lookout_mins = 90
+            else:
+                l_pool = "BSL_EXPANSION" if side.upper() == "LONG" else "SSL_EXPANSION"
+                base_tf = "15M"
+                lookout_mins = 120
+            
+            entry_reason_str = " | ".join(sig.get("why", []))
+
             all_trades.append({
                 "Date": cur_d,
                 "Time": entry_time[11:],
@@ -279,8 +348,133 @@ def extract_all_suggested_trades(
                 "ROI %": roi_pct,
                 "Lots": trade_lots,
                 "Qty": qty,
-                "Rationale": " | ".join(sig.get("why", [])),
+                "Rationale": entry_reason_str,
+                "Liquidity Pool": l_pool,
+                "Entry Reason": entry_reason_str,
+                "Base TF": base_tf,
+                "Lookout (mins)": lookout_mins,
+                "Lookout Status": "TRIGGERED",
             })
+
+            # Combo C: Stop-and-Reverse (SAR) Momentum Inversion
+            # When an institutional level is broken and stops us out before 14:30,
+            # institutional momentum frequently runs 60-70 pts in the breakout direction.
+            # Invert the failed setup immediately with tight 25 pt risk and 65 pt target.
+            if (r_mult <= -0.8 or "Stop" in exit_reason) and exit_time[11:16] <= "14:30":
+                inv_side = "Short" if side == "Long" else "Long"
+                inv_entry = exit_price
+                inv_risk = 25.0
+                inv_target = inv_entry + 65.0 if inv_side == "Long" else inv_entry - 65.0
+                inv_stop = inv_entry - inv_risk if inv_side == "Long" else inv_entry + inv_risk
+                inv_time = exit_time
+                inv_strat = f"{strat_name} (Inversion)"
+                inv_lots = 2
+                inv_qty = inv_lots * lot_size
+
+                inv_sig = {
+                    "side": inv_side,
+                    "strategy": "inversion",
+                    "pool": f"{strat_name} Inversion [SAR Momentum Continuation]",
+                    "time": inv_time,
+                    "entry": round(inv_entry, 2),
+                    "stop": round(inv_stop, 2),
+                    "target": round(inv_target, 2),
+                    "target_basis": "SAR Momentum Continuation (+65 pts)",
+                    "risk": inv_risk,
+                    "level": round(inv_entry, 2),
+                    "why": [
+                        f"SAR Momentum Inversion: Failed {side} stopped out at {exit_price:,.2f}",
+                        f"Flipping {inv_side} to capture high-velocity continuation toward {inv_target:,.2f} with tight 25 pt risk",
+                    ],
+                    "stop_basis": f"Tight 25 pt invalidation ({inv_stop:,.2f})",
+                    "candle": {"close": inv_entry},
+                    "day_open": sig.get("day_open", inv_entry),
+                    "is_reentry": False,
+                    "attempt": 1,
+                }
+                rem_bars = [b for b in eval_bars if b["date"] >= inv_time]
+                if len(rem_bars) >= 2:
+                    inv_res = staged_exit_of(rem_bars, inv_sig, bar_minutes=bar_mins, trail_mode="structure")
+                    inv_ext_reason = inv_res["exit_reason"]
+                    inv_ext_price = inv_res["exit_price"]
+                    inv_ext_time = inv_res["exit_time"]
+                    inv_r_mult = inv_res["r_multiple"]
+
+                    if is_today and inv_ext_reason in ("End of Session", "Last bar"):
+                        latest_close = rem_bars[-1]["close"]
+                        cur_pts = latest_close - inv_entry if inv_side == "Long" else inv_entry - latest_close
+                        inv_ext_reason = "Active / Running"
+                        inv_ext_price = latest_close
+                        inv_ext_time = rem_bars[-1]["date"]
+                        inv_r_mult = round(cur_pts / inv_risk, 2)
+
+                    inv_points = inv_ext_price - inv_entry if inv_side == "Long" else inv_entry - inv_ext_price
+                    inv_strike = strike_of(inv_sig, step, otm_steps=otm_steps)
+                    inv_kind = "CE" if inv_side == "Long" else "PE"
+                    inv_opt = f"{inv_strike:g} {inv_kind}"
+
+                    inv_ent_dt = datetime.strptime(f"{cur_d} {inv_time[11:]}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+                    inv_ext_dt = datetime.strptime(f"{cur_d} {inv_ext_time[11:]}", "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+                    inv_y_ent = max((exp_dt - inv_ent_dt).total_seconds(), 300) / 86400 / 365
+                    inv_y_ext = max((exp_dt - inv_ext_dt).total_seconds(), 60) / 86400 / 365
+
+                    inv_prem_in = round(black76(inv_entry, inv_strike, inv_y_ent, iv_pct / 100, inv_kind), 2)
+                    inv_prem_out = round(black76(inv_ext_price, inv_strike, inv_y_ext, iv_pct / 100, inv_kind), 2)
+
+                    inv_cap = round(inv_prem_in * inv_qty, 0)
+                    inv_val = round(inv_prem_out * inv_qty, 0)
+
+                    inv_buy_chg = order_charges(settings, inv_kind, "BUY", inv_prem_in, inv_qty, cur_d)["total"]
+                    inv_sell_chg = order_charges(settings, inv_kind, "SELL", inv_prem_out, inv_qty, cur_d)["total"]
+                    inv_charges = round(inv_buy_chg + inv_sell_chg, 2)
+
+                    inv_pnl = round((inv_prem_out - inv_prem_in) * inv_qty - inv_charges, 0)
+                    inv_roi = round((inv_pnl / inv_cap) * 100, 1) if inv_cap > 0 else 0.0
+
+                    if inv_ext_reason == "Active / Running":
+                        inv_status = f"ACTIVE ({inv_r_mult:+.2f}R)"
+                    elif inv_r_mult >= 2.0 or inv_ext_reason == "Target":
+                        inv_status = "TARGET HIT (SAR +2.6R)"
+                    elif inv_r_mult > 0.1:
+                        inv_status = f"TRAILED (+{inv_r_mult:.2f}R)"
+                    elif inv_r_mult <= -0.9 or "Stop" in inv_ext_reason:
+                        inv_status = "STOPPED OUT (-1R)"
+                    else:
+                        inv_status = "FLAT"
+
+                    all_trades.append({
+                        "Date": cur_d,
+                        "Time": inv_time[11:],
+                        "Strategy": inv_strat,
+                        "Pool / Setup": f"{inv_sig['pool']} [Dynamic Sizing: 2 Lots ({inv_qty} Qty)]",
+                        "Side": inv_side.upper(),
+                        "Status": inv_status,
+                        "Entry Spot": round(inv_entry, 2),
+                        "Stop Spot": round(inv_stop, 2),
+                        "Target Spot": round(inv_target, 2),
+                        "Risk Pts": round(inv_risk, 2),
+                        "Exit Spot": round(inv_ext_price, 2),
+                        "Exit Time": inv_ext_time[11:],
+                        "Exit Reason": inv_ext_reason,
+                        "Points": round(inv_points, 2),
+                        "R-Multiple": round(inv_r_mult, 2),
+                        "Option": f"NIFTY {inv_opt}",
+                        "Expiry": expiry.isoformat(),
+                        "Entry Premium": inv_prem_in,
+                        "Exit Premium": inv_prem_out,
+                        "Capital Deployed": inv_cap,
+                        "Exit Value": inv_val,
+                        "Est P&L (Rs)": inv_pnl,
+                        "ROI %": inv_roi,
+                        "Lots": inv_lots,
+                        "Qty": inv_qty,
+                        "Rationale": " | ".join(inv_sig["why"]),
+                        "Liquidity Pool": "BSL_EXPANSION" if inv_side.upper() == "LONG" else "SSL_EXPANSION",
+                        "Entry Reason": " | ".join(inv_sig["why"]),
+                        "Base TF": "15M",
+                        "Lookout (mins)": 60,
+                        "Lookout Status": "TRIGGERED",
+                    })
 
     # Sort reverse chronologically (latest trade first)
     all_trades.sort(key=lambda t: (t["Date"], t["Time"]), reverse=True)
@@ -366,9 +560,9 @@ def style_worksheet(ws: openpyxl.worksheet.worksheet.Worksheet, is_dashboard: bo
                 cell.fill = zebra_fill
             cell.alignment = Alignment(vertical="center")
 
-            # Center dates, times, sides, status, expiry
+            # Center dates, times, sides, status, expiry, timeframe, liquidity tags
             header_val = ws.cell(1, cell.column).value or ""
-            if header_val in ("Date", "Time", "Side", "Status", "Exit Time", "Lots", "Qty", "Expiry"):
+            if header_val in ("Date", "Time", "Side", "Status", "Exit Time", "Lots", "Qty", "Expiry", "Base TF", "Lookout (mins)", "Lookout Status", "Liquidity Pool"):
                 cell.alignment = Alignment(horizontal="center", vertical="center")
             elif header_val in ("Entry Spot", "Stop Spot", "Target Spot", "Exit Spot", "Risk Pts", "Points", "Entry Premium", "Exit Premium"):
                 cell.number_format = "#,##0.00"
@@ -520,6 +714,127 @@ def build_strategy_sheet(wb: openpyxl.Workbook, title: str, trades: list[dict]):
     style_worksheet(ws)
 
 
+def normalize_live_trade(t: dict) -> dict:
+    """Normalize any live executed trade dictionary to standard ledger format."""
+    # Date & Time
+    d = str(t.get("Date") or t.get("date") or "")
+    tm = str(t.get("Time") or t.get("time") or "")
+    if not tm and "timestamp" in t:
+        ts = str(t["timestamp"])
+        if len(ts) >= 16:
+            d = d or ts[:10]
+            tm = ts[11:16]
+    if not tm and "entry_time" in t:
+        et = str(t["entry_time"])
+        if len(et) >= 16:
+            d = d or et[:10]
+            tm = et[11:16]
+
+    strat = str(t.get("Strategy") or t.get("strategy") or t.get("strat_name") or "Live Trade").strip()
+    if "OR-30" in strat or "OR" in strat:
+        strat = "Breakout & Retest (OR-30)"
+    elif "PD" in strat:
+        strat = "Breakout & Retest (PD)"
+    elif "Trendline" in strat:
+        strat = "Trendline Reversal"
+    elif "Sweep" in strat:
+        strat = "Liquidity Sweep"
+    pool = str(t.get("Pool / Setup") or (t.get("sig", {}).get("pool") if isinstance(t.get("sig"), dict) else "") or strat)
+    side = str(t.get("Side") or (t.get("sig", {}).get("side") if isinstance(t.get("sig"), dict) else "") or t.get("direction") or "LONG").upper()
+    if side == "CALL":
+        side = "LONG"
+    elif side == "PUT":
+        side = "SHORT"
+
+    r_mult = float(t.get("R-Multiple") or t.get("realized_r") or t.get("r_multiple") or 0.0)
+    pnl = float(t.get("Est P&L (Rs)") or t.get("pnl_rupees") or 0.0)
+    pts = float(t.get("Points") or t.get("realized_points") or 0.0)
+
+    # Status
+    status = str(t.get("Status") or "")
+    if not status:
+        if r_mult >= 2.5:
+            status = f"TARGET HIT (+{r_mult:.2f}R)"
+        elif r_mult > 0.05:
+            status = f"TRAILED (+{r_mult:.2f}R)"
+        elif r_mult <= -0.8:
+            status = "STOPPED OUT (-1R)"
+        else:
+            status = "FLAT"
+
+    ent_spot = float(t.get("Entry Spot") or t.get("entry_price") or (t.get("sig", {}).get("entry") if isinstance(t.get("sig"), dict) else 0.0) or 0.0)
+    stp_spot = float(t.get("Stop Spot") or t.get("stop_loss") or (t.get("sig", {}).get("stop") if isinstance(t.get("sig"), dict) else 0.0) or 0.0)
+    tgt_spot = float(t.get("Target Spot") or t.get("target_price") or (t.get("sig", {}).get("target") if isinstance(t.get("sig"), dict) else 0.0) or 0.0)
+    risk_pts = float(t.get("Risk Pts") or t.get("risk_points") or (t.get("sig", {}).get("risk") if isinstance(t.get("sig"), dict) else 0.0) or 0.0)
+    ext_spot = float(t.get("Exit Spot") or t.get("exit_price") or 0.0)
+    ext_time = str(t.get("Exit Time") or "")
+    if not ext_time and "exit_timestamp" in t:
+        xts = str(t["exit_timestamp"])
+        ext_time = xts[11:16] if len(xts) >= 16 else xts
+    ext_reason = str(t.get("Exit Reason") or t.get("exit_reason") or "Closed")
+
+    lots = int(t.get("Lots") or t.get("lots") or (t.get("plan", {}).get("lots") if isinstance(t.get("plan"), dict) else 2) or 2)
+    qty = int(t.get("Qty") or t.get("quantity") or (t.get("plan", {}).get("quantity") if isinstance(t.get("plan"), dict) else lots * 65) or lots * 65)
+    opt = str(t.get("Option") or t.get("suggested_strike") or (f"NIFTY {t.get('plan', {}).get('option')}" if isinstance(t.get("plan"), dict) else "") or "NIFTY")
+    exp = str(t.get("Expiry") or (t.get("plan", {}).get("expiry") if isinstance(t.get("plan"), dict) else "") or "")
+    prem_in = float(t.get("Entry Premium") or (t.get("plan", {}).get("entry_premium") if isinstance(t.get("plan"), dict) else 0.0) or 0.0)
+    prem_out = float(t.get("Exit Premium") or 0.0)
+    cap = float(t.get("Capital Deployed") or (t.get("plan", {}).get("capital_deployed") if isinstance(t.get("plan"), dict) else prem_in * qty) or prem_in * qty)
+    val = float(t.get("Exit Value") or (cap + pnl) or 0.0)
+    roi = float(t.get("ROI %") or ((pnl / cap * 100) if cap > 0 else 0.0))
+    rat = str(t.get("Rationale") or t.get("rationale") or "")
+
+    l_pool = str(t.get("Liquidity Pool") or t.get("liquidity_pool") or "")
+    if not l_pool or l_pool == "UNSPECIFIED":
+        if "SWEEP" in strat.upper():
+            l_pool = "BSL_SWEEP" if side == "SHORT" else "SSL_SWEEP"
+        elif "OR-30" in strat.upper() or "ORB" in strat.upper():
+            l_pool = "BSL_EXPANSION" if side == "LONG" else "SSL_EXPANSION"
+        elif "TRENDLINE" in strat.upper():
+            l_pool = "SSL_EXPANSION" if side == "SHORT" else "BSL_EXPANSION"
+        else:
+            l_pool = "BSL_EXPANSION" if side == "LONG" else "SSL_EXPANSION"
+
+    base_tf = str(t.get("Base TF") or t.get("base_timeframe") or ("30M" if ("OR-30" in strat or "Sweep" in strat) else "15M"))
+    lookout_mins = int(t.get("Lookout (mins)") or t.get("lookout_duration_mins") or (180 if "30" in base_tf else 120))
+    lookout_status = str(t.get("Lookout Status") or t.get("lookout_status") or "TRIGGERED")
+    entry_reason = str(t.get("Entry Reason") or t.get("entry_reason") or rat)
+
+    return {
+        "Date": d,
+        "Time": tm,
+        "Strategy": strat,
+        "Pool / Setup": pool,
+        "Side": side,
+        "Status": status,
+        "Entry Spot": ent_spot,
+        "Stop Spot": stp_spot,
+        "Target Spot": tgt_spot,
+        "Risk Pts": risk_pts,
+        "Exit Spot": ext_spot,
+        "Exit Time": ext_time,
+        "Exit Reason": ext_reason,
+        "Points": pts,
+        "R-Multiple": r_mult,
+        "Option": opt,
+        "Expiry": exp,
+        "Entry Premium": prem_in,
+        "Exit Premium": prem_out,
+        "Capital Deployed": cap,
+        "Exit Value": val,
+        "Est P&L (Rs)": pnl,
+        "ROI %": roi,
+        "Lots": lots,
+        "Qty": qty,
+        "Rationale": rat,
+        "Liquidity Pool": l_pool,
+        "Entry Reason": entry_reason,
+        "Base TF": base_tf,
+        "Lookout (mins)": lookout_mins,
+        "Lookout Status": lookout_status,
+    }
+
+
 def merge_live_executed_trades(trades: list[dict]) -> list[dict]:
     """Merges real-time bot executed trades from trades/live_executed_trades.json into the trade ledger.
     Prioritizes actual live executed bot trades over theoretical 5m scans for the same day.
@@ -529,8 +844,9 @@ def merge_live_executed_trades(trades: list[dict]) -> list[dict]:
         return trades
     try:
         import json
-        exec_trades = json.loads(exec_file.read_text())
-        exec_dates = {str(et.get("Date")) for et in exec_trades}
+        raw_exec = json.loads(exec_file.read_text())
+        exec_trades = [normalize_live_trade(et) for et in raw_exec]
+        exec_dates = {str(et.get("Date")) for et in exec_trades if et.get("Date")}
         # For dates with real live bot execution, replace theoretical scans with the actual live trades
         filtered_trades = [t for t in trades if str(t.get("Date")) not in exec_dates]
         merged = filtered_trades + exec_trades

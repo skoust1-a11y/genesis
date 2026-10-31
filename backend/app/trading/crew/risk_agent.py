@@ -170,6 +170,15 @@ class RiskAgent:
                 )
             lots = of_signal.approved_lots
 
+        # 5. Combo C Dynamic Risk Sizing Guardrail:
+        # Scale down to 2 lots if stop is wider (40-55 pts) to cap loss <= Rs 3,500;
+        # Use 3 lots on tight risk (<= 40 pts) for asymmetric upside.
+        if not is_super_trend:
+            if risk_points > 40.0:
+                lots = min(lots, 2)
+            elif risk_points <= 40.0 and self.default_lots is not None:
+                lots = max(lots, self.default_lots)
+
         qty = lots * self.lot_qty
         approx_option_risk = risk_points * 0.5 * qty
 

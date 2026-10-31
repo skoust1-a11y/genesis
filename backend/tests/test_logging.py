@@ -145,8 +145,8 @@ def test_request_logging_middleware(tmp_path: Path) -> None:
     configure_logging(log_level="INFO", log_file=str(log_file))
 
     client = TestClient(app)
-    response = client.get("/api/notifications")
-    assert response.status_code in {200, 401}  # Valid response from route
+    response = client.get("/api/health")
+    assert response.status_code == 200
 
     for h in logging.getLogger().handlers:
         h.flush()
@@ -155,4 +155,4 @@ def test_request_logging_middleware(tmp_path: Path) -> None:
 
     assert log_file.exists()
     content = log_file.read_text(encoding="utf-8")
-    assert "GET /api/notifications ->" in content
+    assert "GET /api/health ->" in content

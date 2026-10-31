@@ -26,6 +26,11 @@ class SessionLevels:
     s1: float
     or30_high: float | None = None
     or30_low: float | None = None
+    poc: float | None = None
+    vah: float | None = None
+    val: float | None = None
+    call_oi_wall: float | None = None
+    put_oi_wall: float | None = None
     all_key_levels: list[float] = field(default_factory=list)
 
 
@@ -36,8 +41,9 @@ class LevelsAgent:
         self,
         df_daily: pd.DataFrame,
         df_intraday_today: pd.DataFrame | None = None,
+        option_contracts: list[dict] | None = None,
     ) -> SessionLevels:
-        """Extract PDH, PDL, PDC, Pivots, and OR-30 levels."""
+        """Extract PDH, PDL, PDC, Pivots, OR-30, and Order Flow Volume Profile (POC/VAH/VAL) levels."""
         if len(df_daily) < 2:
             # Fallback default levels if insufficient history
             return SessionLevels(
@@ -74,6 +80,45 @@ class LevelsAgent:
         if or30_low:
             levels_set.add(round(or30_low, 1))
 
+        # Order Flow Volume Profile (POC, VAH, VAL)
+        poc = None
+        vah = None
+        val = None
+        if df_intraday_today is not None and len(df_intraday_today) >= 3:
+            try:
+                from app.trading.crew.order_flow_agent import OrderFlowAgent
+                of_agent = OrderFlowAgent()
+                vp = of_agent.calculate_volume_profile(df_intraday_today, step=10.0)
+                if vp:
+                    poc = vp.get("poc")
+                    vah = vp.get("vah")
+                    val = vp.get("val")
+                    if poc:
+                        levels_set.add(poc)
+                    if vah:
+                        levels_set.add(vah)
+                    if val:
+                        levels_set.add(val)
+            except Exception:
+                pass
+
+        # Option Chain Open Interest Walls
+        call_wall = None
+        put_wall = None
+        if option_contracts:
+            try:
+                from app.trading.crew.order_flow_agent import OrderFlowAgent
+                of_agent = OrderFlowAgent()
+                oi_res = of_agent.extract_option_oi_walls(option_contracts)
+                call_wall = oi_res.get("call_oi_wall")
+                put_wall = oi_res.get("put_oi_wall")
+                if call_wall:
+                    levels_set.add(call_wall)
+                if put_wall:
+                    levels_set.add(put_wall)
+            except Exception:
+                pass
+
         # Add nearby round 50-point psychological numbers
         base_round = int(round(pivot / 50.0) * 50)
         for offset in [-150, -100, -50, 0, 50, 100, 150]:
@@ -88,5 +133,10 @@ class LevelsAgent:
             s1=round(s1, 2),
             or30_high=round(or30_high, 2) if or30_high else None,
             or30_low=round(or30_low, 2) if or30_low else None,
+            poc=poc,
+            vah=vah,
+            val=val,
+            call_oi_wall=call_wall,
+            put_oi_wall=put_wall,
             all_key_levels=sorted(list(levels_set)),
         )

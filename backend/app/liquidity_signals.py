@@ -52,7 +52,7 @@ from app.trading.option_pnl import black76, plan_pnl
 # ponytail: Yahoo bars are a few minutes delayed and the index has no volume, so VWAP comes from the NIFTYBEES ETF.
 # Switch to broker bars (Groww/Kite) and NIFTY futures VWAP for real-time signals.
 INDEX, VWAP_PROXY = "^NSEI", "NIFTYBEES.NS"
-SWING, R_MULT, OTM_STEPS, FIRST_ENTRY, LAST_ENTRY = 2, 3.0, 1, "09:30", "14:30"
+SWING, R_MULT, OTM_STEPS, FIRST_ENTRY, LAST_ENTRY = 2, 3.0, 0, "09:30", "14:30"
 FRESH = timedelta(minutes=15)  # older triggers are reported as missed, never sent: no chasing a late entry
 MIN_RISK = 30  # pts: over 2016-2026 setups with a closer stop earned nothing after costs
 RISK_PCT, LOSS_STREAK, BREAK_DAYS, EXIT = 5, 3, 3, "15:10"
@@ -190,11 +190,12 @@ def get_dynamic_spot_target(
 
 
 def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: float,
-         min_risk: float = MIN_RISK, stop_at: str = "sweep", min_sweep: float = 2.0,
+         min_risk: float = MIN_RISK, stop_at: str = "swing", min_sweep: float = 2.0,
          require_trendline: bool = False, skip_lunch: bool | str = "conditional",
-         dynamic_targets: bool = False, spot_levels: list[float] | None = None) -> list[dict]:  # fmt: skip
+         dynamic_targets: bool = False, spot_levels: list[float] | None = None,
+         fast_reclaim: bool = False) -> list[dict]:  # fmt: skip
     """Entries in one session's completed 5m `bars`; `above_vwap[date]` is whether that bar closed above VWAP.
-    `stop_at` "sweep" (default) puts every stop 5 pts past the sweep low / raid high for tight 25-35 pt institutional risk.
+    `stop_at` "sweep" puts every stop 5 pts past the sweep low / raid high instead of at the last swing.
     `min_sweep` requires sweep depth >= min_sweep (default 2.0 pts) past PDH/PDL to filter noise.
     `require_trendline` enforces breakdown below ascending trendline (Short) or breakout above descending trendline (Long).
     `skip_lunch` avoids entries between 11:30 and 13:00 IST to prevent lunch lull chop.
@@ -218,7 +219,7 @@ def scan(bars: list[dict], above_vwap: dict[str, bool | None], pdh: float, pdl: 
             inside = c > pdl and c > day_open if long else c < pdh and c < day_open
 
             # Immediate 5M Wick Reclaim (fast institutional entry, tight stop)
-            if stage == 1 and inside and above_vwap.get(b["date"]) == long:
+            if fast_reclaim and stage == 1 and inside and above_vwap.get(b["date"]) == long:
                 stage = 2 if long else 3
                 why.append(f"{closes_at[11:]} immediate reclaim: 5m close {c:,.2f} snapped back {'above PDL' if long else 'below PDH'}")
 
@@ -508,6 +509,105 @@ def scan_retest(
                             break
     return out
 
+
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+
+@dataclass
+class DualTrendlineStructure:
+    """Represents a paired Upper Resistance and Lower Support trendline geometry."""
+    pattern: Literal["SYMMETRICAL_TRIANGLE", "ASCENDING_TRIANGLE", "DESCENDING_TRIANGLE", "PARALLEL_CHANNEL", "OPEN"]
+    upper_slope: float
+    lower_slope: float
+    span_pts: float
+    base_height_pts: float
+    is_in_consolidation: bool
+    apex_index: int | None = None
+    apex_price: float | None = None
+
+
+@dataclass
+class DynamicLookoutWindow:
+    """Dynamic Timeframe Lookout Window (4x to 6x base candle duration)."""
+    setup_name: str
+    base_tf: str = "30M"  # "30M", "15M", "5M"
+    multiplier: float = 5.0  # 4x to 6x
+    detected_time_str: str = ""
+
+    @property
+    def max_lookout_minutes(self) -> int:
+        mins = 30 if "30" in self.base_tf else (15 if "15" in self.base_tf else 5)
+        return int(round(mins * self.multiplier))
+
+    def is_valid_window(self, entry_time_str: str) -> bool:
+        if not self.detected_time_str or not entry_time_str:
+            return True
+        try:
+            t0 = datetime.strptime(self.detected_time_str[-5:], "%H:%M")
+            t1 = datetime.strptime(entry_time_str[-5:], "%H:%M")
+            elapsed = (t1 - t0).total_seconds() / 60.0
+            return 0.0 <= elapsed <= self.max_lookout_minutes
+        except Exception:
+            return True
+
+
+def detect_dual_trendline_squeeze(bars: list[dict], min_bars: int = 10) -> DualTrendlineStructure:
+    """Simultaneously fits upper resistance and lower support to detect Triangles and Consolidation Squeezes."""
+    if len(bars) < min_bars:
+        return DualTrendlineStructure(
+            pattern="OPEN", upper_slope=0.0, lower_slope=0.0, span_pts=999.0, base_height_pts=0.0, is_in_consolidation=False
+        )
+
+    high_pivs = pivots(bars, "high")
+    low_pivs = pivots(bars, "low")
+
+    if len(high_pivs) < 2 or len(low_pivs) < 2:
+        return DualTrendlineStructure(
+            pattern="OPEN", upper_slope=0.0, lower_slope=0.0, span_pts=999.0, base_height_pts=0.0, is_in_consolidation=False
+        )
+
+    # Upper trendline slope (Resistance)
+    hx1, hx2 = high_pivs[-2], high_pivs[-1]
+    hy1, hy2 = bars[hx1]["high"], bars[hx2]["high"]
+    upper_slope = (hy2 - hy1) / max(1, hx2 - hx1)
+    upper_val = hy2 + upper_slope * (len(bars) - 1 - hx2)
+
+    # Lower trendline slope (Support)
+    lx1, lx2 = low_pivs[-2], low_pivs[-1]
+    ly1, ly2 = bars[lx1]["low"], bars[lx2]["low"]
+    lower_slope = (ly2 - ly1) / max(1, lx2 - lx1)
+    lower_val = ly2 + lower_slope * (len(bars) - 1 - lx2)
+
+    span = upper_val - lower_val
+    base_height = abs(hy1 - ly1)
+
+    # Triangle pattern classification
+    pattern: Literal["SYMMETRICAL_TRIANGLE", "ASCENDING_TRIANGLE", "DESCENDING_TRIANGLE", "PARALLEL_CHANNEL", "OPEN"] = "OPEN"
+    is_squeeze = False
+
+    if upper_slope < -0.1 and lower_slope > 0.1:
+        pattern = "SYMMETRICAL_TRIANGLE"
+        is_squeeze = span < 40.0
+    elif abs(upper_slope) <= 0.1 and lower_slope > 0.15:
+        pattern = "ASCENDING_TRIANGLE"
+        is_squeeze = span < 35.0
+    elif upper_slope < -0.15 and abs(lower_slope) <= 0.1:
+        pattern = "DESCENDING_TRIANGLE"
+        is_squeeze = span < 35.0
+    elif abs(upper_slope - lower_slope) < 0.15 and (abs(upper_slope) > 0.2):
+        pattern = "PARALLEL_CHANNEL"
+        is_squeeze = False
+
+    return DualTrendlineStructure(
+        pattern=pattern,
+        upper_slope=round(upper_slope, 3),
+        lower_slope=round(lower_slope, 3),
+        span_pts=round(span, 1),
+        base_height_pts=round(base_height, 1),
+        is_in_consolidation=is_squeeze,
+    )
 
 
 def scan_trendline_reversal(
@@ -953,14 +1053,20 @@ def resolve_strike_and_lots(
     kind = "CE" if s["side"] == "Long" else "PE"
     is_super = is_super_trend_setup(s, vix=vix)
 
-    # Active trading strictly trades 2-OTM contracts (+2 strikes / 100 pts)
+    # Combo C Dynamic Risk Sizing:
+    # 2-OTM contracts (+2 strikes / 100 pts)
     target_otm = 2
+    risk_pts = float(s.get("risk", 0.0) or abs(s.get("entry", 0.0) - s.get("stop", 0.0)))
+
     if is_super:
         preferred_lots = 4
-        tier_name = "Preferred Lot Size: 4 Lots (260 Qty) [Super-Trend]"
+        tier_name = "Dynamic Sizing: 4 Lots (260 Qty) [Super-Trend A+ 2-OTM]"
+    elif risk_pts > 40.0:
+        preferred_lots = 2
+        tier_name = "Dynamic Sizing: 2 Lots (130 Qty) [Wider Risk 40-55 pts 2-OTM]"
     else:
         preferred_lots = 3
-        tier_name = "Preferred Lot Size: 3 Lots (195 Qty)"
+        tier_name = "Dynamic Sizing: 3 Lots (195 Qty) [Standard Grade-A 2-OTM]"
 
     exp = weekly_expiry(date.fromisoformat(s["time"][:10]), settings)
     left = datetime.combine(exp, dtime.fromisoformat(settings.market_close), IST) - datetime.strptime(
@@ -976,10 +1082,10 @@ def resolve_strike_and_lots(
     lot_risk = max(0.5, (entry_prem - stop_prem)) * lot_size
     max_risk_allowed = capital * (max_risk_pct / 100.0)
 
-    lots_by_margin = int(margin_budget // lot_cost) if lot_cost > 0 else 3
-    lots_by_risk = int(max_risk_allowed // lot_risk) if lot_risk > 0 else 3
+    lots_by_margin = int(margin_budget // lot_cost) if lot_cost > 0 else 2
+    lots_by_risk = int(max_risk_allowed // lot_risk) if lot_risk > 0 else 2
 
-    final_lots = max(3, min(preferred_lots, lots_by_margin, lots_by_risk))
+    final_lots = max(1, min(preferred_lots, lots_by_margin, lots_by_risk))
     return target_otm, final_lots, tier_name
 
 
@@ -1051,20 +1157,13 @@ def estimated_plan(
     settings: Settings,
     iv_pct: float,
     expiry: date | None = None,
-    lots: int | None = None,
-    otm_steps: int | None = None,
+    lots: int = 2,
+    otm_steps: int = OTM_STEPS,
 ) -> dict:
     """option_plan() without a live chain: the strike_of() option to `expiry` (default: the weekly one) priced by
     Black-76 at `iv_pct` (India VIX, a 30-day ATM IV), forward = spot. Same shape as plan_pnl() with `quote` None."""
     step, lot = settings.strike_step("NIFTY") or 50, settings.lot_size("NIFTY") or 65
     tier_name = None
-    if lots is None or otm_steps is None:
-        dyn_otm, dyn_lots, tier_name = resolve_strike_and_lots(s, settings, vix=iv_pct)
-        if otm_steps is None:
-            otm_steps = dyn_otm
-        if lots is None:
-            lots = dyn_lots
-
     total_qty = lot * lots
     kind, strike = "CE" if s["side"] == "Long" else "PE", strike_of(s, step, otm_steps=otm_steps)
     expiry = expiry or weekly_expiry(date.fromisoformat(s["time"][:10]), settings)

@@ -187,3 +187,113 @@ class OrderFlowAgent:
             tranche_2_lots=tranche_2,
             rationale=rationale,
         )
+
+    def calculate_volume_profile(
+        self,
+        df_intraday: pd.DataFrame,
+        step: float = 10.0,
+    ) -> dict[str, float]:
+        """Compute Session Volume Profile: Point of Control (POC), Value Area High (VAH) & Value Area Low (VAL)."""
+        if len(df_intraday) < 3 or "volume" not in df_intraday.columns:
+            return {}
+
+        price_bins: dict[float, float] = {}
+        for _, row in df_intraday.iterrows():
+            c_low = float(row["low"])
+            c_high = float(row["high"])
+            vol = float(row.get("volume", 0.0))
+            if vol <= 0 or c_high <= c_low:
+                continue
+
+            bin_low = round(c_low / step) * step
+            bin_high = round(c_high / step) * step
+            num_bins = max(1, int(round((bin_high - bin_low) / step)) + 1)
+            vol_per_bin = vol / num_bins
+
+            curr_b = bin_low
+            while curr_b <= bin_high + 0.1:
+                price_bins[curr_b] = price_bins.get(curr_b, 0.0) + vol_per_bin
+                curr_b += step
+
+        if not price_bins:
+            return {}
+
+        # 1. Point of Control (POC): Price bin with peak volume
+        poc = max(price_bins.items(), key=lambda x: x[1])[0]
+
+        # 2. Value Area (VAH / VAL): 70% of total session volume
+        total_vol = sum(price_bins.values())
+        target_vol = total_vol * 0.70
+
+        sorted_bins = sorted(price_bins.items(), key=lambda x: x[0])
+        poc_idx = next(i for i, b in enumerate(sorted_bins) if b[0] == poc)
+
+        accumulated_vol = sorted_bins[poc_idx][1]
+        up_idx = poc_idx
+        dn_idx = poc_idx
+
+        while accumulated_vol < target_vol and (up_idx + 1 < len(sorted_bins) or dn_idx - 1 >= 0):
+            next_up_vol = sorted_bins[up_idx + 1][1] if up_idx + 1 < len(sorted_bins) else 0.0
+            next_dn_vol = sorted_bins[dn_idx - 1][1] if dn_idx - 1 >= 0 else 0.0
+
+            if next_up_vol >= next_dn_vol and up_idx + 1 < len(sorted_bins):
+                up_idx += 1
+                accumulated_vol += next_up_vol
+            elif dn_idx - 1 >= 0:
+                dn_idx -= 1
+                accumulated_vol += next_dn_vol
+            else:
+                break
+
+        vah = sorted_bins[up_idx][0]
+        val = sorted_bins[dn_idx][0]
+
+        return {
+            "poc": round(poc, 2),
+            "vah": round(vah, 2),
+            "val": round(val, 2),
+        }
+
+    def extract_option_oi_walls(
+        self,
+        contracts: list[dict[str, Any]],
+    ) -> dict[str, float]:
+        """Extract Option Chain Open Interest Walls (Max Call OI & Max Put OI) and live Put-Call Ratio."""
+        if not contracts:
+            return {}
+
+        max_ce_oi = -1.0
+        max_pe_oi = -1.0
+        call_wall = None
+        put_wall = None
+        total_ce_oi = 0.0
+        total_pe_oi = 0.0
+
+        for r in contracts:
+            strike = float(r.get("strike", r.get("strikePrice", 0.0)))
+            if strike > 100000:
+                strike = strike / 100.0  # normalize Groww paise
+
+            ce_oi = float(r.get("ce", {}).get("open_interest") or r.get("ce", {}).get("liveData", {}).get("openInterest") or 0.0)
+            pe_oi = float(r.get("pe", {}).get("open_interest") or r.get("pe", {}).get("liveData", {}).get("openInterest") or 0.0)
+
+            total_ce_oi += ce_oi
+            total_pe_oi += pe_oi
+
+            if ce_oi > max_ce_oi:
+                max_ce_oi = ce_oi
+                call_wall = strike
+
+            if pe_oi > max_pe_oi:
+                max_pe_oi = pe_oi
+                put_wall = strike
+
+        pcr = round(total_pe_oi / total_ce_oi, 2) if total_ce_oi > 0 else 1.0
+
+        res: dict[str, float] = {"pcr": pcr}
+        if call_wall is not None:
+            res["call_oi_wall"] = call_wall
+        if put_wall is not None:
+            res["put_oi_wall"] = put_wall
+
+        return res

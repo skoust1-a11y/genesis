@@ -33,17 +33,20 @@ def get_connection() -> sqlite3.Connection:
 def init_db():
     """Initialize the trade store database schema and indices."""
     with get_connection() as conn:
+        # Check if table exists with old restrictive CHECK constraint
+        schema_row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='live_and_forward_trades'"
+        ).fetchone()
+        if schema_row and "CHECK(strategy IN" in schema_row[0]:
+            # Migrate to unrestricted strategy column
+            conn.execute("DROP TABLE IF EXISTS live_and_forward_trades;")
+
         conn.execute("""
             CREATE TABLE IF NOT EXISTS live_and_forward_trades (
                 trade_id TEXT PRIMARY KEY,
                 date TEXT NOT NULL,
                 time TEXT NOT NULL,
-                strategy TEXT NOT NULL CHECK(strategy IN (
-                    'Breakout & Retest (OR-30)',
-                    'Breakout & Retest (PD)',
-                    'Trendline Reversal',
-                    'Liquidity Sweep'
-                )),
+                strategy TEXT NOT NULL,
                 setup TEXT NOT NULL,
                 side TEXT NOT NULL CHECK(side IN ('LONG', 'SHORT')),
                 status TEXT NOT NULL,
@@ -68,13 +71,32 @@ def init_db():
                 qty INTEGER NOT NULL DEFAULT 260,
                 rationale TEXT,
                 source TEXT DEFAULT 'live',
+                liquidity_pool TEXT DEFAULT 'UNSPECIFIED',
+                entry_reason TEXT DEFAULT '',
+                base_timeframe TEXT DEFAULT '15M',
+                lookout_duration_mins INTEGER DEFAULT 120,
+                lookout_status TEXT DEFAULT 'TRIGGERED',
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
         """)
+        # Safe migrations for existing databases
+        existing_cols = {row["name"] for row in conn.execute("PRAGMA table_info(live_and_forward_trades);").fetchall()}
+        if "liquidity_pool" not in existing_cols:
+            conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN liquidity_pool TEXT DEFAULT 'UNSPECIFIED';")
+        if "entry_reason" not in existing_cols:
+            conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN entry_reason TEXT DEFAULT '';")
+        if "base_timeframe" not in existing_cols:
+            conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN base_timeframe TEXT DEFAULT '15M';")
+        if "lookout_duration_mins" not in existing_cols:
+            conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN lookout_duration_mins INTEGER DEFAULT 120;")
+        if "lookout_status" not in existing_cols:
+            conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN lookout_status TEXT DEFAULT 'TRIGGERED';")
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_date ON live_and_forward_trades(date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy ON live_and_forward_trades(strategy);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_status ON live_and_forward_trades(status);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_liquidity_pool ON live_and_forward_trades(liquidity_pool);")
 
 
 def make_trade_id(date_str: str, time_str: str, strategy: str) -> str:
@@ -88,12 +110,18 @@ def upsert_trade(trade: dict[str, Any]) -> str:
     init_db()
     d_str = str(trade.get("Date") or trade.get("date") or "")[:10]
     t_str = str(trade.get("Time") or trade.get("time") or "")
-    strat = str(trade.get("Strategy") or trade.get("strategy") or "")
+    strat = str(trade.get("Strategy") or trade.get("strategy") or "").strip()
 
     # Normalize strategy name
-    if strat == "Breakout & Retest":
+    if "Breakout & Retest (OR-30)" in strat or "OR-30" in strat or "ORB" in strat:
+        strat = "Breakout & Retest (OR-30)"
+    elif "Breakout & Retest (PD)" in strat or "PD" in strat or strat == "Breakout & Retest":
         pool = str(trade.get("Pool / Setup") or trade.get("setup") or "")
         strat = "Breakout & Retest (OR-30)" if "OR" in pool else "Breakout & Retest (PD)"
+    elif "Trendline" in strat:
+        strat = "Trendline Reversal"
+    elif "Sweep" in strat:
+        strat = "Liquidity Sweep"
 
     trade_id = str(trade.get("trade_id") or make_trade_id(d_str, t_str, strat))
 
@@ -127,6 +155,37 @@ def upsert_trade(trade: dict[str, Any]) -> str:
     rationale = str(trade.get("Rationale") or trade.get("rationale") or "")
     source = str(trade.get("source") or "live")
 
+    # Dynamic Liquidity & Timeframe Extraction
+    liquidity_pool = str(trade.get("Liquidity Pool") or trade.get("liquidity_pool") or "").strip()
+    if not liquidity_pool or liquidity_pool == "UNSPECIFIED":
+        if "PDH" in setup or "OR-30H" in setup or "PDH" in rationale or "Day High" in rationale:
+            liquidity_pool = "BSL_SWEEP" if side == "SHORT" else "BSL_EXPANSION"
+        elif "PDL" in setup or "OR-30L" in setup or "PDL" in rationale or "Day Low" in rationale:
+            liquidity_pool = "SSL_SWEEP" if side == "LONG" else "SSL_EXPANSION"
+        elif "Waterfall" in setup or "Macro Breakdown" in setup:
+            liquidity_pool = "SSL_EXPANSION"
+        elif "Trendline" in strat or "Trendline" in setup:
+            liquidity_pool = "BSL_REVERSAL" if side == "SHORT" else "SSL_REVERSAL"
+        else:
+            liquidity_pool = "BSL_EXPANSION" if side == "LONG" else "SSL_EXPANSION"
+
+    entry_reason = str(trade.get("Entry Reason") or trade.get("entry_reason") or "").strip()
+    if not entry_reason:
+        if liquidity_pool == "BSL_SWEEP":
+            entry_reason = f"BUY PE: Swept resting Buy-Side Liquidity above {setup.split()[0] if setup else 'high'}; trapped breakout buyers absorbed by institutional selling."
+        elif liquidity_pool == "SSL_SWEEP":
+            entry_reason = f"BUY CE: Swept resting Sell-Side Liquidity below {setup.split()[0] if setup else 'low'}; trapped panic sellers absorbed by institutional buyers."
+        elif liquidity_pool in ("BSL_EXPANSION", "BSL_REVERSAL") and side == "LONG":
+            entry_reason = f"BUY CE: Clean displacement & bullish expansion holding above VWAP and dynamic support."
+        elif liquidity_pool in ("SSL_EXPANSION", "BSL_REVERSAL") and side == "SHORT":
+            entry_reason = f"BUY PE: Clean breakdown & aggressive institutional market selling below dynamic resistance."
+        else:
+            entry_reason = rationale
+
+    base_tf = str(trade.get("Base Timeframe") or trade.get("base_timeframe") or ("30M" if "OR" in strat or "30" in strat else "15M"))
+    lookout_mins = int(trade.get("Lookout Duration") or trade.get("lookout_duration_mins") or (180 if "30M" in base_tf else 90))
+    lookout_stat = str(trade.get("Lookout Status") or trade.get("lookout_status") or "TRIGGERED")
+
     with get_connection() as conn:
         conn.execute("""
             INSERT INTO live_and_forward_trades (
@@ -135,14 +194,18 @@ def upsert_trade(trade: dict[str, Any]) -> str:
                 exit_spot, exit_time, exit_reason, points, r_multiple,
                 option_contract, expiry, entry_premium, exit_premium,
                 capital_deployed, exit_value, est_pnl_inr, roi_pct,
-                lots, qty, rationale, source, updated_at
+                lots, qty, rationale, source,
+                liquidity_pool, entry_reason, base_timeframe,
+                lookout_duration_mins, lookout_status, updated_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
-                ?, ?, ?, ?, datetime('now')
+                ?, ?, ?, ?,
+                ?, ?, ?,
+                ?, ?, datetime('now')
             )
             ON CONFLICT(trade_id) DO UPDATE SET
                 status = excluded.status,
@@ -156,6 +219,11 @@ def upsert_trade(trade: dict[str, Any]) -> str:
                 est_pnl_inr = excluded.est_pnl_inr,
                 roi_pct = excluded.roi_pct,
                 rationale = excluded.rationale,
+                liquidity_pool = excluded.liquidity_pool,
+                entry_reason = excluded.entry_reason,
+                base_timeframe = excluded.base_timeframe,
+                lookout_duration_mins = excluded.lookout_duration_mins,
+                lookout_status = excluded.lookout_status,
                 updated_at = datetime('now');
         """, (
             trade_id, d_str, t_str, strat, setup, side, status,
@@ -163,7 +231,9 @@ def upsert_trade(trade: dict[str, Any]) -> str:
             exit_spot, exit_time, exit_reason, points, r_mult,
             opt, expiry, entry_prem, exit_prem,
             capital, exit_val, pnl, roi,
-            lots, qty, rationale, source
+            lots, qty, rationale, source,
+            liquidity_pool, entry_reason, base_tf,
+            lookout_mins, lookout_stat
         ))
     return trade_id
 

@@ -89,6 +89,11 @@ class JournalAgent:
             "suggested_strike": signal.suggested_strike,
             "timestamp": signal.timestamp,
             "rationale": signal.rationale,
+            "entry_reason": signal.rationale,
+            "base_timeframe": getattr(signal, "base_timeframe", "30M"),
+            "liquidity_pool": getattr(signal, "liquidity_pool", "UNSPECIFIED"),
+            "lookout_duration_mins": getattr(signal, "lookout_duration_mins", 120),
+            "lookout_status": getattr(signal, "lookout_status", "TRIGGERED"),
             "milestones_hit": set(),
             "status": "OPEN",
         }
@@ -145,11 +150,12 @@ class JournalAgent:
         with open(exec_file, "w", encoding="utf-8") as f:
             json.dump(executed, f, indent=2)
 
-        # Trigger SQLite sync if trade_store available
+        # Upsert directly to SQLite SSOT
         try:
-            from app.storage import trade_store
-            trade_store.sync_from_existing_sources()
+            from app.db import trade_store
+            trade_store.upsert_trade(trade_to_save)
         except Exception as e:
-            logger.debug(f"SQLite sync notice: {e}")
+            logger.debug(f"SQLite trade_store upsert notice: {e}")
 
         return trade_to_save
+
