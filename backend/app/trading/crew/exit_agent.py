@@ -24,10 +24,12 @@ class ExitDecision:
     action: Literal[
         "HOLD",
         "TARGET_HIT",
+        "LIQUIDITY_HOP_PROMOTED",
         "STRUCTURE_TRAIL_EXIT",
         "STOP_LOSS_HIT",
         "REVERSAL_EXIT",
         "INTRADAY_CLOSE",
+        "STAGNATION_TIME_STOP",
     ]
     exit_price: float
     realized_points: float
@@ -35,6 +37,10 @@ class ExitDecision:
     exit_reason: str
     remaining_lots: int = 0
     is_fully_closed: bool = False
+    next_target: float | None = None
+    ratcheted_sl: float | None = None
+    conquered_level: float | None = None
+    booked_lots: int = 0
 
 
 class ExitAgent:
@@ -42,11 +48,13 @@ class ExitAgent:
 
     def __init__(
         self,
-        intraday_cutoff_time: str = "15:15",
+        intraday_cutoff_time: str = "15:10",
         structure_trail_min_r: float = 1.5,
+        enable_liquidity_hopping: bool = False,
     ) -> None:
         self.intraday_cutoff_time = intraday_cutoff_time
         self.structure_trail_min_r = structure_trail_min_r
+        self.enable_liquidity_hopping = enable_liquidity_hopping
 
     def evaluate_exit(
         self,
@@ -55,6 +63,9 @@ class ExitAgent:
         df_5m: pd.DataFrame | None = None,
         opposing_signal_detected: bool = False,
         current_time_str: str | None = None,
+        key_levels: list[float] | None = None,
+        enable_liquidity_hopping: bool | None = None,
+        bars_in_trade: int = 0,
     ) -> ExitDecision:
         """Evaluate open trade against hard targets, structure trailing, stops, and reversals."""
         direction = active_trade.get("direction", "CALL")
@@ -82,9 +93,41 @@ class ExitAgent:
                 is_fully_closed=True,
             )
 
-        # 2. Target Hit (Unconditional)
+        # 2. Target Hit / Liquidity Hopping Check
         is_target_hit = (cmp >= target_price) if direction == "CALL" else (cmp <= target_price)
         if is_target_hit:
+            allow_hop = self.enable_liquidity_hopping if enable_liquidity_hopping is None else enable_liquidity_hopping
+            can_hop = allow_hop and (not active_trade.get("has_hopped", False)) and (lots >= 2)
+
+            if can_hop:
+                # Dynamic Liquidity Re-evaluation: Find next higher/lower liquidity level
+                levels = [float(lv) for lv in (key_levels or [])]
+                if direction == "CALL":
+                    overhead = sorted([lv for lv in levels if lv > target_price + 5.0])
+                    next_target = overhead[0] if overhead else (target_price + risk_pts * 1.5)
+                    ratcheted_sl = target_price - 3.0
+                else:
+                    support = sorted([lv for lv in levels if lv < target_price - 5.0], reverse=True)
+                    next_target = support[0] if support else (target_price - risk_pts * 1.5)
+                    ratcheted_sl = target_price + 3.0
+
+                booked = lots // 2
+                remaining = lots - booked
+
+                return ExitDecision(
+                    action="LIQUIDITY_HOP_PROMOTED",
+                    exit_price=target_price,
+                    realized_points=round((target_price - entry_price) if direction == "CALL" else (entry_price - target_price), 2),
+                    realized_r=round(abs(target_price - entry_price) / risk_pts, 2),
+                    exit_reason=f"Conquered {target_price:.2f}. Booked {booked} lots. Runner promoted to {next_target:.2f} with ratcheted SL {ratcheted_sl:.2f}",
+                    remaining_lots=remaining,
+                    is_fully_closed=False,
+                    next_target=round(next_target, 2),
+                    ratcheted_sl=round(ratcheted_sl, 2),
+                    conquered_level=round(target_price, 2),
+                    booked_lots=booked,
+                )
+
             return ExitDecision(
                 action="TARGET_HIT",
                 exit_price=target_price,
@@ -107,7 +150,21 @@ class ExitAgent:
                 is_fully_closed=True,
             )
 
-        # 4. Intraday Cutoff (15:15 IST)
+        # 4. Delta Decay & Stagnation Time-Stop (Charm Guard)
+        # If trade has not hit Target 1 (+1.8R) within 6 completed 5m bars (30 minutes), trigger immediate market exit
+        trade_bars = bars_in_trade or int(active_trade.get("bars_in_trade", 0))
+        if trade_bars >= 6 and current_r < 1.8:
+            return ExitDecision(
+                action="STAGNATION_TIME_STOP",
+                exit_price=cmp,
+                realized_points=round(current_move, 2),
+                realized_r=round(current_r, 2),
+                exit_reason=f"Stagnation Time-Stop: 6 bars ({trade_bars * 5}m) elapsed without hitting Target 1 (+1.8R). Market exit to prevent delta erosion.",
+                remaining_lots=0,
+                is_fully_closed=True,
+            )
+
+        # 5. Intraday Cutoff (15:10 IST)
         t_str = current_time_str or datetime.now().strftime("%H:%M")
         if t_str >= self.intraday_cutoff_time:
             return ExitDecision(

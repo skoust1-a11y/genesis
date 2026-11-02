@@ -76,6 +76,7 @@ def init_db():
                 base_timeframe TEXT DEFAULT '15M',
                 lookout_duration_mins INTEGER DEFAULT 120,
                 lookout_status TEXT DEFAULT 'TRIGGERED',
+                thesis TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now')),
                 updated_at TEXT DEFAULT (datetime('now'))
             );
@@ -92,6 +93,8 @@ def init_db():
             conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN lookout_duration_mins INTEGER DEFAULT 120;")
         if "lookout_status" not in existing_cols:
             conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN lookout_status TEXT DEFAULT 'TRIGGERED';")
+        if "thesis" not in existing_cols:
+            conn.execute("ALTER TABLE live_and_forward_trades ADD COLUMN thesis TEXT DEFAULT '';")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_date ON live_and_forward_trades(date);")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_trades_strategy ON live_and_forward_trades(strategy);")
@@ -185,6 +188,7 @@ def upsert_trade(trade: dict[str, Any]) -> str:
     base_tf = str(trade.get("Base Timeframe") or trade.get("base_timeframe") or ("30M" if "OR" in strat or "30" in strat else "15M"))
     lookout_mins = int(trade.get("Lookout Duration") or trade.get("lookout_duration_mins") or (180 if "30M" in base_tf else 90))
     lookout_stat = str(trade.get("Lookout Status") or trade.get("lookout_status") or "TRIGGERED")
+    thesis_val = json.dumps(trade.get("thesis")) if isinstance(trade.get("thesis"), dict) else str(trade.get("thesis") or "")
 
     with get_connection() as conn:
         conn.execute("""
@@ -196,7 +200,7 @@ def upsert_trade(trade: dict[str, Any]) -> str:
                 capital_deployed, exit_value, est_pnl_inr, roi_pct,
                 lots, qty, rationale, source,
                 liquidity_pool, entry_reason, base_timeframe,
-                lookout_duration_mins, lookout_status, updated_at
+                lookout_duration_mins, lookout_status, thesis, updated_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
@@ -205,7 +209,7 @@ def upsert_trade(trade: dict[str, Any]) -> str:
                 ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                ?, ?, datetime('now')
+                ?, ?, ?, datetime('now')
             )
             ON CONFLICT(trade_id) DO UPDATE SET
                 status = excluded.status,
@@ -224,6 +228,7 @@ def upsert_trade(trade: dict[str, Any]) -> str:
                 base_timeframe = excluded.base_timeframe,
                 lookout_duration_mins = excluded.lookout_duration_mins,
                 lookout_status = excluded.lookout_status,
+                thesis = excluded.thesis,
                 updated_at = datetime('now');
         """, (
             trade_id, d_str, t_str, strat, setup, side, status,
@@ -233,7 +238,7 @@ def upsert_trade(trade: dict[str, Any]) -> str:
             capital, exit_val, pnl, roi,
             lots, qty, rationale, source,
             liquidity_pool, entry_reason, base_tf,
-            lookout_mins, lookout_stat
+            lookout_mins, lookout_stat, thesis_val
         ))
     return trade_id
 

@@ -25,6 +25,17 @@ from app.trading.crew.trend_agent import MarketRegime, TrendAgent
 
 
 @dataclass
+class DirectionalThesis:
+    primary_bet: str                 # e.g., "Bullish BSL Expansion to 23,210"
+    targeted_pool: str               # e.g., "OR-30 High Reclaim & Weak High Stops"
+    invalidation_price: float        # Hard spot invalidation level
+    invalidation_condition: str      # e.g., "5M candle body close below 23,067.3 kills thesis"
+    stagnation_timeout_bars: int     # 6 bars (30 minutes max)
+    gamma_wall_clearance_pts: float  # Runway to nearest opposing dealer wall (must be >= 80 pts)
+    thesis_conviction: str           # "HIGH", "SUPER_TREND", "SCALP_REVERSAL"
+
+
+@dataclass
 class TradeSignal:
     strategy: str
     symbol: str
@@ -46,6 +57,41 @@ class TradeSignal:
     liquidity_pool: str = "UNSPECIFIED"
     lookout_duration_mins: int = 120
     lookout_status: str = "TRIGGERED"
+    thesis: DirectionalThesis | None = None
+
+
+def select_strike_with_delta_floor(
+    entry_price: float,
+    direction: Literal["CALL", "PUT"],
+    otm_steps: int = 2,
+    min_delta: float = 0.35,
+) -> tuple[str, float]:
+    """Select option strike enforcing 2-OTM default and live Delta >= 0.35 floor."""
+    step = 50.0
+    atm_strike = round(entry_price / step) * step
+
+    # Base steps OTM
+    steps_out = float(otm_steps)
+    if direction == "CALL":
+        target_strike = atm_strike + (steps_out * step)
+    else:
+        target_strike = atm_strike - (steps_out * step)
+
+    # Delta estimation: ATM ~0.50. Each 50 pt OTM step reduces delta by ~0.065
+    est_delta = max(0.05, 0.50 - (steps_out * 0.065))
+
+    # Enforce Delta >= 0.35 floor by stepping closer to ATM if necessary
+    while est_delta < min_delta and steps_out > 0:
+        steps_out -= 1.0
+        if direction == "CALL":
+            target_strike -= step
+        else:
+            target_strike += step
+        est_delta = max(0.05, 0.50 - (steps_out * 0.065))
+
+    contract_type = "CE" if direction == "CALL" else "PE"
+    strike_str = f"NIFTY {int(target_strike)} {contract_type}"
+    return strike_str, round(est_delta, 2)
 
 
 class EntryAgent:
@@ -69,8 +115,10 @@ class EntryAgent:
         pdh: float,
         pdl: float,
         key_levels: list[float] | None = None,
+        call_wall: float | None = None,
+        put_wall: float | None = None,
     ) -> TradeSignal | None:
-        """Scan for PDH/PDL liquidity sweeps with micro-wick rejection."""
+        """Scan for PDH/PDL liquidity sweeps and gamma wall reversals with micro-wick rejection."""
         if len(df_5m) < 2:
             return None
 
@@ -79,34 +127,90 @@ class EntryAgent:
         c_open, c_high, c_low, c_close = float(curr["open"]), float(curr["high"]), float(curr["low"]), float(curr["close"])
         timestamp = str(curr.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
-        # 1. Bearish Sweep of PDH (Short / PUT)
-        # Price spiked above PDH but 5M candle closed back below PDH with upper wick
-        if c_high > pdh and c_close < pdh and c_close < c_open:
+        # Establish dealer walls if not provided
+        c_wall = call_wall if call_wall is not None else (round(c_close / 100.0) * 100.0 + 100.0)
+        p_wall = put_wall if put_wall is not None else (round(c_close / 100.0) * 100.0 - 100.0)
+
+        # Volume calculation for absorption check
+        avg_vol = df_5m["volume"].iloc[-10:-1].mean() if "volume" in df_5m.columns and len(df_5m) >= 10 else 1.0
+        curr_vol = float(curr.get("volume", 0.0))
+        vol_absorption = (curr_vol >= avg_vol * 1.1) if avg_vol > 0 else True
+
+        # ---------------------------------------------------------------------
+        # 1. Bearish Sweep of PDH or Call Wall (Short / PUT)
+        # ---------------------------------------------------------------------
+        # Sweeps PDH or sweeps Call Wall with upper rejection wick
+        is_pdh_sweep = (c_high > pdh and c_close < pdh and c_close < c_open)
+        is_call_wall_sweep = (c_high > c_wall and c_close < c_wall and c_close < c_open)
+
+        if is_pdh_sweep or is_call_wall_sweep:
+            swept_level = c_wall if is_call_wall_sweep else pdh
+            is_gamma_reversal = is_call_wall_sweep
+
             upper_wick = c_high - max(c_open, c_close)
             body = abs(c_close - c_open)
-            if upper_wick >= body * 0.5:  # Significant rejection wick
+            # Rejection wick >= 50% of candle body (for gamma reversal requires volume absorption)
+            wick_valid = (upper_wick >= body * 0.5)
+            if is_gamma_reversal and not (wick_valid and vol_absorption):
+                wick_valid = False
+
+            if wick_valid:
                 entry = c_close
                 # Tight 25-35pt micro-wick stop: just above candle body + buffer (capped at c_high)
                 stop = min(max(c_open, c_close) + self.default_stop_buffer, c_high + 2.0)
                 risk_pts = abs(entry - stop)
-                
+
+                # Gamma Wall & Vacuum Gate for Shorts:
+                # Distance to Put Wall must not be < 15-20 pts (vacuum trap)
+                dist_to_put_wall = entry - p_wall
+                if not is_gamma_reversal:
+                    if dist_to_put_wall < 15.0 or abs(entry - p_wall) < 15.0:
+                        return None
+                    # Require adequate runway to next opposing wall (at least 1.8x risk or 45 pts)
+                    min_runway = max(45.0, risk_pts * 1.8)
+                    if dist_to_put_wall < min_runway:
+                        return None
+                else:
+                    # For a Gamma Wall reversal at Call Wall, clearance to put wall is full channel
+                    if dist_to_put_wall < 30.0:
+                        return None
+
                 # Check regime & dynamic target
                 regime = self.trend_agent.evaluate_regime(df_5m, entry, "PUT", key_levels)
                 if not regime.is_breakout_allowed:
                     return None
-                    
+
                 target = entry - (risk_pts * regime.recommended_target_r)
-                
+
                 # Risk approval
                 risk_appr = self.risk_agent.evaluate_order(entry, stop)
                 if not risk_appr.approved:
                     return None
 
-                strike_round = int(round(entry / 50.0) * 50) - int(self.otm_steps * 50)
-                strike = f"NIFTY {strike_round} PE"
+                # 2-OTM Strike Selection with Delta >= 0.35 floor
+                strike, est_delta = select_strike_with_delta_floor(
+                    entry_price=entry,
+                    direction="PUT",
+                    otm_steps=self.otm_steps,
+                    min_delta=0.35,
+                )
+
+                conviction = "SUPER_TREND" if (regime.adx >= 25.0 or is_gamma_reversal) else "HIGH"
+                pool_name = "GAMMA_WALL_SWEEP" if is_gamma_reversal else "BSL_SWEEP"
+                strat_name = "GAMMA_WALL_REVERSAL" if is_gamma_reversal else "LIQUIDITY_SWEEP"
+
+                thesis = DirectionalThesis(
+                    primary_bet=f"Bearish SSL Expansion to {target:,.1f}",
+                    targeted_pool=f"{pool_name} ({swept_level:,.1f}) & Put Wall ({p_wall:,.1f})",
+                    invalidation_price=round(stop, 2),
+                    invalidation_condition=f"5M candle body close above {stop:,.1f} kills thesis",
+                    stagnation_timeout_bars=6,
+                    gamma_wall_clearance_pts=round(dist_to_put_wall, 1),
+                    thesis_conviction=conviction,
+                )
 
                 return TradeSignal(
-                    strategy="LIQUIDITY_SWEEP",
+                    strategy=strat_name,
                     symbol="NIFTY",
                     direction="PUT",
                     entry_price=round(entry, 2),
@@ -119,26 +223,52 @@ class EntryAgent:
                     quantity=risk_appr.quantity,
                     suggested_strike=strike,
                     timestamp=timestamp,
-                    rationale=f"PDH Sweep & Rejection Wick at {pdh:.1f}. Dynamic R:R {regime.recommended_target_r:.1f}R",
+                    rationale=f"{swept_level:.1f} Sweep & Rejection Wick (Delta: {est_delta:.2f}). Dynamic R:R {regime.recommended_target_r:.1f}R",
                     regime=regime.regime,
                     adx=regime.adx,
                     base_timeframe="30M",
-                    liquidity_pool="BSL_SWEEP",
+                    liquidity_pool=pool_name,
                     lookout_duration_mins=180,
                     lookout_status="TRIGGERED",
+                    thesis=thesis,
                 )
 
-        # 2. Bullish Sweep of PDL (Long / CALL)
-        # Price spiked below PDL but 5M candle closed back above PDL with lower wick
-        if c_low < pdl and c_close > pdl and c_close > c_open:
+        # ---------------------------------------------------------------------
+        # 2. Bullish Sweep of PDL or Put Wall (Long / CALL)
+        # ---------------------------------------------------------------------
+        is_pdl_sweep = (c_low < pdl and c_close > pdl and c_close > c_open)
+        is_put_wall_sweep = (c_low < p_wall and c_close > p_wall and c_close > c_open)
+
+        if is_pdl_sweep or is_put_wall_sweep:
+            swept_level = p_wall if is_put_wall_sweep else pdl
+            is_gamma_reversal = is_put_wall_sweep
+
             lower_wick = min(c_open, c_close) - c_low
             body = abs(c_close - c_open)
-            if lower_wick >= body * 0.5:  # Significant rejection wick
+            wick_valid = (lower_wick >= body * 0.5)
+            if is_gamma_reversal and not (wick_valid and vol_absorption):
+                wick_valid = False
+
+            if wick_valid:
                 entry = c_close
                 # Tight stop: just below candle body - buffer
                 stop = max(min(c_open, c_close) - self.default_stop_buffer, c_low - 2.0)
                 risk_pts = abs(entry - stop)
-                
+
+                # Gamma Wall & Vacuum Gate for Longs:
+                # Spot must not be within 15-20 points of Call Wall
+                dist_to_call_wall = c_wall - entry
+                if not is_gamma_reversal:
+                    if dist_to_call_wall < 15.0 or abs(entry - c_wall) < 15.0:
+                        return None
+                    # Require adequate runway to next opposing wall (at least 1.8x risk or 45 pts)
+                    min_runway = max(45.0, risk_pts * 1.8)
+                    if dist_to_call_wall < min_runway:
+                        return None
+                else:
+                    if dist_to_call_wall < 30.0:
+                        return None
+
                 regime = self.trend_agent.evaluate_regime(df_5m, entry, "CALL", key_levels)
                 if not regime.is_breakout_allowed:
                     return None
@@ -148,11 +278,30 @@ class EntryAgent:
                 if not risk_appr.approved:
                     return None
 
-                strike_round = int(round(entry / 50.0) * 50) + int(self.otm_steps * 50)
-                strike = f"NIFTY {strike_round} CE"
+                # 2-OTM Strike Selection with Delta >= 0.35 floor
+                strike, est_delta = select_strike_with_delta_floor(
+                    entry_price=entry,
+                    direction="CALL",
+                    otm_steps=self.otm_steps,
+                    min_delta=0.35,
+                )
+
+                conviction = "SUPER_TREND" if (regime.adx >= 25.0 or is_gamma_reversal) else "HIGH"
+                pool_name = "GAMMA_WALL_SWEEP" if is_gamma_reversal else "SSL_SWEEP"
+                strat_name = "GAMMA_WALL_REVERSAL" if is_gamma_reversal else "LIQUIDITY_SWEEP"
+
+                thesis = DirectionalThesis(
+                    primary_bet=f"Bullish BSL Expansion to {target:,.1f}",
+                    targeted_pool=f"{pool_name} ({swept_level:,.1f}) & Call Wall ({c_wall:,.1f})",
+                    invalidation_price=round(stop, 2),
+                    invalidation_condition=f"5M candle body close below {stop:,.1f} kills thesis",
+                    stagnation_timeout_bars=6,
+                    gamma_wall_clearance_pts=round(dist_to_call_wall, 1),
+                    thesis_conviction=conviction,
+                )
 
                 return TradeSignal(
-                    strategy="LIQUIDITY_SWEEP",
+                    strategy=strat_name,
                     symbol="NIFTY",
                     direction="CALL",
                     entry_price=round(entry, 2),
@@ -165,13 +314,14 @@ class EntryAgent:
                     quantity=risk_appr.quantity,
                     suggested_strike=strike,
                     timestamp=timestamp,
-                    rationale=f"PDL Sweep & Rejection Wick at {pdl:.1f}. Dynamic R:R {regime.recommended_target_r:.1f}R",
+                    rationale=f"{swept_level:.1f} Sweep & Rejection Wick (Delta: {est_delta:.2f}). Dynamic R:R {regime.recommended_target_r:.1f}R",
                     regime=regime.regime,
                     adx=regime.adx,
                     base_timeframe="30M",
-                    liquidity_pool="SSL_SWEEP",
+                    liquidity_pool=pool_name,
                     lookout_duration_mins=180,
                     lookout_status="TRIGGERED",
+                    thesis=thesis,
                 )
 
         return None
@@ -181,6 +331,7 @@ class EntryAgent:
         df_5m: pd.DataFrame,
         morning_floor: float,
         key_levels: list[float] | None = None,
+        put_wall: float | None = None,
     ) -> TradeSignal | None:
         """Scan for Midday Volume Waterfall breakdown (replaces binary lunch blackout)."""
         if len(df_5m) < 10:
@@ -199,7 +350,13 @@ class EntryAgent:
             entry = c_close
             stop = float(curr["high"]) + self.default_stop_buffer
             risk_pts = abs(entry - stop)
-            
+
+            p_wall = put_wall if put_wall is not None else (round(entry / 100.0) * 100.0 - 100.0)
+            dist_to_put_wall = entry - p_wall
+            # Gamma clearance check: need >= 80 pts runway to put wall
+            if dist_to_put_wall < 80.0:
+                return None
+
             # Midday waterfalls get +3.0R to +4.0R expansion
             regime = self.trend_agent.evaluate_regime(
                 df_5m, entry, "PUT", key_levels, is_waterfall_active=True
@@ -210,7 +367,24 @@ class EntryAgent:
             if not risk_appr.approved:
                 return None
 
-            strike_round = int(round(entry / 50.0) * 50) - int(self.otm_steps * 50)
+            # 2-OTM Strike Selection with Delta >= 0.35 floor
+            strike, est_delta = select_strike_with_delta_floor(
+                entry_price=entry,
+                direction="PUT",
+                otm_steps=self.otm_steps,
+                min_delta=0.35,
+            )
+
+            thesis = DirectionalThesis(
+                primary_bet=f"Bearish SSL Waterfall Expansion to {target:,.1f}",
+                targeted_pool=f"Morning Floor Breakdown ({morning_floor:,.1f}) & Put Wall ({p_wall:,.1f})",
+                invalidation_price=round(stop, 2),
+                invalidation_condition=f"5M candle body close above {stop:,.1f} kills thesis",
+                stagnation_timeout_bars=6,
+                gamma_wall_clearance_pts=round(dist_to_put_wall, 1),
+                thesis_conviction="SUPER_TREND",
+            )
+
             return TradeSignal(
                 strategy="MIDDAY_WATERFALL",
                 symbol="NIFTY",
@@ -223,16 +397,16 @@ class EntryAgent:
                 rr_ratio=3.0,
                 lots=risk_appr.lots,
                 quantity=risk_appr.quantity,
-                suggested_strike=f"NIFTY {strike_round} PE",
+                suggested_strike=strike,
                 timestamp=timestamp,
-                rationale=f"Midday Waterfall: High-volume breakdown below morning floor {morning_floor:.1f}",
+                rationale=f"Midday Waterfall: High-volume breakdown below morning floor {morning_floor:.1f} (Delta: {est_delta:.2f})",
                 regime="VOLATILE_EXPANSION",
                 adx=regime.adx,
                 base_timeframe="15M",
                 liquidity_pool="SSL_EXPANSION",
                 lookout_duration_mins=90,
                 lookout_status="TRIGGERED",
+                thesis=thesis,
             )
-
 
         return None

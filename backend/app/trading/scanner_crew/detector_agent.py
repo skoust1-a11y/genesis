@@ -244,7 +244,7 @@ class DetectorAgent:
             # -------------------------------------------------------------
             # 3. Strategy: Liquidity Sweep
             # -------------------------------------------------------------
-            if strategy_filter in ("auto", "sweep") and len(bars) >= 12 and bar_mins >= 3:
+            if strategy_filter in ("auto", "sweep") and len(bars) >= 4 and bar_mins >= 3:
                 try:
                     for s in scan(
                         bars,

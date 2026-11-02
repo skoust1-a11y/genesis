@@ -50,6 +50,7 @@ class RiskAgent:
         max_super_lots: int = 4,
         config_path: Path | None = None,
         order_flow_agent: Any | None = None,
+        frozen_baseline: bool = True,
     ) -> None:
         self.base_capital = base_capital
         self.max_daily_losses = max_daily_losses
@@ -59,7 +60,10 @@ class RiskAgent:
         self.max_super_lots = max_super_lots
         self.config_path = config_path or Path("trades/daily_risk_config.json")
         self.order_flow_agent = order_flow_agent
+        self.frozen_baseline = frozen_baseline
+        self.safety_wall_reserve = 0.0
         self.daily_losses_count = 0
+        self.daily_cumulative_r = 0.0
         self.is_safety_wall_locked = False
         self._load_config()
 
@@ -70,9 +74,11 @@ class RiskAgent:
                 with open(self.config_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.base_capital = float(data.get("base_capital", self.base_capital))
+                    self.safety_wall_reserve = float(data.get("safety_wall_reserve", self.safety_wall_reserve))
                     self.daily_losses_count = int(data.get("daily_losses_count", 0))
+                    self.daily_cumulative_r = float(data.get("daily_cumulative_r", 0.0))
                     self.is_safety_wall_locked = bool(data.get("is_safety_wall_locked", False))
-                    if "default_lots" in data:
+                    if "default_lots" in data and self.default_lots is None:
                         self.default_lots = int(data["default_lots"])
             except Exception:
                 pass
@@ -83,21 +89,37 @@ class RiskAgent:
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump({
                 "base_capital": self.base_capital,
+                "safety_wall_reserve": self.safety_wall_reserve,
+                "effective_capital": self.base_capital + self.safety_wall_reserve,
+                "tomorrow_approved_lots": self.max_super_lots if self.default_lots is not None else 2,
+                "default_lots": self.default_lots or 3,
                 "daily_losses_count": self.daily_losses_count,
+                "daily_cumulative_r": round(self.daily_cumulative_r, 2),
                 "is_safety_wall_locked": self.is_safety_wall_locked,
             }, f, indent=2)
 
-    def record_trade_outcome(self, is_win: bool, pnl_rupees: float) -> None:
-        """Update daily risk counters after trade completion."""
-        if not is_win:
+    def record_trade_outcome(self, is_win: bool, pnl_rupees: float, realized_r: float = 0.0) -> None:
+        """Update daily risk counters, ratchet 50% profit to safety wall, and evaluate circuit breakers."""
+        if is_win and pnl_rupees > 0:
+            # 50% Capital Safety Wall Enforcement:
+            # Automatically ratchet 50% of net realized profit into safety_wall_reserve
+            reserve_addition = round(pnl_rupees * 0.50, 2)
+            self.safety_wall_reserve += reserve_addition
+        elif not is_win:
             self.daily_losses_count += 1
-            if self.daily_losses_count >= self.max_daily_losses:
-                self.is_safety_wall_locked = True
+
+        self.daily_cumulative_r += realized_r
+
+        # Daily Circuit Breaker: Halt if 2 consecutive losses or cumulative drawdown <= -2.0R
+        if self.daily_losses_count >= self.max_daily_losses or self.daily_cumulative_r <= -2.0:
+            self.is_safety_wall_locked = True
+
         self.save_config()
 
     def reset_daily_counters(self) -> None:
         """Reset intraday loss counters at beginning of trading day."""
         self.daily_losses_count = 0
+        self.daily_cumulative_r = 0.0
         self.is_safety_wall_locked = False
         self.save_config()
 
@@ -112,20 +134,21 @@ class RiskAgent:
     ) -> RiskApproval:
         """Determine if order satisfies institutional risk rules and calculate sizing with Order Flow."""
         risk_points = abs(entry_price - stop_loss)
+        eff_safety = self.safety_wall_reserve or safety_wall_balance
 
-        # 1. Check daily circuit breaker
-        if self.is_safety_wall_locked or self.daily_losses_count >= self.max_daily_losses:
+        # 1. Check daily circuit breaker (consecutive losses >= 2 or cumulative drawdown <= -2.0R)
+        if self.is_safety_wall_locked or self.daily_losses_count >= self.max_daily_losses or self.daily_cumulative_r <= -2.0:
             return RiskApproval(
                 approved=False,
                 lots=0,
                 quantity=0,
                 risk_points=risk_points,
                 max_loss_rupees=0.0,
-                safety_wall_balance=safety_wall_balance,
-                rejection_reason=f"Circuit Breaker Triggered: {self.daily_losses_count} losses reached today. Safety wall locked.",
+                safety_wall_balance=eff_safety,
+                rejection_reason=f"Circuit Breaker Triggered: {self.daily_losses_count} losses or {self.daily_cumulative_r:.1f}R daily drawdown. Safety wall locked.",
             )
 
-        # 2. Check risk ceiling (e.g. 55-pt trap prevention)
+        # 2. Check risk ceiling (55-pt trap prevention)
         if risk_points > self.max_stop_points:
             return RiskApproval(
                 approved=False,
@@ -133,25 +156,35 @@ class RiskAgent:
                 quantity=0,
                 risk_points=risk_points,
                 max_loss_rupees=0.0,
-                safety_wall_balance=safety_wall_balance,
+                safety_wall_balance=eff_safety,
                 rejection_reason=f"Stop Loss {risk_points:.1f} pts exceeds institutional ceiling of {self.max_stop_points} pts.",
             )
 
-        # 3. Compute Base Lot Sizing based on Capital Milestones
-        effective_capital = self.base_capital + safety_wall_balance
-        base_lots = 1
-        for tier_lots, cap_req in sorted(LOT_CAPITAL_MILESTONES.items()):
-            if effective_capital >= cap_req:
-                base_lots = tier_lots
-        if self.default_lots is not None:
-            base_lots = max(self.default_lots, base_lots)
+        # 3. Lot Sizing Policy
+        # Under Architecture C frozen baseline: STRICTLY FIXED at 3 Lots (standard) or 4 Lots (super-trend)
+        if self.frozen_baseline and self.default_lots is not None:
+            base_lots = self.max_super_lots if is_super_trend else self.default_lots
+            lots = base_lots
+        else:
+            effective_capital = self.base_capital + eff_safety
+            base_lots = 1
+            for tier_lots, cap_req in sorted(LOT_CAPITAL_MILESTONES.items()):
+                if effective_capital >= cap_req:
+                    base_lots = tier_lots
+            if self.default_lots is not None:
+                base_lots = max(self.default_lots, base_lots)
 
-        # Super-Trend Boost: Automatically unlocks 4 lots on high-conviction breakout
-        if is_super_trend:
-            base_lots = min(self.max_super_lots, max(base_lots, 3) + 1)
+            if is_super_trend:
+                base_lots = min(self.max_super_lots, max(base_lots, 3) + 1)
+
+            lots = base_lots
+            if not is_super_trend:
+                if risk_points > 40.0:
+                    lots = min(lots, 2)
+                elif risk_points <= 40.0 and self.default_lots is not None:
+                    lots = max(lots, self.default_lots)
 
         # 4. Apply Order Flow Sizing Cap & Absorption Trap Veto
-        lots = base_lots
         if self.order_flow_agent is not None and df_5m is not None and direction is not None:
             of_signal = self.order_flow_agent.evaluate_sizing_cap(
                 df_5m=df_5m,
@@ -165,19 +198,11 @@ class RiskAgent:
                     quantity=0,
                     risk_points=risk_points,
                     max_loss_rupees=0.0,
-                    safety_wall_balance=safety_wall_balance,
+                    safety_wall_balance=eff_safety,
                     rejection_reason=of_signal.rationale,
                 )
-            lots = of_signal.approved_lots
-
-        # 5. Combo C Dynamic Risk Sizing Guardrail:
-        # Scale down to 2 lots if stop is wider (40-55 pts) to cap loss <= Rs 3,500;
-        # Use 3 lots on tight risk (<= 40 pts) for asymmetric upside.
-        if not is_super_trend:
-            if risk_points > 40.0:
-                lots = min(lots, 2)
-            elif risk_points <= 40.0 and self.default_lots is not None:
-                lots = max(lots, self.default_lots)
+            if not (self.frozen_baseline and self.default_lots is not None):
+                lots = of_signal.approved_lots
 
         qty = lots * self.lot_qty
         approx_option_risk = risk_points * 0.5 * qty
@@ -188,6 +213,6 @@ class RiskAgent:
             quantity=qty,
             risk_points=round(risk_points, 2),
             max_loss_rupees=round(approx_option_risk, 2),
-            safety_wall_balance=safety_wall_balance,
+            safety_wall_balance=eff_safety,
             rejection_reason=None,
         )

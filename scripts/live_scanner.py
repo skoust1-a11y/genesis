@@ -149,7 +149,7 @@ def main() -> None:
     # Pre-Market Setup Run (Runs once per day before open)
     if not pre_market_lock.exists() and not args.once and not args.no_telegram:
         try:
-            snapshot = scanner_manager.scan_feed(timeframes=["1d"])
+            snapshot = scanner_manager.produce_scan_snapshot(timeframes=["1d"])
             pdc_val = float(snapshot.levels.pdc) if snapshot.levels.pdc > 0 else 23000.0
             pre_market_manager.run_pre_market_setup(pdc=pdc_val, date_str=today_str)
             pre_market_lock.write_text(datetime.now().isoformat())
@@ -210,6 +210,7 @@ def main() -> None:
                 strategy_filter=args.strategy,
             )
             candles_5m = scanner_manager.feed_agent.fetch_timeframe_candles("5m")
+            candles_15m = scanner_manager.feed_agent.fetch_timeframe_candles("15m")
 
             # Candle confirmation logs
             if not candles_5m.empty:
@@ -232,6 +233,8 @@ def main() -> None:
                 morning_floor=snapshot.levels.or30_low,
                 candidate_setups=snapshot.actionable_setups,
                 date_str=today_str,
+                current_time_str=cur_time_str,
+                df_15m=candles_15m,
             )
 
             for act in tick_result.get("actions", []):

@@ -107,15 +107,15 @@ class TradeManager:
             bars_in_trade = 0
             if entry_ts_str:
                 try:
-                    if len(entry_ts_str) >= 19:
-                        entry_dt = datetime.strptime(entry_ts_str[:19], "%Y-%m-%d %H:%M:%S")
-                        elapsed_secs = (datetime.now() - entry_dt).total_seconds()
-                        bars_in_trade = max(0, int(elapsed_secs // 300))
-                    elif len(entry_ts_str) >= 5 and current_time_str:
+                    if current_time_str and len(entry_ts_str) >= 5:
                         t0 = datetime.strptime(entry_ts_str[-5:], "%H:%M")
                         t1 = datetime.strptime(current_time_str[-5:], "%H:%M")
                         elapsed_mins = (t1 - t0).total_seconds() / 60.0
                         bars_in_trade = max(0, int(elapsed_mins // 5))
+                    elif len(entry_ts_str) >= 19:
+                        entry_dt = datetime.strptime(entry_ts_str[:19], "%Y-%m-%d %H:%M:%S")
+                        elapsed_secs = (datetime.now() - entry_dt).total_seconds()
+                        bars_in_trade = max(0, int(elapsed_secs // 300))
                 except Exception:
                     bars_in_trade = int(trade.get("bars_in_trade", 0))
             else:
@@ -301,13 +301,21 @@ class TradeManager:
                 })
                 return results
 
-            # Gate B: Lunch Lull Gate (11:30 - 13:00 IST) - Hard freeze
+            # Gate B: Lunch Lull Gate (11:30 - 13:00 IST) - Hard freeze on low-volume chop
             if "11:30" <= time_val < "13:00":
-                results["actions"].append({
-                    "action": "VETO_LUNCH_LULL",
-                    "reason": "Lunch Lull Gate (11:30-13:00 IST): Hard freeze on all new entries.",
-                })
-                return results
+                has_waterfall_volume = False
+                if df_5m is not None and len(df_5m) >= 10 and "volume" in df_5m.columns:
+                    recent_vol = float(df_5m["volume"].iloc[-1])
+                    avg_vol = float(df_5m["volume"].iloc[-10:-1].mean())
+                    if avg_vol > 0 and recent_vol >= avg_vol * 1.8:
+                        has_waterfall_volume = True
+
+                if not has_waterfall_volume:
+                    results["actions"].append({
+                        "action": "VETO_LUNCH_LULL",
+                        "reason": "Lunch Lull Gate (11:30-13:00 IST): Hard freeze on low-volume entries.",
+                    })
+                    return results
 
             # Gate C: Terminal Expiry Zone (14:30 - 15:30 IST) - Block new orders
             if time_val >= "14:30":
@@ -406,21 +414,23 @@ class TradeManager:
                             continue
 
                     # Gate F: Gamma Wall & Vacuum Gate for candidates
+                    cand_risk = getattr(cand, "risk_points", 25.0)
+                    min_runway = max(45.0, cand_risk * 1.8)
                     if cand.direction == "CALL":
                         dist_to_call_wall = call_wall - cand.trigger_price
-                        if dist_to_call_wall < 20.0 or abs(cand.trigger_price - call_wall) < 20.0:
-                            logger.info(f"Candidate CALL vetoed: within 20 pts of Call Wall ({call_wall:.1f}).")
+                        if dist_to_call_wall < 15.0 or abs(cand.trigger_price - call_wall) < 15.0:
+                            logger.info(f"Candidate CALL vetoed: within 15 pts of Call Wall ({call_wall:.1f}).")
                             continue
-                        if dist_to_call_wall < 80.0:
-                            logger.info(f"Candidate CALL vetoed: only {dist_to_call_wall:.1f} pts runway to Call Wall (< 80 pts).")
+                        if dist_to_call_wall < min_runway:
+                            logger.info(f"Candidate CALL vetoed: only {dist_to_call_wall:.1f} pts runway to Call Wall (< {min_runway:.1f} pts).")
                             continue
                     else:
                         dist_to_put_wall = cand.trigger_price - put_wall
-                        if dist_to_put_wall < 20.0 or abs(cand.trigger_price - put_wall) < 20.0:
-                            logger.info(f"Candidate PUT vetoed: within 20 pts of Put Wall ({put_wall:.1f}).")
+                        if dist_to_put_wall < 15.0 or abs(cand.trigger_price - put_wall) < 15.0:
+                            logger.info(f"Candidate PUT vetoed: within 15 pts of Put Wall ({put_wall:.1f}).")
                             continue
-                        if dist_to_put_wall < 80.0:
-                            logger.info(f"Candidate PUT vetoed: only {dist_to_put_wall:.1f} pts runway to Put Wall (< 80 pts).")
+                        if dist_to_put_wall < min_runway:
+                            logger.info(f"Candidate PUT vetoed: only {dist_to_put_wall:.1f} pts runway to Put Wall (< {min_runway:.1f} pts).")
                             continue
 
                     # Gate G: EQH / EQL Liquidity Magnet & Trap Gate

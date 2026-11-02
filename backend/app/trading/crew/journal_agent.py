@@ -73,6 +73,11 @@ class JournalAgent:
     def record_entry(self, signal: TradeSignal, date_str: str | None = None) -> dict[str, Any]:
         """Record a new open trade in the active cache and SQLite."""
         trade_id = f"TRADE_{signal.symbol}_{int(datetime.now().timestamp())}"
+        thesis_dict = None
+        if getattr(signal, "thesis", None) is not None:
+            from dataclasses import asdict
+            thesis_dict = asdict(signal.thesis)
+
         trade_data: dict[str, Any] = {
             "trade_id": trade_id,
             "strategy": signal.strategy,
@@ -94,6 +99,8 @@ class JournalAgent:
             "liquidity_pool": getattr(signal, "liquidity_pool", "UNSPECIFIED"),
             "lookout_duration_mins": getattr(signal, "lookout_duration_mins", 120),
             "lookout_status": getattr(signal, "lookout_status", "TRIGGERED"),
+            "thesis": thesis_dict,
+            "bars_in_trade": 0,
             "milestones_hit": set(),
             "status": "OPEN",
         }
@@ -101,6 +108,30 @@ class JournalAgent:
         active = self.load_active_trades(date_str)
         active[trade_id] = trade_data
         self.save_active_trades(active, date_str)
+
+        # Log Directional Thesis to trades/pre_market_plan.json
+        if thesis_dict:
+            try:
+                plan_file = self.trades_dir / "pre_market_plan.json"
+                plan_data: dict[str, Any] = {}
+                if plan_file.exists():
+                    with open(plan_file, "r", encoding="utf-8") as pf:
+                        plan_data = json.load(pf)
+                plan_data["latest_directional_thesis"] = thesis_dict
+                plan_data["active_trade_id"] = trade_id
+                plan_data["thesis_updated_at"] = datetime.now().isoformat()
+                with open(plan_file, "w", encoding="utf-8") as pf:
+                    json.dump(plan_data, pf, indent=2)
+            except Exception as pe:
+                logger.debug(f"Notice updating pre_market_plan.json with thesis: {pe}")
+
+        # Persist open trade to SQLite SSOT
+        try:
+            from app.db import trade_store
+            trade_store.upsert_trade(trade_data)
+        except Exception as se:
+            logger.debug(f"SQLite trade_store entry upsert notice: {se}")
+
         return trade_data
 
     def record_exit(
