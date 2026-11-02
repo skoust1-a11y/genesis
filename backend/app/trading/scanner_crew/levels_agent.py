@@ -155,11 +155,11 @@ class LevelsAgent:
     def detect_equal_highs_lows(
         self,
         df_5m: pd.DataFrame | None,
-        tol_pts: float = 6.5,
+        tol_pts: float = 8.0,  # Equal liquidity zone tolerance (5 to 10 points)
         min_bars_apart: int = 3,
         min_depth: float = 8.0,
     ) -> tuple[list[float], list[float]]:
-        """Identify Equal High (EQH) and Equal Low (EQL) liquidity pools from 5M bars."""
+        """Identify Equal High (EQH) and Equal Low (EQL) liquidity pools (5-10 pt zones) from 5M bars."""
         if df_5m is None or len(df_5m) < 6:
             return [], []
 

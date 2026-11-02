@@ -445,33 +445,35 @@ class TradeManager:
                             continue
 
                     # Gate G: EQH / EQL Liquidity Magnet & Trap Gate
-                    # Prevents shorting under un-swept EQH buy-side liquidity or buying above un-swept EQL sell-side liquidity
+                    # Equal liquidity forms a defined zone of 5-10 points.
+                    # Only veto if the candidate sits directly inside or within this 5-10 pt liquidity zone.
                     is_sweep_strat = "SWEEP" in cand.strategy.upper() or "EQUAL" in cand.strategy.upper()
                     if not is_sweep_strat and df_5m is not None and len(df_5m) >= 6:
                         from app.trading.scanner_crew.levels_agent import LevelsAgent
                         _la = LevelsAgent()
-                        eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m)
+                        eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m, tol_pts=8.0)
+                        EQ_ZONE_PTS = 8.0  # Equal liquidity zone: 5 to 10 points
                         if cand.direction == "PUT":
-                            # Only veto short if entering directly beneath EQH magnet (<= 20 pts)
-                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= 20.0 for eqh in eqh_list)
+                            # Only veto short if entering directly inside the 5-10 pt EQH magnet zone
+                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= EQ_ZONE_PTS for eqh in eqh_list)
                             if veto_eqh:
-                                logger.info("Candidate PUT vetoed by EQH Magnet Gate: within 20 pts below un-swept EQH pool.")
+                                logger.info(f"Candidate PUT vetoed by EQH Magnet Gate: within {EQ_ZONE_PTS:.1f} pts EQH liquidity zone.")
                                 continue
-                            # Only veto short if directly crashing into un-swept EQL support (<= 15 pts)
-                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= 15.0 for eql in eql_list)
+                            # Only veto short if directly crashing into the 5-10 pt EQL support zone
+                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= EQ_ZONE_PTS for eql in eql_list)
                             if veto_eql:
-                                logger.info("Candidate PUT vetoed by EQL Support Gate: within 15 pts above un-swept EQL support.")
+                                logger.info(f"Candidate PUT vetoed by EQL Support Gate: within {EQ_ZONE_PTS:.1f} pts EQL support zone.")
                                 continue
                         else:
-                            # Only veto long if entering directly above EQL magnet (<= 20 pts)
-                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= 20.0 for eql in eql_list)
+                            # Only veto long if entering directly inside the 5-10 pt EQL magnet zone
+                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= EQ_ZONE_PTS for eql in eql_list)
                             if veto_eql:
-                                logger.info("Candidate CALL vetoed by EQL Magnet Gate: within 20 pts above un-swept EQL pool.")
+                                logger.info(f"Candidate CALL vetoed by EQL Magnet Gate: within {EQ_ZONE_PTS:.1f} pts EQL liquidity zone.")
                                 continue
-                            # Only veto long if directly crashing into un-swept EQH resistance (<= 15 pts)
-                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= 15.0 for eqh in eqh_list)
+                            # Only veto long if directly crashing into the 5-10 pt EQH resistance zone
+                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= EQ_ZONE_PTS for eqh in eqh_list)
                             if veto_eqh:
-                                logger.info("Candidate CALL vetoed by EQH Resistance Gate: within 15 pts below un-swept EQH resistance.")
+                                logger.info(f"Candidate CALL vetoed by EQH Resistance Gate: within {EQ_ZONE_PTS:.1f} pts EQH resistance zone.")
                                 continue
 
                     # Dynamic target and regime from TrendAgent
@@ -563,9 +565,10 @@ class TradeManager:
                     if not candidate_signal and morning_floor is not None:
                         from app.trading.scanner_crew.levels_agent import LevelsAgent
                         _la = LevelsAgent()
-                        eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m)
+                        eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m, tol_pts=8.0)
                         current_c = float(df_5m.iloc[-1]["close"]) if df_5m is not None and not df_5m.empty else morning_floor
-                        veto_waterfall = any(0.0 < (eqh - current_c) <= 20.0 for eqh in eqh_list) or any(0.0 < (current_c - eql) <= 15.0 for eql in eql_list)
+                        EQ_ZONE_PTS = 8.0  # Equal liquidity zone: 5 to 10 points
+                        veto_waterfall = any(0.0 < (eqh - current_c) <= EQ_ZONE_PTS for eqh in eqh_list) or any(0.0 < (current_c - eql) <= EQ_ZONE_PTS for eql in eql_list)
                         if not veto_waterfall:
                             candidate_signal = self.entry_agent.evaluate_waterfall(
                                 df_5m, morning_floor, key_levels, put_wall=put_wall
