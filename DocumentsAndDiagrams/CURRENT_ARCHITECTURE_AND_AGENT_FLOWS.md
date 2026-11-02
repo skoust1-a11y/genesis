@@ -9,20 +9,22 @@
 
 Genesis is an institutional quantitative trading, strategy research, and automated execution platform engineered for the Indian equity derivatives markets (NSE NIFTY and BANKNIFTY index options). 
 
-The platform is organized around **5 Autonomous Specialized Crews** operating continuously across the trading day, accompanied by a deterministic **Review Crew**, a research **Strategy Lab**, and an immutable multi-tier persistence tier.
+The platform is organized around **5 Autonomous Specialized Crews** operating continuously across the trading day, accompanied by **6 Architecture C Specialized Protective Engines**, a deterministic **Review Crew (LangGraph)**, a **Trade Crew (LangGraph 13 Nodes)**, specialized diagnostics, and an immutable multi-tier persistence tier—totaling **53 Specialized Agents, Engines, and Graph Nodes**.
 
 | Crew / Component | Core Manager & Agents | Implementation Files | Execution Window | Role & Responsibilities |
 | :--- | :--- | :--- | :--- | :--- |
 | **1. PreMarketCrew** | `PreMarketManager`<br/>- `GapAgent`<br/>- `GammaAgent`<br/>- `EventRiskAgent` | `backend/app/trading/pre_market_crew/` | 08:30 – 09:14 IST | Ingests GIFT NIFTY vs PDC gap bias, computes Call/Put dealer gamma walls, calculates Max Pain & PCR, checks macro event blackouts (RBI MPC, CPI, FED), formats `trades/pre_market_plan.json`, and dispatches the 09:05 IST Battleplan to Telegram. |
-| **2. ScannerCrew** | `ScannerManager`<br/>- `FeedAgent`<br/>- `LevelsAgent`<br/>- `ConsolidationAgent`<br/>- `NewsAgent`<br/>- `DetectorAgent` | `backend/app/trading/scanner_crew/` | 09:15 – 15:30 IST<br/>(1m, 2m, 5m, 15m) | Multi-timeframe delta polling & ETF VWAP proxy, dynamic level projection (PDH, PDL, PDC, OR-30, round strikes), compression box & ATR deadband filtering (Lunch Lull 11:30-13:00), macro sentiment screening, and pattern detection across Breakout & Retest, Liquidity Sweep, and Trendline Reversal. Emits real-time `ScanSnapshot`. |
-| **3. TradeCrew** | `TradeManager`<br/>- `TrendAgent`<br/>- `RiskAgent`<br/>- `OrderFlowAgent`<br/>- `EntryAgent`<br/>- `ExitAgent`<br/>- `AlertAgent`<br/>- `JournalAgent` | `backend/app/trading/crew/` | Live Market Hours (Continuous) | Evaluates macro trend slopes and dynamic R:R targets (+1.8R to +4.5R), enforces daily loss circuit breakers and the 50% Capital Safety Wall, checks whale volume absorption traps, triggers micro-wick entries with strictly OTM option strikes, manages Target 1/2/3 partial book & trail, dispatches Telegram tickets, and commits ACID transactions to the `trades.db` SQLite SSOT. |
+| **2. ScannerCrew** | `ScannerManager`<br/>- `FeedAgent`<br/>- `LevelsAgent`<br/>- `ConsolidationAgent`<br/>- `NewsAgent`<br/>- `DetectorAgent` | `backend/app/trading/scanner_crew/` | 09:15 – 15:30 IST<br/>(1m, 2m, 5m, 15m) | Multi-timeframe delta polling & ETF VWAP proxy, dynamic level projection (PDH, PDL, PDC, OR-30, round strikes), compression box & ATR deadband filtering (Lunch Lull 11:30-13:00), macro sentiment screening, and pattern detection across Breakout & Retest, Liquidity Sweep, Trendline Reversal, Dual-Trendline Squeeze, and Dynamic Lookout Horizons. Emits real-time `ScanSnapshot`. |
+| **3. TradeCrew** | `TradeManager`<br/>- `TrendAgent`<br/>- `OrderFlowAgent`<br/>- `SniperAgent`<br/>- `RiskAgent`<br/>- `EntryAgent`<br/>- `Idempotent Guard`<br/>- `ExitAgent`<br/>- `AlertAgent`<br/>- `JournalAgent` | `backend/app/trading/crew/` | Live Market Hours (Continuous) | Evaluates macro trend slopes and dynamic R:R targets (+1.8R to +4.5R), checks whale volume absorption traps, triggers 1M micro-wick entries (15–25 pt stops) with strictly OTM option strikes, enforces daily loss circuit breakers and the 50% Capital Safety Wall, hashes SHA-256 idempotent signatures to suppress duplicate fills, manages Target 1/2/3 partial book & trail, dispatches Telegram tickets with complete Directional Thesis, and commits ACID transactions to `trades.db` SQLite WAL. |
 | **4. ExecutionCrew** | `ExecutionManager`<br/>- `SmartRoutingAgent`<br/>- `BrokerBridgeAgent`<br/>- `ReconciliationAgent` | `backend/app/trading/execution_crew/` | Order Dispatch & Fills | Splits orders into 30% market fill + 70% limit-chasing tranches to minimize slippage, bridges to live broker APIs or zero-slippage paper emulator, and performs real-time zero-drift position reconciliation between broker account and local database. |
 | **5. PostMarketCrew** | `PostMarketManager`<br/>- `AutopsyAgent`<br/>- `ParameterAgent`<br/>- `SafetyWallAgent`<br/>- `CodeQualityAgent`<br/>- `BriefingAgent` | `backend/app/trading/post_market_crew/` | 15:31+ IST Daily | Reconstructs the day's intraday tape, audits execution against hypothetical perfection, flags missed trades, runs walk-forward parameter sweeps, locks 50% of net profits into the permanent Capital Safety Wall, checks system logs & latency bottlenecks, writes `reports/daily_audit_YYYY-MM-DD.md`, and dispatches the Executive Digest to Telegram. |
-| **Review Crew** | LangGraph StateGraph | `backend/app/agents/review_crew/` | On-Demand (Lab) | 7-step deterministic backtest & forward-test engine with Indian cost models (STT, exchange fees, GST, SEBI, stamp duty, slippage), hard-stop capital sweeps (2-5%), trade-by-trade post-mortems, and evidence-backed improvement proposals. |
-| **Strategy Analyzer** | `InstitutionalStrategyAnalyzer` | `backend/app/strategies/analyzer.py` | On-Demand (API) | Evaluates strategies against the 5 Institutional Pillars (Edge, Risk-Reward, Feasibility, Capital Floor, Execution Risk) and generates catalog scorecards. |
-| **Loss Forensic Agent**| `LossAnalyzer` | `backend/app/loss_analyzer.py` | Event-Triggered | Automated autopsy on any losing trade; escalates to an LLM Senior Trading Partner upon encountering 3 consecutive losses. |
-| **Market Analytics** | `chart_analytics.py` | `backend/app/market/chart_analytics.py` | Real-Time / API | Computes non-repainting swing pivots (HH, HL, LH, LL, EQH, EQL), Market Structure Break (`BOS`), Change of Character (`CHoCH`), Fair Value Gaps (`FVG`), and Dynamic Trendlines. |
-| **Supervisor Daemon**| `Supervisor` | `backend/app/live/supervisor.py` | Background Daemon | Manages worker subprocesses for active deployments with exponential backoff crash recovery (5s to 5m) and capital floor monitoring. |
+| **6. Architecture C Engines** | 6 Protective Engines:<br/>- `DirectionalThesisEngine`<br/>- `DeltaFloorEngine`<br/>- `GammaRunwayGate`<br/>- `StagnationTimeStop`<br/>- `IdempotentKeyGuard`<br/>- `SessionGatekeeper` | `backend/app/trading/crew/` | Pre-Trade & In-Trade | Enforces the 6 Architecture C guardrails: structural thesis generation, strictly 2-OTM strikes with $\Delta \ge 0.35$ floor, $\ge 80$ pt gamma runway clearance and $<20$ pt vacuum veto, 30-min (6-bar) stagnation time-stop against theta bleed, SHA-256 duplicate suppression, India VIX 11.5–22.0 corridor, and 13:00–13:30 Gate E lunch lull. |
+| **7. LangGraph Trade Crew** | 13 Pipeline Nodes (`verify`, `gate`, `hours`, `observe`, `reconcile`, `exits`, `drawdown`, `daily`, `entry`, `risk`, `opinion`, `explain`, `execute`) | `backend/app/agents/trade_crew/` | Every Market Tick | Deterministic state machine executing cryptographic code integrity checks, execution gates, position reconciliation, drawdown ladder, safety wall sizing, and optional LLM qualitative opinion co-pilot. |
+| **8. LangGraph Review Crew**| StateGraph Nodes (`audit`, `scenarios`, `simulate`, `hard_stop`, `trade_review`, `verdict`, `improve`) | `backend/app/agents/review_crew/` | On-Demand (Lab) | Deterministic backtest & forward-test engine with Indian cost models (STT, exchange fees, GST, SEBI, stamp duty, slippage), hard-stop capital sweeps (2-5%), trade-by-trade post-mortems, and evidence-backed improvement proposals. |
+| **9. Strategy Analyzer** | `InstitutionalStrategyAnalyzer` | `backend/app/strategies/analyzer.py` | On-Demand (API) | Evaluates strategies against the 5 Institutional Pillars (Edge, Risk-Reward, Feasibility, Capital Floor, Execution Risk) and generates catalog scorecards. |
+| **10. Loss Forensic Agent**| `LossAnalyzer` | `backend/app/loss_analyzer.py` | Event-Triggered | Automated technical autopsy on any losing trade; escalates to an LLM Senior Trading Partner upon encountering 3 consecutive losses. |
+| **11. Market Analytics** | `chart_analytics.py` | `backend/app/market/chart_analytics.py` | Real-Time / API | Computes non-repainting swing pivots (HH, HL, LH, LL, EQH, EQL), Market Structure Break (`BOS`), Change of Character (`CHoCH`), Fair Value Gaps (`FVG`), and Dynamic Trendlines. |
+| **12. Supervisor Daemon**| `Supervisor` | `backend/app/live/supervisor.py` | Background Daemon | Manages worker subprocesses for active deployments with exponential backoff crash recovery (5s to 5m) and capital floor monitoring. |
 
 ---
 
@@ -129,38 +131,47 @@ When `TradeManager` receives an actionable candidate setup, it coordinates sizin
 
 ```mermaid
 flowchart TD
-    subgraph TradeCrewDecision["Trade Execution Lifecycle"]
+    subgraph TradeCrewDecision["Trade Execution Lifecycle (Architecture C Optimized Hybrid)"]
         direction TB
-        in_setup([CandidateSetup Received]) --> trend_eval[TrendAgent: Evaluate 15m Trend & Dynamic R:R]
-        trend_eval --> order_flow{OrderFlowAgent: Absorption Trap?}
+        in_setup([CandidateSetup Received]) --> trend_eval[TrendAgent: Evaluate 15m Trend & Dynamic R:R +1.8R to +4.5R]
+        trend_eval --> order_flow{OrderFlowAgent: Whale Absorption Trap?}
         
         order_flow -->|Whale Volume Climax Opposing Signal| veto_trap[Veto: Institutional Trap Detected]
-        order_flow -->|Clear Order Flow| risk_eval[RiskAgent: Check Daily Limits & Circuit Breaker]
+        order_flow -->|Clear Order Flow| gamma_gate{Gamma Runway Gate: ≥ 80 pt Clearance?}
         
-        risk_eval --> daily_loss{Consecutive Losses >= 3 or Daily Max?}
+        gamma_gate -->|< 20 pt Vacuum or < 80 pt Runway| veto_gamma[Veto: Insufficient Gamma Clearance]
+        gamma_gate -->|Clear Runway| risk_eval[RiskAgent: Check Daily Limits & Circuit Breaker]
+        
+        risk_eval --> daily_loss{Consecutive Losses >= 2 or Daily Max?}
         daily_loss -->|Limit Exceeded| halt_daily[Halt: Daily Risk Circuit Breaker Active]
         
-        daily_loss -->|Within Risk Profile| sizing[Scaling Law: 3-Tier Sizing & Safety Wall Check]
-        sizing --> strike_picker[EntryAgent: Strictly OTM Contract Picker]
+        daily_loss -->|Within Risk Profile| thesis[Directional Thesis Engine: Target Pool & Invalidation Condition]
+        thesis --> sniper[SniperAgent: 1M Micro-Wick Execution Trigger & 15-25 pt Stop Pinning]
+        sniper --> sizing[3-Tier Sizing & 50% Capital Safety Wall Check]
+        sizing --> strike_picker[EntryAgent: Strictly 2-OTM Strike with Delta Floor ≥ 0.35]
         
-        strike_picker --> exec_route[ExecutionCrew: Smart Routing 30% Mkt / 70% Limit]
+        strike_picker --> idemp_check{Idempotent Key: Duplicate SHA-256 Order?}
+        idemp_check -->|Already Active / Executed| dup_suppress[Suppress Duplicate Order: Zero Double Fills]
+        
+        idemp_check -->|New Unique Order| exec_route[ExecutionCrew: Smart Routing 30% Mkt / 70% Limit]
         exec_route --> broker[BrokerBridgeAgent: Place Paper or Live Orders]
         
         broker --> recon[ReconciliationAgent: Verify Fill Count & Slippage Saved]
-        recon --> alert[AlertAgent: Dispatch Telegram Ticket & Thread CMP]
+        recon --> alert[AlertAgent: Dispatch Telegram Ticket with Thesis & Thread CMP]
         alert --> journal[JournalAgent: Commit to trades.db SQLite WAL & Sync Excel]
         
-        journal --> exit_mgr[ExitAgent: Monitor Target 1, 2, 3 & 5M Trail]
+        journal --> exit_mgr[ExitAgent: Monitor Targets, 5M Trail & Charm Time-Stop]
         exit_mgr -->|Target 1 Hit| book_half[Book 50% & Move SL to Cost]
         exit_mgr -->|Target 2 Hit| trail_swing[Book 25% & Trail 5M Swings]
         exit_mgr -->|Target 3 Hit| full_exit[Unconditional 100% Exit]
+        exit_mgr -->|6 Bars / 30 Min No Expansion| stagnation[Charm Time-Stop: Exit Stagnant Trade]
         exit_mgr -->|Opposing Sweep Formed| auto_flip[Auto-Flip: Immediate Market Exit]
     end
 
     classDef execClass fill:#eff6ff,stroke:#2563eb,stroke-width:1.4px,color:#1e3a8a;
     classDef haltClass fill:#fef2f2,stroke:#ef4444,stroke-width:1.4px,color:#991b1b;
-    class trend_eval,risk_eval,sizing,strike_picker,exec_route,broker,recon,alert,journal,exit_mgr,book_half,trail_swing,full_exit,auto_flip execClass;
-    class veto_trap,halt_daily haltClass;
+    class trend_eval,risk_eval,thesis,sniper,sizing,strike_picker,exec_route,broker,recon,alert,journal,exit_mgr,book_half,trail_swing,full_exit,stagnation,auto_flip execClass;
+    class veto_trap,veto_gamma,halt_daily,dup_suppress haltClass;
 ```
 
 ---

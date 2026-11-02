@@ -26,12 +26,13 @@ Genesis resolves this by providing an institutional quantitative pipeline spanni
 2. **Deterministic Review Crew**:
    - Executes a 7-step LangGraph StateGraph: syntax audit, parameter scenario building, historical backtesting with Indian options charges (brokerage, STT, exchange fees, GST, SEBI, stamp duty, slippage), hard-stop capital sweeps (2% to 5%), trade-by-trade post-mortems, verdict synthesis, and improvement proposals.
 
-3. **5 Specialized Autonomous Trading Crews**:
+3. **5 Specialized Autonomous Trading Crews & Architecture C Engines (53 Components Total)**:
    - **PreMarketCrew (08:30 – 09:14 IST)**: Gap analysis, Call/Put gamma walls, Max Pain, PCR, event risk screening, and morning battleplan generation.
-   - **ScannerCrew (09:15 – 15:30 IST)**: Real-time multi-timeframe delta polling (1m, 2m, 5m, 15m), VWAP proxy, dynamic level projection, ATR deadband/lunch-lull filtering, and multi-strategy pattern detection.
-   - **TradeCrew (Live Market Hours)**: Macro trend slope evaluation, dynamic R:R (+1.8R to +4.5R), whale volume absorption trap veto, 3-Tier sizing, strictly OTM strike selection, Telegram ticket dispatch, and trade journaling.
+   - **ScannerCrew (09:15 – 15:30 IST)**: Real-time multi-timeframe delta polling (1m, 2m, 5m, 15m), VWAP proxy, dynamic level projection, ATR deadband/lunch-lull filtering, dual-trendline squeeze detection, dynamic lookout horizons, and multi-strategy pattern detection.
+   - **TradeCrew (Live Market Hours)**: Macro trend slope evaluation, dynamic R:R (+1.8R to +4.5R), whale volume absorption trap veto, SniperAgent 1M micro-wick execution trigger (15–25 pt stops), strictly 2-OTM strike selection, Idempotent SHA-256 duplicate suppression, Telegram ticket dispatch with complete Directional Thesis, and trade journaling.
    - **ExecutionCrew**: Smart routing tranches (30% market / 70% limit chase), broker bridge (Paper and Live), and zero-drift position reconciliation.
    - **PostMarketCrew (15:31+ IST)**: Intraday tape reconstruction, exit audits, walk-forward parameter sweeps, 50% Capital Safety Wall profit locking, code quality audit, and daily executive digest.
+   - **Architecture C Protective Engines**: 6 specialized guardrails including Directional Thesis formulation, delta floor ($\Delta \ge 0.35$), gamma wall runway clearance ($\ge 80$ pts) and vacuum trap veto ($<20$ pts), 30-min Charm stagnation time-stop, SHA-256 order deduplication, and India VIX 11.5–22.0 corridor gate.
 
 4. **Non-Repainting Market Structure Engine**:
    - Mathematical swing high/low detection (2L/2R), Market Structure Break (`BOS`), Change of Character (`CHoCH`), Fair Value Gaps (`FVG`), dynamic trendlines, and session VWAP.
@@ -39,7 +40,7 @@ Genesis resolves this by providing an institutional quantitative pipeline spanni
 5. **Institutional Risk & Sizing Engine**:
    - **3-Tier Execution Framework**: 3 Lots 1-OTM (standard momentum), 4 Lots 2-OTM (super-trend runner), and 2 Lots ATM (scalp mode).
    - **50% Capital Safety Wall**: Permanently locks 50% of cumulative net realized profits into a protected floor, eliminating the risk of giving back gains.
-   - **Daily Circuit Breakers**: Max 3 daily trades, soft pause on 2 consecutive losses, mandatory hard stop on 3 losses.
+   - **Daily Circuit Breakers**: Max 3 daily trades, soft pause on 2 consecutive losses, mandatory hard stop on $-2.0\text{R}$ drawdown.
 
 6. **Single Source of Truth (SSOT) & Excel Sync**:
    - High-throughput SQLite WAL database (`data/trades.db`) provides atomic, concurrent ACID transactions.

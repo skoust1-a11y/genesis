@@ -147,17 +147,21 @@ Genesis decouples trading into 5 distinct specialized crews executing sequential
   - *Breakout & Retest* (OR-30 and PDH/PDL reclaims)
   - *Trendline Reversal* (3-point touch, false breakout, micro-wick reclaim)
   - *Liquidity Sweep* (PDH/PDL raid, 15m MSS, VWAP reclaim)
+  - *Dual-Trendline Squeeze Detection* (High/Low converging compression lines)
+  - *Dynamic Lookout Horizons* (30m, 45m, 60m expiry timeout tracking)
 - **Artifacts**: Emits verified `ScanSnapshot` and `CandidateSetup` objects.
 
 ### 3. TradeCrew (`backend/app/trading/crew/`)
 - **Execution Window**: Real-time intraday decision loop.
 - **TradeManager**: Master live orchestrator.
 - **TrendAgent**: Determines macro regime slope and aligns dynamic R:R targets (+1.8R to +4.5R).
-- **RiskAgent**: Enforces daily risk circuit breakers, capital floors, and maximum loss limits.
 - **OrderFlowAgent**: Detects institutional whale absorption climaxes and issues pre-entry vetoes.
-- **EntryAgent**: Triggers micro-wick entries with strictly Out-of-the-Money (OTM) options contracts.
-- **ExitAgent**: Manages multi-target lifecycle: Target 1 (+1.8R book 50% & SL to Cost), Target 2 (+2.5R book 25% & trail 5M swings), Target 3 (+3.5R to +4.5R unconditional full exit), and opposing sweep auto-flip.
-- **AlertAgent**: Dispatches interactive Telegram tickets and threads real-time CMP updates.
+- **SniperAgent**: 1M micro-wick execution trigger, shrinking stops to 15–25 pts for asymmetric 1:5R+ expansion.
+- **RiskAgent**: Enforces daily risk circuit breakers, capital floors, and maximum loss limits.
+- **EntryAgent**: Formulates structured Directional Thesis with strictly 2-OTM options contracts ($\Delta \ge 0.35$ floor).
+- **Idempotent Guard**: Cryptographic SHA-256 signature authorization key suppressing duplicate orders.
+- **ExitAgent**: Manages multi-target lifecycle: Target 1 (+1.8R book 50% & SL to Cost), Target 2 (+2.5R book 25% & trail 5M swings), Target 3 (+3.5R to +4.5R full exit), 30-min Charm stagnation time-stop, and auto-flips.
+- **AlertAgent**: Dispatches interactive Telegram tickets with complete Directional Thesis and threaded CMP heartbeats.
 - **JournalAgent**: Commits ACID records to the `trades.db` SQLite SSOT.
 
 ### 4. ExecutionCrew (`backend/app/trading/execution_crew/`)
@@ -173,6 +177,17 @@ Genesis decouples trading into 5 distinct specialized crews executing sequential
 - **SafetyWallAgent**: Sweeps net realized profits and locks 50% permanently into the protected Capital Floor.
 - **CodeQualityAgent**: Audits application logs, system warnings, and latency bottlenecks.
 - **BriefingAgent**: Writes `reports/daily_audit_YYYY-MM-DD.md` and dispatches the Executive Digest to Telegram.
+
+### 6. Architecture C Protective Engines (`backend/app/trading/crew/`)
+The **Optimized Hybrid Engine** integrates 6 specialized protective guardrails into the execution path:
+1. **Directional Thesis Engine**: Tracks `primary_bet`, `targeted_pool`, `invalidation_price`, and `thesis_conviction`.
+2. **Delta Floor Engine**: Strictly 2-OTM contract selection with an enforced $\Delta \ge 0.35$ floor against Charm decay.
+3. **Gamma Wall Runway Gate**: Checks $\ge 80$ pts runway to opposing dealer gamma walls; vetoes $<20$ pt vacuum traps.
+4. **Charm & 30-Min Stagnation Time-Stop**: Exits trades stagnating for 6 consecutive 5M bars without expansion.
+5. **Idempotent Order Guard**: Computes `SHA-256(date_strategy_dir_strike_price)` to suppress duplicate orders across live and paper.
+6. **Session & VIX Gatekeeper**: Filters trading to India VIX 11.5–22.0, enforces Gate E 13:00–13:30, and mandates 15:10 IST square-off.
+
+*(Total System Components: 29 Modular Crew Agents/Managers + 6 Architecture C Engines + 15 LangGraph State Nodes + 2 Strategic Diagnostics + 1 Supervisor Daemon = **53 Functional Components**)*
 
 ---
 

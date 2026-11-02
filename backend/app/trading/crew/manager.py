@@ -217,6 +217,7 @@ class TradeManager:
                 results["actions"].append({
                     "action": exit_decision.action,
                     "trade_id": trade_id,
+                    "pnl_rupees": float(closed_trade.get("pnl_rupees", 0.0) if closed_trade else 0.0),
                     "realized_points": exit_decision.realized_points,
                     "realized_r": exit_decision.realized_r,
                     "reason": exit_decision.exit_reason,

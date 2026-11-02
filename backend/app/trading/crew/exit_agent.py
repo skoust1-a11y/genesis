@@ -80,15 +80,19 @@ class ExitAgent:
         current_move = (cmp - entry_price) if direction == "CALL" else (entry_price - cmp)
         current_r = current_move / risk_pts
 
-        # 1. Stop Loss Hit
+        # 1. Stop Loss or Trailing/Ratcheted Stop Hit
         is_stop_hit = (cmp <= stop_loss) if direction == "CALL" else (cmp >= stop_loss)
         if is_stop_hit:
+            realized_pts = round((stop_loss - entry_price) if direction == "CALL" else (entry_price - stop_loss), 2)
+            is_profitable_stop = realized_pts > 0.0
+            act_name = "TRAILING_STOP_HIT" if is_profitable_stop else "STOP_LOSS_HIT"
+            calc_r = round(realized_pts / risk_pts, 2) if is_profitable_stop else -1.0
             return ExitDecision(
-                action="STOP_LOSS_HIT",
+                action=act_name,
                 exit_price=stop_loss,
-                realized_points=round((stop_loss - entry_price) if direction == "CALL" else (entry_price - stop_loss), 2),
-                realized_r=-1.0,
-                exit_reason=f"Stop Loss hit at {stop_loss:.2f}",
+                realized_points=realized_pts,
+                realized_r=calc_r,
+                exit_reason=f"{'Trailing Stop' if is_profitable_stop else 'Stop Loss'} hit at {stop_loss:.2f}",
                 remaining_lots=0,
                 is_fully_closed=True,
             )

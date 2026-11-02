@@ -75,17 +75,19 @@ The live trading architecture is decoupled into 5 specialized autonomous crews m
    - `LevelsAgent`: Pins dynamic PDH, PDL, PDC, Opening Range (OR-30: 09:15-09:45), and psychological strike levels.
    - `ConsolidationAgent`: Midday compression box & ATR deadband detector (Lunch Lull 11:30-13:00 filter).
    - `NewsAgent`: Evaluates live news sentiment and macro catalyst risks.
-   - `DetectorAgent`: Multi-strategy pattern scanner for Breakout & Retest, Liquidity Sweep (PDH/PDL raid), and Trendline Reversal.
+   - `DetectorAgent`: Multi-strategy pattern scanner for Breakout & Retest, Liquidity Sweep (PDH/PDL raid), Trendline Reversal, Dual-Trendline Squeeze Detection, and Dynamic Lookout Horizons.
    - Emits real-time `ScanSnapshot` and verified `CandidateSetup` objects.
 
 3. **TradeCrew (`backend/app/trading/crew/`)**:
    - `TradeManager`: Master live trade orchestrator.
    - `TrendAgent`: Calculates macro trend slope and aligns dynamic R:R targets (+1.8R to +4.5R).
-   - `RiskAgent`: Enforces daily loss limits, consecutive loss circuit breakers, and 50% Capital Safety Wall.
    - `OrderFlowAgent`: Detects institutional whale volume spikes and absorption traps to issue pre-entry vetoes.
-   - `EntryAgent`: Executes micro-wick entries with strictly OTM option strikes (1-OTM standard, 2-OTM super-trend).
-   - `ExitAgent`: Unconditional Target 3 full close, 5M structural trailing stop, and opposing sweep auto-flip.
-   - `AlertAgent`: Dispatches live Telegram trade tickets and threaded CMP heartbeat updates.
+   - `SniperAgent`: 1M micro-wick execution trigger, shrinking stops to 15–25 pts for asymmetric 1:5R+ expansion.
+   - `RiskAgent`: Enforces 3-Tier sizing, daily loss limits, consecutive loss circuit breakers, and 50% Capital Safety Wall.
+   - `EntryAgent`: Executes Directional Thesis formulation with strictly 2-OTM strikes ($\Delta \ge 0.35$ floor).
+   - `Idempotent Guard`: SHA-256 order signature authorization key preventing duplicate fills and double orders.
+   - `ExitAgent`: Unconditional Target 3 full close, 5M structural trailing stop, 30-min Charm stagnation time-stop, and opposing sweep auto-flip.
+   - `AlertAgent`: Dispatches live Telegram trade tickets with complete Directional Thesis and threaded CMP heartbeat updates.
    - `JournalAgent`: Manages active trade cache and commits atomic ACID records to `trades.db` SQLite SSOT.
 
 4. **ExecutionCrew (`backend/app/trading/execution_crew/`)**:
@@ -101,6 +103,18 @@ The live trading architecture is decoupled into 5 specialized autonomous crews m
    - `SafetyWallAgent`: Sweeps net realized profits and locks 50% permanently into the protected Capital Floor.
    - `CodeQualityAgent`: Audits application logs, system warnings, and latency bottlenecks.
    - `BriefingAgent`: Writes `reports/daily_audit_YYYY-MM-DD.md` and dispatches the Executive Digest to Telegram.
+
+### 6. Architecture C Protective Engines (`backend/app/trading/crew/`)
+
+Architecture C ("The Optimized Hybrid Engine") adds 6 specialized protective engines directly into the execution path:
+1. **Directional Thesis Engine**: Generates `primary_bet`, `targeted_pool`, `invalidation_price`, and `thesis_conviction`.
+2. **Delta Floor Engine**: Guarantees estimated option $\Delta \ge 0.35$ on strictly 2-OTM strikes, preventing Charm decay.
+3. **Gamma Wall Runway Gate**: Checks $\ge 80$ pts open runway to opposing dealer gamma walls and vetoes $<20$ pt vacuum traps.
+4. **Charm & Stagnation Time-Stop**: Exits trades stagnating for 6 five-minute bars (30 min) without reaching Target 1.
+5. **Idempotent Order Guard**: Computes `SHA-256(date_strategy_dir_strike_price)` to suppress duplicate orders across live and paper.
+6. **Session & VIX Gatekeeper**: Filters trading to India VIX 11.5–22.0, blocks 13:00–13:30 Gate E lunch lull, and enforces 15:10 IST square-off.
+
+*(Total System Components: 29 Modular Crew Agents/Managers + 6 Architecture C Engines + 15 LangGraph State Nodes + 2 Strategic Diagnostics + 1 Supervisor Daemon = **53 Functional Components**)*
 
 ### 6. TradeStore SSOT & Excel Synchronization (`backend/app/db/trade_store.py`)
 

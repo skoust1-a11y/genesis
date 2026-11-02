@@ -88,17 +88,19 @@ blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1;
 <p>   - <code>LevelsAgent</code>: Pins dynamic PDH, PDL, PDC, Opening Range (OR-30: 09:15-09:45), and psychological strike levels.</p>
 <p>   - <code>ConsolidationAgent</code>: Midday compression box &amp; ATR deadband detector (Lunch Lull 11:30-13:00 filter).</p>
 <p>   - <code>NewsAgent</code>: Evaluates live news sentiment and macro catalyst risks.</p>
-<p>   - <code>DetectorAgent</code>: Multi-strategy pattern scanner for Breakout &amp; Retest, Liquidity Sweep (PDH/PDL raid), and Trendline Reversal.</p>
+<p>   - <code>DetectorAgent</code>: Multi-strategy pattern scanner for Breakout &amp; Retest, Liquidity Sweep (PDH/PDL raid), Trendline Reversal, Dual-Trendline Squeeze Detection, and Dynamic Lookout Horizons.</p>
 <p>   - Emits real-time <code>ScanSnapshot</code> and verified <code>CandidateSetup</code> objects.</p>
 
 <p>3. <strong>TradeCrew (<code>backend/app/trading/crew/</code>)</strong>:</p>
 <p>   - <code>TradeManager</code>: Master live trade orchestrator.</p>
 <p>   - <code>TrendAgent</code>: Calculates macro trend slope and aligns dynamic R:R targets (+1.8R to +4.5R).</p>
-<p>   - <code>RiskAgent</code>: Enforces daily loss limits, consecutive loss circuit breakers, and 50% Capital Safety Wall.</p>
 <p>   - <code>OrderFlowAgent</code>: Detects institutional whale volume spikes and absorption traps to issue pre-entry vetoes.</p>
-<p>   - <code>EntryAgent</code>: Executes micro-wick entries with strictly OTM option strikes (1-OTM standard, 2-OTM super-trend).</p>
-<p>   - <code>ExitAgent</code>: Unconditional Target 3 full close, 5M structural trailing stop, and opposing sweep auto-flip.</p>
-<p>   - <code>AlertAgent</code>: Dispatches live Telegram trade tickets and threaded CMP heartbeat updates.</p>
+<p>   - <code>SniperAgent</code>: 1M micro-wick execution trigger, shrinking stops to 15–25 pts for asymmetric 1:5R+ expansion.</p>
+<p>   - <code>RiskAgent</code>: Enforces 3-Tier sizing, daily loss limits, consecutive loss circuit breakers, and 50% Capital Safety Wall.</p>
+<p>   - <code>EntryAgent</code>: Executes Directional Thesis formulation with strictly 2-OTM strikes ($\Delta \ge 0.35$ floor).</p>
+<p>   - <code>Idempotent Guard</code>: SHA-256 order signature authorization key preventing duplicate fills and double orders.</p>
+<p>   - <code>ExitAgent</code>: Unconditional Target 3 full close, 5M structural trailing stop, 30-min Charm stagnation time-stop, and opposing sweep auto-flip.</p>
+<p>   - <code>AlertAgent</code>: Dispatches live Telegram trade tickets with complete Directional Thesis and threaded CMP heartbeat updates.</p>
 <p>   - <code>JournalAgent</code>: Manages active trade cache and commits atomic ACID records to <code>trades.db</code> SQLite SSOT.</p>
 
 <p>4. <strong>ExecutionCrew (<code>backend/app/trading/execution_crew/</code>)</strong>:</p>
@@ -114,6 +116,18 @@ blockquote { margin-left: 0; padding-left: 12px; border-left: 3px solid #d6d3d1;
 <p>   - <code>SafetyWallAgent</code>: Sweeps net realized profits and locks 50% permanently into the protected Capital Floor.</p>
 <p>   - <code>CodeQualityAgent</code>: Audits application logs, system warnings, and latency bottlenecks.</p>
 <p>   - <code>BriefingAgent</code>: Writes <code>reports/daily_audit_YYYY-MM-DD.md</code> and dispatches the Executive Digest to Telegram.</p>
+
+<h3>6. Architecture C Protective Engines (<code>backend/app/trading/crew/</code>)</h3>
+
+<p>Architecture C (&quot;The Optimized Hybrid Engine&quot;) adds 6 specialized protective engines directly into the execution path:</p>
+<p>1. <strong>Directional Thesis Engine</strong>: Generates <code>primary_bet</code>, <code>targeted_pool</code>, <code>invalidation_price</code>, and <code>thesis_conviction</code>.</p>
+<p>2. <strong>Delta Floor Engine</strong>: Guarantees estimated option $\Delta \ge 0.35$ on strictly 2-OTM strikes, preventing Charm decay.</p>
+<p>3. <strong>Gamma Wall Runway Gate</strong>: Checks $\ge 80$ pts open runway to opposing dealer gamma walls and vetoes $&lt;20$ pt vacuum traps.</p>
+<p>4. <strong>Charm &amp; Stagnation Time-Stop</strong>: Exits trades stagnating for 6 five-minute bars (30 min) without reaching Target 1.</p>
+<p>5. <strong>Idempotent Order Guard</strong>: Computes <code>SHA-256(date_strategy_dir_strike_price)</code> to suppress duplicate orders across live and paper.</p>
+<p>6. <strong>Session &amp; VIX Gatekeeper</strong>: Filters trading to India VIX 11.5–22.0, blocks 13:00–13:30 Gate E lunch lull, and enforces 15:10 IST square-off.</p>
+
+<p>*(Total System Components: 29 Modular Crew Agents/Managers + 6 Architecture C Engines + 15 LangGraph State Nodes + 2 Strategic Diagnostics + 1 Supervisor Daemon = <strong>53 Functional Components</strong>)*</p>
 
 <h3>6. TradeStore SSOT &amp; Excel Synchronization (<code>backend/app/db/trade_store.py</code>)</h3>
 
