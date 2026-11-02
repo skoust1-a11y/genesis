@@ -39,6 +39,7 @@ class TradeManager:
         is_paper_trading: bool = True,
         trades_dir: Path | None = None,
         db_path: Path | None = None,
+        alert_agent: AlertAgent | None = None,
     ) -> None:
         self.trend_agent = TrendAgent()
         self.order_flow_agent = OrderFlowAgent()
@@ -59,7 +60,7 @@ class TradeManager:
         )
         # Architecture C: Unconditional square-off at 15:10 IST
         self.exit_agent = ExitAgent(intraday_cutoff_time="15:10")
-        self.alert_agent = AlertAgent(is_paper_trading=is_paper_trading)
+        self.alert_agent = alert_agent or AlertAgent(is_paper_trading=is_paper_trading)
         self.journal_agent = JournalAgent(trades_dir=trades_dir, db_path=db_path)
         self.is_paper_trading = is_paper_trading
         self.executed_order_signatures: set[str] = set()
