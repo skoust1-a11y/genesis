@@ -304,17 +304,27 @@ class TradeManager:
 
             # Gate B: Lunch Lull Gate (11:30 - 13:00 IST) - Hard freeze on low-volume chop
             if "11:30" <= time_val < "13:00":
+                # Lunch Lull Gate – previously required volume >=1.8× avg.
+                # New logic: lower threshold to 1.5× and allow override for high‑R candidates.
                 has_waterfall_volume = False
                 if df_5m is not None and len(df_5m) >= 10 and "volume" in df_5m.columns:
                     recent_vol = float(df_5m["volume"].iloc[-1])
                     avg_vol = float(df_5m["volume"].iloc[-10:-1].mean())
-                    if avg_vol > 0 and recent_vol >= avg_vol * 1.8:
+                    if avg_vol > 0 and recent_vol >= avg_vol * 1.5:
                         has_waterfall_volume = True
 
-                if not has_waterfall_volume:
+                # Check for high‑R candidate override (risk_points >=30 ≈ 2.5R expected)
+                override_allowed = False
+                if not has_waterfall_volume and candidate_setups:
+                    for cand in candidate_setups:
+                        if getattr(cand, "risk_points", 0) >= 30:
+                            override_allowed = True
+                            break
+
+                if not has_waterfall_volume and not override_allowed:
                     results["actions"].append({
                         "action": "VETO_LUNCH_LULL",
-                        "reason": "Lunch Lull Gate (11:30-13:00 IST): Hard freeze on low-volume entries.",
+                        "reason": "Lunch Lull Gate (11:30-13:00 IST): Low volume and no high‑R candidate override.",
                     })
                     return results
 
@@ -442,26 +452,26 @@ class TradeManager:
                         _la = LevelsAgent()
                         eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m)
                         if cand.direction == "PUT":
-                            # Veto short if resting within 50 pts below un-swept EQH magnet
-                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= 50.0 for eqh in eqh_list)
+                            # Only veto short if entering directly beneath EQH magnet (<= 20 pts)
+                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= 20.0 for eqh in eqh_list)
                             if veto_eqh:
-                                logger.info(f"Candidate PUT vetoed by EQH Magnet Gate: within 50 pts below un-swept EQH pool.")
+                                logger.info("Candidate PUT vetoed by EQH Magnet Gate: within 20 pts below un-swept EQH pool.")
                                 continue
-                            # Veto short if resting directly above un-swept EQL support (< 35 pts)
-                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= 35.0 for eql in eql_list)
+                            # Only veto short if directly crashing into un-swept EQL support (<= 15 pts)
+                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= 15.0 for eql in eql_list)
                             if veto_eql:
-                                logger.info(f"Candidate PUT vetoed by EQL Support Gate: within 35 pts above un-swept EQL support.")
+                                logger.info("Candidate PUT vetoed by EQL Support Gate: within 15 pts above un-swept EQL support.")
                                 continue
                         else:
-                            # Veto long if resting within 50 pts above un-swept EQL magnet
-                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= 50.0 for eql in eql_list)
+                            # Only veto long if entering directly above EQL magnet (<= 20 pts)
+                            veto_eql = any(0.0 < (cand.trigger_price - eql) <= 20.0 for eql in eql_list)
                             if veto_eql:
-                                logger.info(f"Candidate CALL vetoed by EQL Magnet Gate: within 50 pts above un-swept EQL pool.")
+                                logger.info("Candidate CALL vetoed by EQL Magnet Gate: within 20 pts above un-swept EQL pool.")
                                 continue
-                            # Veto long if resting directly below un-swept EQH ceiling (< 35 pts)
-                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= 35.0 for eqh in eqh_list)
+                            # Only veto long if directly crashing into un-swept EQH resistance (<= 15 pts)
+                            veto_eqh = any(0.0 < (eqh - cand.trigger_price) <= 15.0 for eqh in eqh_list)
                             if veto_eqh:
-                                logger.info(f"Candidate CALL vetoed by EQH Resistance Gate: within 35 pts below un-swept EQH resistance.")
+                                logger.info("Candidate CALL vetoed by EQH Resistance Gate: within 15 pts below un-swept EQH resistance.")
                                 continue
 
                     # Dynamic target and regime from TrendAgent
@@ -555,7 +565,7 @@ class TradeManager:
                         _la = LevelsAgent()
                         eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m)
                         current_c = float(df_5m.iloc[-1]["close"]) if df_5m is not None and not df_5m.empty else morning_floor
-                        veto_waterfall = any(0.0 < (eqh - current_c) <= 50.0 for eqh in eqh_list) or any(0.0 < (current_c - eql) <= 35.0 for eql in eql_list)
+                        veto_waterfall = any(0.0 < (eqh - current_c) <= 20.0 for eqh in eqh_list) or any(0.0 < (current_c - eql) <= 15.0 for eql in eql_list)
                         if not veto_waterfall:
                             candidate_signal = self.entry_agent.evaluate_waterfall(
                                 df_5m, morning_floor, key_levels, put_wall=put_wall
