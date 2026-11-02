@@ -89,3 +89,47 @@ def test_scanner_manager_pipeline():
     assert snap.levels.pdh > 0
     assert snap.news_sentiment.is_trading_safe is True
     assert isinstance(snap.actionable_setups, list)
+
+
+def test_levels_agent_eqh_eql_detection():
+    agent = LevelsAgent()
+    # Create synthetic DataFrame with two equal peaks and two equal troughs
+    bars = [
+        {"date": f"2026-11-02 09:{15 + i*5}", "open": 23200, "high": 23210, "low": 23190, "close": 23205}
+        for i in range(16)
+    ]
+    # Equal Highs at 23,280 (bars 2 and 8) with a trough at bar 5 (23,220)
+    bars[2] = {"date": "2026-11-02 09:25", "open": 23260, "high": 23280.0, "low": 23250, "close": 23275}
+    bars[5] = {"date": "2026-11-02 09:40", "open": 23230, "high": 23240.0, "low": 23220.0, "close": 23225}
+    bars[8] = {"date": "2026-11-02 09:55", "open": 23265, "high": 23281.0, "low": 23255, "close": 23278}
+
+    # Equal Lows at 23,150 (bars 10 and 14) with a peak at bar 12 (23,200)
+    bars[10] = {"date": "2026-11-02 10:05", "open": 23160, "high": 23170.0, "low": 23150.0, "close": 23155}
+    bars[12] = {"date": "2026-11-02 10:15", "open": 23180, "high": 23200.0, "low": 23175.0, "close": 23195}
+    bars[14] = {"date": "2026-11-02 10:25", "open": 23165, "high": 23175.0, "low": 23151.0, "close": 23160}
+
+    df = pd.DataFrame(bars)
+    eqh, eql = agent.detect_equal_highs_lows(df, tol_pts=4.0)
+
+    assert any(abs(h - 23280.5) <= 1.0 for h in eqh)
+    assert any(abs(l - 23150.5) <= 1.0 for l in eql)
+
+
+def test_detector_agent_eqh_sweep():
+    detector = DetectorAgent()
+    bars = [
+        {"date": f"2026-11-02 09:{30 + i*5}", "open": 23250, "high": 23260, "low": 23240, "close": 23255}
+        for i in range(5)
+    ]
+    # 6th bar sweeps 23280 EQH to 23288, closes back below at 23265
+    bars.append({"date": "2026-11-02 10:05", "open": 23272, "high": 23288, "low": 23260, "close": 23265})
+    levels = SessionLevels(
+        pdh=23350, pdl=23100, pdc=23200, pivot=23200, r1=23300, s1=23100,
+        eqh_levels=[23280.0], eql_levels=[], all_key_levels=[23280.0]
+    )
+    setups = detector.scan_multi_timeframe_strategies(
+        tf_bars_map={"5m": bars},
+        levels=levels,
+        strategy_filter="equal",
+    )
+    assert any("Equal Highs Sweep" in s.strategy and s.direction == "PUT" for s in setups)

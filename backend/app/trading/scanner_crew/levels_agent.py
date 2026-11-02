@@ -31,6 +31,8 @@ class SessionLevels:
     val: float | None = None
     call_oi_wall: float | None = None
     put_oi_wall: float | None = None
+    eqh_levels: list[float] = field(default_factory=list)
+    eql_levels: list[float] = field(default_factory=list)
     all_key_levels: list[float] = field(default_factory=list)
 
 
@@ -124,6 +126,13 @@ class LevelsAgent:
         for offset in [-150, -100, -50, 0, 50, 100, 150]:
             levels_set.add(float(base_round + offset))
 
+        # Detect Equal Highs (EQH) and Equal Lows (EQL)
+        eqh_levels, eql_levels = self.detect_equal_highs_lows(df_intraday_today)
+        for h in eqh_levels:
+            levels_set.add(h)
+        for l in eql_levels:
+            levels_set.add(l)
+
         return SessionLevels(
             pdh=round(pdh, 2),
             pdl=round(pdl, 2),
@@ -138,5 +147,51 @@ class LevelsAgent:
             val=val,
             call_oi_wall=call_wall,
             put_oi_wall=put_wall,
+            eqh_levels=eqh_levels,
+            eql_levels=eql_levels,
             all_key_levels=sorted(list(levels_set)),
         )
+
+    def detect_equal_highs_lows(
+        self,
+        df_5m: pd.DataFrame | None,
+        tol_pts: float = 6.5,
+        min_bars_apart: int = 3,
+        min_depth: float = 8.0,
+    ) -> tuple[list[float], list[float]]:
+        """Identify Equal High (EQH) and Equal Low (EQL) liquidity pools from 5M bars."""
+        if df_5m is None or len(df_5m) < 6:
+            return [], []
+
+        highs = []
+        lows = []
+        n = len(df_5m)
+        for i in range(1, n - 1):
+            h_curr = float(df_5m.iloc[i]["high"])
+            l_curr = float(df_5m.iloc[i]["low"])
+            if h_curr >= float(df_5m.iloc[i - 1]["high"]) and h_curr >= float(df_5m.iloc[i + 1]["high"]):
+                highs.append((i, h_curr))
+            if l_curr <= float(df_5m.iloc[i - 1]["low"]) and l_curr <= float(df_5m.iloc[i + 1]["low"]):
+                lows.append((i, l_curr))
+
+        eqh: list[float] = []
+        for a in range(len(highs)):
+            for b in range(a + 1, len(highs)):
+                i1, h1 = highs[a]
+                i2, h2 = highs[b]
+                if (i2 - i1) >= min_bars_apart and abs(h1 - h2) <= tol_pts:
+                    trough = float(df_5m.iloc[i1 : i2 + 1]["low"].min())
+                    if min(h1, h2) - trough >= min_depth:
+                        eqh.append(round((h1 + h2) / 2.0, 1))
+
+        eql: list[float] = []
+        for a in range(len(lows)):
+            for b in range(a + 1, len(lows)):
+                i1, l1 = lows[a]
+                i2, l2 = lows[b]
+                if (i2 - i1) >= min_bars_apart and abs(l1 - l2) <= tol_pts:
+                    peak = float(df_5m.iloc[i1 : i2 + 1]["high"].max())
+                    if peak - max(l1, l2) >= min_depth:
+                        eql.append(round((l1 + l2) / 2.0, 1))
+
+        return sorted(list(set(eqh))), sorted(list(set(eql)))

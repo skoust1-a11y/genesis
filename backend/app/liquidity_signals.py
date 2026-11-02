@@ -531,7 +531,7 @@ class DualTrendlineStructure:
 @dataclass
 class DynamicLookoutWindow:
     """Dynamic Timeframe Lookout Window (4x to 6x base candle duration)."""
-    setup_name: str
+    setup_name: str = "Setup"
     base_tf: str = "30M"  # "30M", "15M", "5M"
     multiplier: float = 5.0  # 4x to 6x
     detected_time_str: str = ""

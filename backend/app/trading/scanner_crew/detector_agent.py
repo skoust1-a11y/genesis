@@ -286,4 +286,74 @@ class DetectorAgent:
                 except Exception as se:
                     logger.debug(f"Sweep scanner note for {tf}: {se}")
 
+            # -------------------------------------------------------------
+            # 4. Strategy: Equal High (EQH) & Equal Low (EQL) Sweeps
+            # -------------------------------------------------------------
+            if strategy_filter in ("auto", "sweep", "equal") and len(bars) >= 6 and bar_mins >= 3:
+                last_bar = bars[-1]
+                b_high = float(last_bar.get("high", 0.0))
+                b_low = float(last_bar.get("low", 0.0))
+                b_close = float(last_bar.get("close", 0.0))
+                b_time = str(last_bar.get("date", "") or last_bar.get("timestamp", ""))
+
+                # Check EQH Sweep: Price swept above EQH level by 1 to 18 pts, but closed back below EQH
+                for eqh in getattr(levels, "eqh_levels", []):
+                    if b_high > eqh and b_close < eqh and (b_high - eqh) <= 18.0:
+                        risk = max(12.0, min(35.0, b_high - b_close + 5.0))
+                        entry = b_close
+                        stop = b_high + 3.0
+                        target = entry - (risk * 3.0)
+                        strike_round = int(round(entry / 50.0) * 50) - int(self.otm_steps * 50)
+                        strike = f"NIFTY {strike_round} PE"
+
+                        setups.append(CandidateSetup(
+                            strategy=f"Equal Highs Sweep [{tf.upper()}]",
+                            symbol="NIFTY",
+                            direction="PUT",
+                            trigger_price=round(entry, 2),
+                            tentative_stop=round(stop, 2),
+                            tentative_target=round(target, 2),
+                            timeframe=tf,
+                            timestamp=b_time,
+                            rationale=f"Equal Highs Sweep: Swept EQH ({eqh:.1f}) to {b_high:.1f} and closed back below at {b_close:.1f}",
+                            news_sentiment_score=sentiment.sentiment_score,
+                            event_risk_cleared=sentiment.is_trading_safe,
+                            is_valid_for_trade_crew=True,
+                            suggested_strike=strike,
+                            risk_points=round(risk, 2),
+                            target_points=round(abs(entry - target), 2),
+                            rr_ratio=3.0,
+                            is_super_trend=True,
+                        ))
+
+                # Check EQL Sweep: Price swept below EQL level by 1 to 18 pts, but closed back above EQL
+                for eql in getattr(levels, "eql_levels", []):
+                    if b_low < eql and b_close > eql and (eql - b_low) <= 18.0:
+                        risk = max(12.0, min(35.0, b_close - b_low + 5.0))
+                        entry = b_close
+                        stop = b_low - 3.0
+                        target = entry + (risk * 3.0)
+                        strike_round = int(round(entry / 50.0) * 50) + int(self.otm_steps * 50)
+                        strike = f"NIFTY {strike_round} CE"
+
+                        setups.append(CandidateSetup(
+                            strategy=f"Equal Lows Sweep [{tf.upper()}]",
+                            symbol="NIFTY",
+                            direction="CALL",
+                            trigger_price=round(entry, 2),
+                            tentative_stop=round(stop, 2),
+                            tentative_target=round(target, 2),
+                            timeframe=tf,
+                            timestamp=b_time,
+                            rationale=f"Equal Lows Sweep: Swept EQL ({eql:.1f}) to {b_low:.1f} and snapped back above at {b_close:.1f}",
+                            news_sentiment_score=sentiment.sentiment_score,
+                            event_risk_cleared=sentiment.is_trading_safe,
+                            is_valid_for_trade_crew=True,
+                            suggested_strike=strike,
+                            risk_points=round(risk, 2),
+                            target_points=round(abs(entry - target), 2),
+                            rr_ratio=3.0,
+                            is_super_trend=True,
+                        ))
+
         return setups
