@@ -291,17 +291,25 @@ class DetectorAgent:
             # -------------------------------------------------------------
             if strategy_filter in ("auto", "sweep", "equal") and len(bars) >= 6 and bar_mins >= 3:
                 last_bar = bars[-1]
+                b_open = float(last_bar.get("open", 0.0))
                 b_high = float(last_bar.get("high", 0.0))
                 b_low = float(last_bar.get("low", 0.0))
                 b_close = float(last_bar.get("close", 0.0))
                 b_time = str(last_bar.get("date", "") or last_bar.get("timestamp", ""))
 
-                # Check EQH Sweep: Price swept above EQH level by 1 to 18 pts, but closed back below EQH
+                # Check EQH Sweep: Price swept above EQH level by 1 to 18 pts, but rejected and closed back below EQH
+                body = abs(b_close - b_open)
+                upper_wick = b_high - max(b_open, b_close)
+                is_eqh_rejection = (b_close < b_open) or (upper_wick >= max(2.0, body * 0.5))
+
                 for eqh in getattr(levels, "eqh_levels", []):
-                    if b_high > eqh and b_close < eqh and (b_high - eqh) <= 18.0:
-                        risk = max(12.0, min(35.0, b_high - b_close + 5.0))
+                    # Do not short an EQH if price has already broken out into strong uptrend expansion above PDH
+                    if levels.pdh and b_close > levels.pdh + 10.0:
+                        continue
+                    if b_high > eqh and b_close < eqh and (b_high - eqh) <= 18.0 and is_eqh_rejection:
+                        risk = max(15.0, min(35.0, b_high - b_close + 5.0))
                         entry = b_close
-                        stop = b_high + 3.0
+                        stop = b_high + 5.0
                         target = entry - (risk * 3.0)
                         strike_round = int(round(entry / 50.0) * 50) - int(self.otm_steps * 50)
                         strike = f"NIFTY {strike_round} PE"
@@ -326,12 +334,18 @@ class DetectorAgent:
                             is_super_trend=True,
                         ))
 
-                # Check EQL Sweep: Price swept below EQL level by 1 to 18 pts, but closed back above EQL
+                # Check EQL Sweep: Price swept below EQL level by 1 to 18 pts, but absorbed and closed back above EQL
+                lower_wick = min(b_open, b_close) - b_low
+                is_eql_absorption = (b_close > b_open) or (lower_wick >= max(2.0, body * 0.5))
+
                 for eql in getattr(levels, "eql_levels", []):
-                    if b_low < eql and b_close > eql and (eql - b_low) <= 18.0:
-                        risk = max(12.0, min(35.0, b_close - b_low + 5.0))
+                    # Do not buy an EQL if price has already broken down into strong downtrend expansion below PDL
+                    if levels.pdl and b_close < levels.pdl - 10.0:
+                        continue
+                    if b_low < eql and b_close > eql and (eql - b_low) <= 18.0 and is_eql_absorption:
+                        risk = max(15.0, min(35.0, b_close - b_low + 5.0))
                         entry = b_close
-                        stop = b_low - 3.0
+                        stop = b_low - 5.0
                         target = entry + (risk * 3.0)
                         strike_round = int(round(entry / 50.0) * 50) + int(self.otm_steps * 50)
                         strike = f"NIFTY {strike_round} CE"

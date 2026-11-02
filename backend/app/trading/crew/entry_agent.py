@@ -156,9 +156,10 @@ class EntryAgent:
 
             if wick_valid:
                 entry = c_close
-                # Tight 25-35pt micro-wick stop: just above candle body + buffer (capped at c_high)
-                stop = min(max(c_open, c_close) + self.default_stop_buffer, c_high + 2.0)
-                risk_pts = abs(entry - stop)
+                # Institutional 22-35pt stop: above rejection high with 22pt minimum floor
+                raw_risk = max(c_high + 3.0 - entry, self.default_stop_buffer)
+                risk_pts = max(22.0, min(35.0, raw_risk))
+                stop = entry + risk_pts
 
                 # Gamma Wall & Vacuum Gate for Shorts:
                 # Distance to Put Wall must not be < 15-20 pts (vacuum trap)
@@ -251,9 +252,10 @@ class EntryAgent:
 
             if wick_valid:
                 entry = c_close
-                # Tight stop: just below candle body - buffer
-                stop = max(min(c_open, c_close) - self.default_stop_buffer, c_low - 2.0)
-                risk_pts = abs(entry - stop)
+                # Institutional 22-35pt stop: below rejection low with 22pt minimum floor
+                raw_risk = max(entry - (c_low - 3.0), self.default_stop_buffer)
+                risk_pts = max(22.0, min(35.0, raw_risk))
+                stop = entry - risk_pts
 
                 # Gamma Wall & Vacuum Gate for Longs:
                 # Spot must not be within 15-20 points of Call Wall
@@ -338,7 +340,10 @@ class EntryAgent:
             return None
 
         curr = df_5m.iloc[-1]
+        c_open = float(curr["open"])
         c_close = float(curr["close"])
+        c_high = float(curr["high"])
+        c_low = float(curr["low"])
         timestamp = str(curr.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
 
         # Check volume surge: > 1.8x average of last 10 candles
@@ -346,9 +351,19 @@ class EntryAgent:
         curr_vol = float(curr.get("volume", 0.0))
         vol_surge = (curr_vol >= avg_vol * 1.8) if avg_vol > 0 else True
 
-        if c_close < morning_floor and vol_surge:
+        # True Waterfall Breakdown requires:
+        # 1. Bearish candle close: c_close < c_open
+        # 2. Closed decisively below morning floor
+        # 3. No bottom absorption tail (lower wick <= body)
+        body = abs(c_close - c_open)
+        lower_wick = c_close - c_low
+        is_bearish_expansion = (c_close < c_open) and (lower_wick <= max(2.0, body * 0.8))
+
+        # Must close at least 6 points below floor for true displacement (not 1-tick wick)
+        if c_close <= (morning_floor - 6.0) and vol_surge and is_bearish_expansion:
             entry = c_close
-            stop = float(curr["high"]) + self.default_stop_buffer
+            # Structural high with a minimum 22-25pt buffer to avoid 1-tick retest stop-outs
+            stop = max(c_high + self.default_stop_buffer, entry + 22.0)
             risk_pts = abs(entry - stop)
 
             p_wall = put_wall if put_wall is not None else (round(entry / 100.0) * 100.0 - 100.0)
@@ -361,6 +376,10 @@ class EntryAgent:
             regime = self.trend_agent.evaluate_regime(
                 df_5m, entry, "PUT", key_levels, is_waterfall_active=True
             )
+            # Must be allowed by TrendAgent and have active momentum expansion (ADX >= 22)
+            if not regime.is_breakout_allowed or regime.adx < 22.0:
+                return None
+
             target = entry - (risk_pts * max(3.0, regime.recommended_target_r))
 
             risk_appr = self.risk_agent.evaluate_order(entry, stop)

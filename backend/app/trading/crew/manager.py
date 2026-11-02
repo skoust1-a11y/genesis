@@ -165,6 +165,10 @@ class TradeManager:
                 trade["conquered_level"] = conquered_lvl
                 trade.setdefault("milestones_hit", set()).add("HOP_PROMOTED")
 
+                lot_qty = 65
+                booked_gain = exit_decision.realized_points * 0.5 * (booked_lots * lot_qty)
+                trade["booked_pnl_rupees"] = float(trade.get("booked_pnl_rupees", 0.0)) + booked_gain
+
                 # Estimate option prices for Telegram alert (~0.50 delta model)
                 risk_p = float(trade.get("risk_points", 25.0))
                 opt_entry = round(max(40.0, risk_p * 4.5), 1)
@@ -552,9 +556,8 @@ class TradeManager:
                     )
                     break
 
-            # Fallback to internal sweep/waterfall check if no candidates passed
-            if not candidate_signal:
-                # Gate E check for internal sweep during 13:00 - 13:30
+            # Fallback to internal sweep/waterfall check ONLY if Scanner Crew is not supplying candidates
+            if not candidate_signal and candidate_setups is None:
                 allow_internal = True
                 if "13:00" <= time_val < "13:30":
                     allow_internal = False
@@ -562,7 +565,7 @@ class TradeManager:
                     candidate_signal = self.entry_agent.evaluate_sweep(
                         df_5m, pdh, pdl, key_levels, call_wall=call_wall, put_wall=put_wall
                     )
-                    if not candidate_signal and morning_floor is not None:
+                    if not candidate_signal and morning_floor is not None and "11:30" <= time_val <= "13:45":
                         from app.trading.scanner_crew.levels_agent import LevelsAgent
                         _la = LevelsAgent()
                         eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m, tol_pts=8.0)

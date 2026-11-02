@@ -148,7 +148,9 @@ class JournalAgent:
 
         trade = active[trade_id]
         lots = int(trade.get("lots", 1))
-        pnl_rupees = decision.realized_points * 0.5 * (lots * lot_qty)
+        runner_pnl = decision.realized_points * 0.5 * (lots * lot_qty)
+        booked_prior = float(trade.get("booked_pnl_rupees", 0.0))
+        pnl_rupees = runner_pnl + booked_prior
 
         trade["exit_price"] = decision.exit_price
         trade["realized_points"] = decision.realized_points
