@@ -80,33 +80,37 @@ class OrderFlowAgent:
 
         curr = df_5m.iloc[-1]
         c_open, c_high, c_low, c_close = float(curr["open"]), float(curr["high"]), float(curr["low"]), float(curr["close"])
-        vol = float(curr.get("volume", 1000.0))
-        avg_vol = df_5m["volume"].tail(10).mean() if "volume" in df_5m.columns else vol
+        vol = float(curr.get("volume") or 0.0)
+        has_volume = "volume" in df_5m.columns and (float(df_5m["volume"].sum()) > 0.0)
+        avg_vol = float(df_5m["volume"].tail(10).mean()) if has_volume else 0.0
+        vol_surge = (vol >= avg_vol * 1.3) if has_volume else True
 
         # 1. Bullish Breakout Trap (Sellers absorbing buyers at highs)
-        # Price made a high, but has heavy upper wick and high volume
+        # Price made a high, but has heavy upper wick (>= 50% of candle range)
         if direction == "CALL":
             upper_wick = c_high - max(c_open, c_close)
             body = abs(c_close - c_open)
             total_range = c_high - c_low
-            if upper_wick >= total_range * self.absorption_wick_ratio and vol >= avg_vol * 1.3:
+            if total_range > 0 and upper_wick >= total_range * self.absorption_wick_ratio and vol_surge:
+                vol_msg = f" on volume ({vol:,.0f})" if has_volume else ""
                 return (
                     True,
                     "SELLER_ABSORBING_BUYERS",
-                    f"Passive Absorption: Upper wick ({upper_wick:.1f} pts) on high volume ({vol:,.0f}) indicates institutional limit selling.",
+                    f"Passive Absorption: Upper wick ({upper_wick:.1f} pts, {upper_wick/total_range*100:.0f}% of range){vol_msg} indicates institutional limit selling.",
                 )
 
         # 2. Bearish Breakdown Trap (Buyers absorbing sellers at lows)
-        # Price made a low, but has heavy lower wick and high volume
+        # Price made a low, but has heavy lower wick (>= 50% of candle range)
         if direction == "PUT":
             lower_wick = min(c_open, c_close) - c_low
             body = abs(c_close - c_open)
             total_range = c_high - c_low
-            if lower_wick >= total_range * self.absorption_wick_ratio and vol >= avg_vol * 1.3:
+            if total_range > 0 and lower_wick >= total_range * self.absorption_wick_ratio and vol_surge:
+                vol_msg = f" on volume ({vol:,.0f})" if has_volume else ""
                 return (
                     True,
                     "BUYER_ABSORBING_SELLERS",
-                    f"Passive Absorption: Lower wick ({lower_wick:.1f} pts) on high volume ({vol:,.0f}) indicates institutional limit buying.",
+                    f"Passive Absorption: Lower wick ({lower_wick:.1f} pts, {lower_wick/total_range*100:.0f}% of range){vol_msg} indicates institutional limit buying.",
                 )
 
         return False, "NONE", "Healthy order-flow structure"

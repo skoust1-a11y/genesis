@@ -67,8 +67,8 @@ class GammaAgent:
         else:
             # Fallback estimation based on round numbers around spot
             atm = round(current_spot / 100.0) * 100.0
-            call_wall = atm + 100.0
-            put_wall = atm - 100.0
+            call_wall = atm + 250.0
+            put_wall = atm - 250.0
             max_pain = atm
             pcr = 1.05
             total_call_oi = 50_000_000

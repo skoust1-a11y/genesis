@@ -45,10 +45,12 @@ class TradeManager:
         self.order_flow_agent = OrderFlowAgent()
         self.gamma_agent = GammaAgent()
         # Architecture C: Strictly fixed at 3 to 4 lots (195-260 Qty) baseline
+        risk_cfg = (trades_dir / "daily_risk_config.json") if trades_dir else None
         self.risk_agent = RiskAgent(
             base_capital=base_capital,
             default_lots=3,
             max_super_lots=4,
+            config_path=risk_cfg,
             order_flow_agent=self.order_flow_agent,
             frozen_baseline=True,
         )
@@ -205,7 +207,7 @@ class TradeManager:
                 })
 
             elif exit_decision.is_fully_closed:
-                closed_trade = self.journal_agent.record_exit(trade_id, exit_decision, date_str)
+                closed_trade = self.journal_agent.record_exit(trade_id, exit_decision, date_str, exit_time_str=time_val)
                 lots = int(trade.get("lots", 1))
                 self.alert_agent.send_exit_alert(
                     symbol=trade.get("symbol", "NIFTY"),
@@ -237,13 +239,15 @@ class TradeManager:
                 risk_p = float(trade.get("risk_points", 25.0))
                 opt_entry = round(max(40.0, risk_p * 4.5), 1)
 
-                if current_r >= 1.0 and "1R" not in milestones:
-                    milestones.add("1R")
-                    opt_prem = round(opt_entry + (risk_p * 0.5), 1)
+                if current_r >= 0.7 and "0.7R" not in milestones:
+                    milestones.add("0.7R")
+                    trade["stop_loss"] = float(trade.get("entry_price", trade["stop_loss"]))
+                    trade["be_locked"] = True
+                    opt_prem = round(opt_entry + (risk_p * 0.35), 1)
                     self.alert_agent.send_trailing_update(
                         symbol=trade.get("symbol", "NIFTY"),
                         strike=strike,
-                        milestone="+1R Milestone",
+                        milestone="+0.7R Milestone",
                         cmp=cmp,
                         r_multiple=current_r,
                         opt_premium=opt_prem,
@@ -261,6 +265,12 @@ class TradeManager:
 
                 elif current_r >= 2.0 and "2R" not in milestones:
                     milestones.add("2R")
+                    trade_dir = trade.get("direction", "CALL")
+                    trade_entry = float(trade.get("entry_price", cmp))
+                    if trade_dir == "CALL":
+                        trade["stop_loss"] = round(trade_entry + (risk_p * 0.8), 2)
+                    else:
+                        trade["stop_loss"] = round(trade_entry - (risk_p * 0.8), 2)
                     opt_prem = round(opt_entry + (risk_p * 1.0), 1)
                     locked_sl = round(opt_entry + (risk_p * 0.5), 1)
                     remaining_lots = max(1, int(trade.get("lots", 2)) // 2)
@@ -286,9 +296,17 @@ class TradeManager:
                     self.journal_agent.save_active_trades(active_trades, date_str)
 
         # ---------------------------------------------------------------------
-        # 2. Evaluate New Entries via Candidate Setups or EntryAgent (if Flat)
+        # 2. Evaluate New Entries via Candidate Setups or EntryAgent
         # ---------------------------------------------------------------------
+        can_take_entry = False
         if len(active_trades) == 0:
+            can_take_entry = True
+        elif len(active_trades) == 1:
+            first_trade = list(active_trades.values())[0]
+            if first_trade.get("be_locked"):
+                can_take_entry = True
+
+        if can_take_entry:
             # Check Circuit Breaker upfront
             if self.risk_agent.is_safety_wall_locked or self.risk_agent.daily_losses_count >= self.risk_agent.max_daily_losses or self.risk_agent.daily_cumulative_r <= -2.0:
                 logger.info("Circuit Breaker Active: Trading halted for the day.")
@@ -556,8 +574,22 @@ class TradeManager:
                     )
                     break
 
-            # Fallback to internal sweep/waterfall check ONLY if Scanner Crew is not supplying candidates
+            # If no candidate signal, check Midday Waterfall breakdown during active window
+            if not candidate_signal and morning_floor is not None and "11:30" <= time_val <= "13:45":
+                from app.trading.scanner_crew.levels_agent import LevelsAgent
+                _la = LevelsAgent()
+                eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m, tol_pts=8.0)
+                current_c = float(df_5m.iloc[-1]["close"]) if df_5m is not None and not df_5m.empty else morning_floor
+                EQ_ZONE_PTS = 8.0  # Equal liquidity zone: 5 to 10 points
+                veto_waterfall = any(0.0 < (eqh - current_c) <= EQ_ZONE_PTS for eqh in eqh_list) or any(0.0 < (current_c - eql) <= EQ_ZONE_PTS for eql in eql_list)
+                if not veto_waterfall:
+                    candidate_signal = self.entry_agent.evaluate_waterfall(
+                        df_5m, morning_floor, key_levels, put_wall=put_wall
+                    )
+                else:
+                    logger.info("Waterfall PUT entry vetoed by EQH/EQL Magnet Gate (un-swept liquidity pool nearby).")
             if not candidate_signal and candidate_setups is None:
+                # Standalone fallback sweep only if scanner crew is inactive
                 allow_internal = True
                 if "13:00" <= time_val < "13:30":
                     allow_internal = False
@@ -565,25 +597,13 @@ class TradeManager:
                     candidate_signal = self.entry_agent.evaluate_sweep(
                         df_5m, pdh, pdl, key_levels, call_wall=call_wall, put_wall=put_wall
                     )
-                    if not candidate_signal and morning_floor is not None and "11:30" <= time_val <= "13:45":
-                        from app.trading.scanner_crew.levels_agent import LevelsAgent
-                        _la = LevelsAgent()
-                        eqh_list, eql_list = _la.detect_equal_highs_lows(df_5m, tol_pts=8.0)
-                        current_c = float(df_5m.iloc[-1]["close"]) if df_5m is not None and not df_5m.empty else morning_floor
-                        EQ_ZONE_PTS = 8.0  # Equal liquidity zone: 5 to 10 points
-                        veto_waterfall = any(0.0 < (eqh - current_c) <= EQ_ZONE_PTS for eqh in eqh_list) or any(0.0 < (current_c - eql) <= EQ_ZONE_PTS for eql in eql_list)
-                        if not veto_waterfall:
-                            candidate_signal = self.entry_agent.evaluate_waterfall(
-                                df_5m, morning_floor, key_levels, put_wall=put_wall
-                            )
-                        else:
-                            logger.info("Waterfall PUT entry vetoed by EQH/EQL Magnet Gate (un-swept liquidity pool nearby).")
 
             if candidate_signal:
                 # -----------------------------------------------------------------
                 # Idempotent Order Authorization & Duplicate Suppression
                 # -----------------------------------------------------------------
-                raw_sig = f"{date_val}_{candidate_signal.strategy}_{candidate_signal.direction}_{candidate_signal.suggested_strike}_{round(candidate_signal.entry_price, 0)}"
+                sig_time = str(candidate_signal.timestamp or "")[:16]
+                raw_sig = f"{date_val}_{candidate_signal.strategy}_{candidate_signal.direction}_{candidate_signal.suggested_strike}_{sig_time}_{round(candidate_signal.entry_price, 0)}"
                 idempotent_key = hashlib.sha256(raw_sig.encode("utf-8")).hexdigest()
 
                 is_duplicate = False

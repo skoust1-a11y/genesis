@@ -72,7 +72,8 @@ class JournalAgent:
 
     def record_entry(self, signal: TradeSignal, date_str: str | None = None) -> dict[str, Any]:
         """Record a new open trade in the active cache and SQLite."""
-        trade_id = f"TRADE_{signal.symbol}_{int(datetime.now().timestamp())}"
+        import uuid
+        trade_id = f"TRADE_{signal.symbol}_{int(datetime.now().timestamp() * 1000)}_{uuid.uuid4().hex[:6]}"
         thesis_dict = None
         if getattr(signal, "thesis", None) is not None:
             from dataclasses import asdict
@@ -140,6 +141,7 @@ class JournalAgent:
         decision: ExitDecision,
         date_str: str | None = None,
         lot_qty: int = 65,
+        exit_time_str: str | None = None,
     ) -> dict[str, Any] | None:
         """Record trade completion, persist to SQLite & executed trades log, and clear active state."""
         active = self.load_active_trades(date_str)
@@ -156,8 +158,10 @@ class JournalAgent:
         trade["realized_points"] = decision.realized_points
         trade["realized_r"] = decision.realized_r
         trade["pnl_rupees"] = round(pnl_rupees, 2)
-        trade["exit_reason"] = decision.exit_reason
-        trade["exit_timestamp"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        t_now = exit_time_str or datetime.now().strftime("%H:%M:%S")
+        if len(t_now) == 5:
+            t_now = f"{t_now}:00"
+        trade["exit_timestamp"] = f"{date_str} {t_now}" if date_str else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         trade["status"] = "CLOSED"
 
         # Remove from active trades

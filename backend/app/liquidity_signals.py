@@ -548,7 +548,7 @@ class DynamicLookoutWindow:
             t0 = datetime.strptime(self.detected_time_str[-5:], "%H:%M")
             t1 = datetime.strptime(entry_time_str[-5:], "%H:%M")
             elapsed = (t1 - t0).total_seconds() / 60.0
-            return 0.0 <= elapsed <= self.max_lookout_minutes
+            return -15.0 <= elapsed <= self.max_lookout_minutes
         except Exception:
             return True
 
@@ -589,13 +589,13 @@ def detect_dual_trendline_squeeze(bars: list[dict], min_bars: int = 10) -> DualT
 
     if upper_slope < -0.1 and lower_slope > 0.1:
         pattern = "SYMMETRICAL_TRIANGLE"
-        is_squeeze = span < 40.0
+        is_squeeze = 0.0 < span < 40.0
     elif abs(upper_slope) <= 0.1 and lower_slope > 0.15:
         pattern = "ASCENDING_TRIANGLE"
-        is_squeeze = span < 35.0
+        is_squeeze = 0.0 < span < 35.0
     elif upper_slope < -0.15 and abs(lower_slope) <= 0.1:
         pattern = "DESCENDING_TRIANGLE"
-        is_squeeze = span < 35.0
+        is_squeeze = 0.0 < span < 35.0
     elif abs(upper_slope - lower_slope) < 0.15 and (abs(upper_slope) > 0.2):
         pattern = "PARALLEL_CHANNEL"
         is_squeeze = False

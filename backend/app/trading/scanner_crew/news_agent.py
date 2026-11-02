@@ -63,12 +63,28 @@ class NewsAgent:
         """Check if trading should be gated due to an imminent high-impact macro announcement."""
         t_str = current_time_str or datetime.now().strftime("%H:%M")
         
-        # Check against high impact windows
+        # Check against high impact windows - only triggers if confirming headline exists or explicit date match
+        has_relevant_headline = False
+        if self.cached_headlines:
+            all_text = " ".join(
+                (h.get("title", "") if isinstance(h, dict) else str(h)).lower()
+                for h in self.cached_headlines
+            )
+            has_relevant_headline = any(k in all_text for k in ("rbi", "fomc", "fed rate", "cpi", "monetary policy", "inflation"))
+
         for ev in self.SCHEDULED_HIGH_IMPACT_EVENTS:
+            ev_date = ev.get("date")
             ev_time = ev["time"]
             window = ev["window_mins"]
             
-            # Simple check if current time is within window
+            # If event specifies a scheduled date, ensure today matches
+            if ev_date and ev_date != datetime.now().strftime("%Y-%m-%d"):
+                continue
+
+            # If recurring without a date, only guard if live news mentions the event catalyst
+            if not ev_date and not has_relevant_headline:
+                continue
+
             try:
                 curr_dt = datetime.strptime(t_str, "%H:%M")
                 ev_dt = datetime.strptime(ev_time, "%H:%M")

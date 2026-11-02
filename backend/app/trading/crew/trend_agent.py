@@ -37,7 +37,7 @@ class TrendAgent:
         self,
         min_adx_for_breakout: float = 18.0,
         max_chop_index: float = 61.8,
-        min_runway_points: float = 35.0,
+        min_runway_points: float = 15.0,
         base_rr: float = 2.5,
     ) -> None:
         self.min_adx = min_adx_for_breakout

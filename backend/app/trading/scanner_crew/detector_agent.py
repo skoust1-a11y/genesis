@@ -119,7 +119,19 @@ class DetectorAgent:
             df_tf = pd.DataFrame(bars)
             compression = self.consolidation_agent.evaluate_compression(df_tf, current_time_str=current_time_str)
             bar_mins = 1 if tf == "1m" else (15 if tf == "15m" else 5)
-            above = {b.get("date", ""): True for b in bars}
+            # Intraday VWAP calculation for accurate Breakout & Retest CALL and PUT detection
+            cum_vol = 0.0
+            cum_pv = 0.0
+            cum_tp = 0.0
+            above = {}
+            for idx_b, b in enumerate(bars):
+                v = float(b.get("volume", 0) or 0)
+                tp = (float(b.get("high", 0)) + float(b.get("low", 0)) + float(b.get("close", 0))) / 3.0
+                cum_vol += v
+                cum_pv += tp * v
+                cum_tp += tp
+                vwap = (cum_pv / cum_vol) if cum_vol > 0 else (cum_tp / (idx_b + 1))
+                above[b.get("date", "")] = float(b.get("close", 0)) >= vwap
 
             # -------------------------------------------------------------
             # 1. Strategy: Trendline Reversal (CHoCH Confirmed)
@@ -188,7 +200,7 @@ class DetectorAgent:
                         levels.pdh,
                         levels.pdl,
                         skip_lunch="conditional",
-                        allow_reentry=False,
+                        allow_reentry=allow_reentry,
                         bar_minutes=bar_mins,
                         include_orh_orl=True,
                         dynamic_targets=True,
@@ -297,14 +309,20 @@ class DetectorAgent:
                 b_close = float(last_bar.get("close", 0.0))
                 b_time = str(last_bar.get("date", "") or last_bar.get("timestamp", ""))
 
-                # Check EQH Sweep: Price swept above EQH level by 1 to 18 pts, but rejected and closed back below EQH
+                # Check EQH Sweep: Price swept above EQH level by 1 to 18 pts, but rejected with decisive upper wick
                 body = abs(b_close - b_open)
                 upper_wick = b_high - max(b_open, b_close)
-                is_eqh_rejection = (b_close < b_open) or (upper_wick >= max(2.0, body * 0.5))
+                is_eqh_rejection = (b_close < b_open) and (upper_wick >= max(3.0, body * 0.6))
+                sess_high = max(float(b.get("high", 0.0)) for b in bars)
+                sess_low = min(float(b.get("low", 999999.0)) for b in bars)
 
                 for eqh in getattr(levels, "eqh_levels", []):
-                    # Do not short an EQH if price has already broken out into strong uptrend expansion above PDH
-                    if levels.pdh and b_close > levels.pdh + 10.0:
+                    # Must be a true institutional pool at/near session high or PDH (not internal range noise)
+                    is_macro_eqh = (eqh >= (sess_high - 25.0)) or (levels.pdh and abs(eqh - levels.pdh) <= 25.0)
+                    if not is_macro_eqh:
+                        continue
+                    # Do not short an EQH if price has already broken out into strong uptrend expansion above PDH or ORH
+                    if (levels.pdh and b_close > levels.pdh + 10.0) or (getattr(levels, "or30_high", None) and b_close > levels.or30_high + 5.0):
                         continue
                     if b_high > eqh and b_close < eqh and (b_high - eqh) <= 18.0 and is_eqh_rejection:
                         risk = max(15.0, min(35.0, b_high - b_close + 5.0))
@@ -334,13 +352,17 @@ class DetectorAgent:
                             is_super_trend=True,
                         ))
 
-                # Check EQL Sweep: Price swept below EQL level by 1 to 18 pts, but absorbed and closed back above EQL
+                # Check EQL Sweep: Price swept below EQL level by 1 to 18 pts, but absorbed with decisive lower wick
                 lower_wick = min(b_open, b_close) - b_low
-                is_eql_absorption = (b_close > b_open) or (lower_wick >= max(2.0, body * 0.5))
+                is_eql_absorption = (b_close > b_open) and (lower_wick >= max(3.0, body * 0.6))
 
                 for eql in getattr(levels, "eql_levels", []):
-                    # Do not buy an EQL if price has already broken down into strong downtrend expansion below PDL
-                    if levels.pdl and b_close < levels.pdl - 10.0:
+                    # Must be a true institutional pool at/near session low or PDL (not internal range noise)
+                    is_macro_eql = (eql <= (sess_low + 25.0)) or (levels.pdl and abs(eql - levels.pdl) <= 25.0)
+                    if not is_macro_eql:
+                        continue
+                    # Do not buy an EQL if price has already broken down into strong downtrend expansion below PDL or ORL
+                    if (levels.pdl and b_close < levels.pdl - 10.0) or (getattr(levels, "or30_low", None) and b_close < levels.or30_low - 5.0):
                         continue
                     if b_low < eql and b_close > eql and (eql - b_low) <= 18.0 and is_eql_absorption:
                         risk = max(15.0, min(35.0, b_close - b_low + 5.0))

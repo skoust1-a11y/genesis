@@ -81,18 +81,22 @@ class ExitAgent:
         current_r = current_move / risk_pts
 
         # 1. Stop Loss or Trailing/Ratcheted Stop Hit
-        is_stop_hit = (cmp <= stop_loss) if direction == "CALL" else (cmp >= stop_loss)
+        effective_sl = stop_loss
+        if active_trade.get("be_locked"):
+            effective_sl = max(stop_loss, entry_price) if direction == "CALL" else min(stop_loss, entry_price)
+
+        is_stop_hit = (cmp <= effective_sl) if direction == "CALL" else (cmp >= effective_sl)
         if is_stop_hit:
-            realized_pts = round((stop_loss - entry_price) if direction == "CALL" else (entry_price - stop_loss), 2)
-            is_profitable_stop = realized_pts > 0.0
+            realized_pts = round((effective_sl - entry_price) if direction == "CALL" else (entry_price - effective_sl), 2)
+            is_profitable_stop = realized_pts >= 0.0
             act_name = "TRAILING_STOP_HIT" if is_profitable_stop else "STOP_LOSS_HIT"
             calc_r = round(realized_pts / risk_pts, 2) if is_profitable_stop else -1.0
             return ExitDecision(
                 action=act_name,
-                exit_price=stop_loss,
+                exit_price=effective_sl,
                 realized_points=realized_pts,
                 realized_r=calc_r,
-                exit_reason=f"{'Trailing Stop' if is_profitable_stop else 'Stop Loss'} hit at {stop_loss:.2f}",
+                exit_reason=f"{'Trailing Stop' if is_profitable_stop else 'Stop Loss'} hit at {effective_sl:.2f}",
                 remaining_lots=0,
                 is_fully_closed=True,
             )
@@ -156,8 +160,9 @@ class ExitAgent:
 
         # 4. Delta Decay & Stagnation Time-Stop (Charm Guard)
         # If trade has not hit Target 1 (+1.8R) within 6 completed 5m bars (30 minutes), trigger immediate market exit
+        # Exception: If trade has locked Breakeven (be_locked is True) and current_r >= 0.5, allow trailing runner to run
         trade_bars = bars_in_trade or int(active_trade.get("bars_in_trade", 0))
-        if trade_bars >= 6 and current_r < 1.8:
+        if trade_bars >= 6 and current_r < 1.8 and not (active_trade.get("be_locked", False) and current_r >= 0.5):
             return ExitDecision(
                 action="STAGNATION_TIME_STOP",
                 exit_price=cmp,

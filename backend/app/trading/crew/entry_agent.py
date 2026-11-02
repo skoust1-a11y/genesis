@@ -344,12 +344,12 @@ class EntryAgent:
         c_close = float(curr["close"])
         c_high = float(curr["high"])
         c_low = float(curr["low"])
-        timestamp = str(curr.get("timestamp", datetime.now().strftime("%Y-%m-%d %H:%M:%S")))
+        timestamp = str(curr.get("date") or curr.get("timestamp") or datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
 
-        # Check volume surge: > 1.8x average of last 10 candles
+        # Check volume surge: > 1.4x average of last 10 candles
         avg_vol = df_5m["volume"].iloc[-10:-1].mean() if "volume" in df_5m.columns else 1.0
         curr_vol = float(curr.get("volume", 0.0))
-        vol_surge = (curr_vol >= avg_vol * 1.8) if avg_vol > 0 else True
+        vol_surge = (curr_vol >= avg_vol * 1.4) if avg_vol > 0 else True
 
         # True Waterfall Breakdown requires:
         # 1. Bearish candle close: c_close < c_open
@@ -359,8 +359,9 @@ class EntryAgent:
         lower_wick = c_close - c_low
         is_bearish_expansion = (c_close < c_open) and (lower_wick <= max(2.0, body * 0.8))
 
-        # Must close at least 6 points below floor for true displacement (not 1-tick wick)
-        if c_close <= (morning_floor - 6.0) and vol_surge and is_bearish_expansion:
+        # True Waterfall Breakdown requires breaking the true session low (not closing on a higher low)
+        prior_floor = min(morning_floor, float(df_5m.iloc[:-1]["low"].min()))
+        if c_close <= (prior_floor - 4.0) and vol_surge and is_bearish_expansion:
             entry = c_close
             # Structural high with a minimum 22-25pt buffer to avoid 1-tick retest stop-outs
             stop = max(c_high + self.default_stop_buffer, entry + 22.0)
@@ -376,8 +377,8 @@ class EntryAgent:
             regime = self.trend_agent.evaluate_regime(
                 df_5m, entry, "PUT", key_levels, is_waterfall_active=True
             )
-            # Must be allowed by TrendAgent and have active momentum expansion (ADX >= 22)
-            if not regime.is_breakout_allowed or regime.adx < 22.0:
+            # Must be allowed by TrendAgent and have active momentum expansion (ADX >= 18)
+            if not regime.is_breakout_allowed or regime.adx < 18.0:
                 return None
 
             target = entry - (risk_pts * max(3.0, regime.recommended_target_r))

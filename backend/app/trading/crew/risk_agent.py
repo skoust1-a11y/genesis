@@ -105,7 +105,9 @@ class RiskAgent:
             # Automatically ratchet 50% of net realized profit into safety_wall_reserve
             reserve_addition = round(pnl_rupees * 0.50, 2)
             self.safety_wall_reserve += reserve_addition
-        elif not is_win:
+        elif pnl_rupees <= -500.0 or realized_r <= -0.5:
+            # Only count as a true loss if capital was materially lost (e.g. stop loss hit)
+            # Scratches and breakeven capital-preservation exits are not failure losses
             self.daily_losses_count += 1
 
         self.daily_cumulative_r += realized_r
