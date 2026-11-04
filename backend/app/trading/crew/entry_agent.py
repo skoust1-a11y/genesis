@@ -58,6 +58,17 @@ class TradeSignal:
     lookout_duration_mins: int = 120
     lookout_status: str = "TRIGGERED"
     thesis: DirectionalThesis | None = None
+    path_target_pct: float | None = None
+    path_stop_pct: float | None = None
+    path_neither_pct: float | None = None
+    path_verdict: str | None = None
+    odds_line: str | None = None
+    market_lot: int | None = None
+
+
+def _chain_strike(row: dict) -> float:
+    strike = float(row.get("strike") or row.get("strikePrice") or 0.0)
+    return strike / 100.0 if strike > 100000 else strike
 
 
 def select_strike_with_delta_floor(
@@ -65,33 +76,47 @@ def select_strike_with_delta_floor(
     direction: Literal["CALL", "PUT"],
     otm_steps: int = 2,
     min_delta: float = 0.35,
+    chain: list[dict] | None = None,
 ) -> tuple[str, float]:
-    """Select option strike enforcing 2-OTM default and live Delta >= 0.35 floor."""
+    """Walk the live chain in from `otm_steps` until delta >= min_delta.
+
+    Without a chain the old 0.065-per-step estimate remains so callers that have no
+    quotes still get a strike label. Live opens pass the chain and ignore that estimate.
+    """
     step = 50.0
     atm_strike = round(entry_price / step) * step
+    contract_type = "CE" if direction == "CALL" else "PE"
+    side = "ce" if direction == "CALL" else "pe"
 
-    # Base steps OTM
+    if chain:
+        deltas: dict[float, float] = {}
+        for row in chain:
+            if not isinstance(row, dict):
+                continue
+            strike = _chain_strike(row)
+            if strike <= 0:
+                continue
+            leg = row.get(side) or {}
+            raw = (leg.get("greeks") or {}).get("delta")
+            if raw is None:
+                continue
+            deltas[round(strike, 2)] = abs(float(raw))
+        target = atm_strike + (otm_steps * step if direction == "CALL" else -otm_steps * step)
+        for _ in range(otm_steps + 8):
+            delta = deltas.get(round(target, 2))
+            if delta is not None and delta >= min_delta:
+                return f"NIFTY {int(target)} {contract_type}", round(delta, 2)
+            target += -step if direction == "CALL" else step
+        return f"NIFTY {int(atm_strike)} {contract_type}", 0.0
+
     steps_out = float(otm_steps)
-    if direction == "CALL":
-        target_strike = atm_strike + (steps_out * step)
-    else:
-        target_strike = atm_strike - (steps_out * step)
-
-    # Delta estimation: ATM ~0.50. Each 50 pt OTM step reduces delta by ~0.065
+    target_strike = atm_strike + (steps_out * step if direction == "CALL" else -steps_out * step)
     est_delta = max(0.05, 0.50 - (steps_out * 0.065))
-
-    # Enforce Delta >= 0.35 floor by stepping closer to ATM if necessary
     while est_delta < min_delta and steps_out > 0:
         steps_out -= 1.0
-        if direction == "CALL":
-            target_strike -= step
-        else:
-            target_strike += step
+        target_strike += -step if direction == "CALL" else step
         est_delta = max(0.05, 0.50 - (steps_out * 0.065))
-
-    contract_type = "CE" if direction == "CALL" else "PE"
-    strike_str = f"NIFTY {int(target_strike)} {contract_type}"
-    return strike_str, round(est_delta, 2)
+    return f"NIFTY {int(target_strike)} {contract_type}", round(est_delta, 2)
 
 
 class EntryAgent:
@@ -117,6 +142,7 @@ class EntryAgent:
         key_levels: list[float] | None = None,
         call_wall: float | None = None,
         put_wall: float | None = None,
+        chain: list[dict] | None = None,
     ) -> TradeSignal | None:
         """Scan for PDH/PDL liquidity sweeps and gamma wall reversals with micro-wick rejection."""
         if len(df_5m) < 2:
@@ -134,7 +160,7 @@ class EntryAgent:
         # Volume calculation for absorption check
         avg_vol = df_5m["volume"].iloc[-10:-1].mean() if "volume" in df_5m.columns and len(df_5m) >= 10 else 1.0
         curr_vol = float(curr.get("volume", 0.0))
-        vol_absorption = (curr_vol >= avg_vol * 1.1) if avg_vol > 0 else True
+        vol_absorption = bool(avg_vol > 0 and curr_vol > 0 and curr_vol >= avg_vol * 1.1)
 
         # ---------------------------------------------------------------------
         # 1. Bearish Sweep of PDH or Call Wall (Short / PUT)
@@ -184,7 +210,9 @@ class EntryAgent:
                 target = entry - (risk_pts * regime.recommended_target_r)
 
                 # Risk approval
-                risk_appr = self.risk_agent.evaluate_order(entry, stop)
+                risk_appr = self.risk_agent.evaluate_order(
+                    entry, stop, is_super_trend=len(df_5m) >= 28 and regime.adx >= 25.0,
+                )
                 if not risk_appr.approved:
                     return None
 
@@ -194,9 +222,12 @@ class EntryAgent:
                     direction="PUT",
                     otm_steps=self.otm_steps,
                     min_delta=0.35,
+                    chain=chain,
                 )
+                if chain and est_delta < 0.35:
+                    return None
 
-                conviction = "SUPER_TREND" if (regime.adx >= 25.0 or is_gamma_reversal) else "HIGH"
+                conviction = "SUPER_TREND" if (len(df_5m) >= 28 and regime.adx >= 25.0) else "HIGH"
                 pool_name = "GAMMA_WALL_SWEEP" if is_gamma_reversal else "BSL_SWEEP"
                 strat_name = "GAMMA_WALL_REVERSAL" if is_gamma_reversal else "LIQUIDITY_SWEEP"
 
@@ -276,7 +307,9 @@ class EntryAgent:
                     return None
 
                 target = entry + (risk_pts * regime.recommended_target_r)
-                risk_appr = self.risk_agent.evaluate_order(entry, stop)
+                risk_appr = self.risk_agent.evaluate_order(
+                    entry, stop, is_super_trend=len(df_5m) >= 28 and regime.adx >= 25.0,
+                )
                 if not risk_appr.approved:
                     return None
 
@@ -286,9 +319,12 @@ class EntryAgent:
                     direction="CALL",
                     otm_steps=self.otm_steps,
                     min_delta=0.35,
+                    chain=chain,
                 )
+                if chain and est_delta < 0.35:
+                    return None
 
-                conviction = "SUPER_TREND" if (regime.adx >= 25.0 or is_gamma_reversal) else "HIGH"
+                conviction = "SUPER_TREND" if (len(df_5m) >= 28 and regime.adx >= 25.0) else "HIGH"
                 pool_name = "GAMMA_WALL_SWEEP" if is_gamma_reversal else "SSL_SWEEP"
                 strat_name = "GAMMA_WALL_REVERSAL" if is_gamma_reversal else "LIQUIDITY_SWEEP"
 
@@ -334,6 +370,7 @@ class EntryAgent:
         morning_floor: float,
         key_levels: list[float] | None = None,
         put_wall: float | None = None,
+        chain: list[dict] | None = None,
     ) -> TradeSignal | None:
         """Scan for Midday Volume Waterfall breakdown (replaces binary lunch blackout)."""
         if len(df_5m) < 10:
@@ -349,7 +386,7 @@ class EntryAgent:
         # Check volume surge: > 1.4x average of last 10 candles
         avg_vol = df_5m["volume"].iloc[-10:-1].mean() if "volume" in df_5m.columns else 1.0
         curr_vol = float(curr.get("volume", 0.0))
-        vol_surge = (curr_vol >= avg_vol * 1.4) if avg_vol > 0 else True
+        vol_surge = bool(avg_vol > 0 and curr_vol > 0 and curr_vol >= avg_vol * 1.4)
 
         # True Waterfall Breakdown requires:
         # 1. Bearish candle close: c_close < c_open
@@ -383,7 +420,9 @@ class EntryAgent:
 
             target = entry - (risk_pts * max(3.0, regime.recommended_target_r))
 
-            risk_appr = self.risk_agent.evaluate_order(entry, stop)
+            risk_appr = self.risk_agent.evaluate_order(
+                entry, stop, is_super_trend=len(df_5m) >= 28 and regime.adx >= 25.0,
+            )
             if not risk_appr.approved:
                 return None
 
@@ -393,7 +432,10 @@ class EntryAgent:
                 direction="PUT",
                 otm_steps=self.otm_steps,
                 min_delta=0.35,
+                chain=chain,
             )
+            if chain and est_delta < 0.35:
+                return None
 
             thesis = DirectionalThesis(
                 primary_bet=f"Bearish SSL Waterfall Expansion to {target:,.1f}",
@@ -402,7 +444,7 @@ class EntryAgent:
                 invalidation_condition=f"5M candle body close above {stop:,.1f} kills thesis",
                 stagnation_timeout_bars=6,
                 gamma_wall_clearance_pts=round(dist_to_put_wall, 1),
-                thesis_conviction="SUPER_TREND",
+                thesis_conviction="SUPER_TREND" if (len(df_5m) >= 28 and regime.adx >= 25.0) else "HIGH",
             )
 
             return TradeSignal(

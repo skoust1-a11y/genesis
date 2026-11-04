@@ -14,6 +14,7 @@ from app.trading.crew.entry_agent import EntryAgent
 from app.trading.crew.trend_agent import TrendAgent
 from app.trading.crew.risk_agent import RiskAgent
 from app.trading.crew.exit_agent import ExitAgent
+from app.trading.crew.holding_agent import HoldingAgent, HoldingDecision
 from app.trading.crew.alert_agent import AlertAgent
 from app.trading.crew.journal_agent import JournalAgent
 from app.trading.crew.order_flow_agent import OrderFlowAgent, OrderFlowSignal
@@ -24,6 +25,8 @@ __all__ = [
     "TrendAgent",
     "RiskAgent",
     "ExitAgent",
+    "HoldingAgent",
+    "HoldingDecision",
     "AlertAgent",
     "JournalAgent",
     "OrderFlowAgent",

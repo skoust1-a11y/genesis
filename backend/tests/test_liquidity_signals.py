@@ -268,6 +268,10 @@ def test_scan_trendline_reversal():
     ]
     sigs = scan_trendline_reversal(bars_short, min_risk=5.0, skip_lunch=False)
     assert len(sigs) == 1
+    no_break = [dict(b) for b in bars_short]
+    no_break[-1]["low"] = no_break[-2]["low"]
+    assert scan_trendline_reversal(no_break, min_risk=5.0, skip_lunch=False, candle_confirmation=True) == []
+    assert len(scan_trendline_reversal(no_break, min_risk=5.0, skip_lunch=False)) == 1
     assert sigs[0]["side"] == "Short"
     assert sigs[0]["entry"] == 108.0
     assert sigs[0]["strategy"] == "trendline_reversal"

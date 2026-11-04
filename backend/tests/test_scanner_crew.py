@@ -133,3 +133,35 @@ def test_detector_agent_eqh_sweep():
         strategy_filter="equal",
     )
     assert any("Equal Highs Sweep" in s.strategy and s.direction == "PUT" for s in setups)
+
+
+def test_scan_order_keeps_every_setup(monkeypatch):
+    def one(**extra):
+        row = {"risk": 20.0, "entry": 24000.0, "stop": 23980.0, "target": 24060.0, "side": "Long", "time": "2026-11-02 11:20"}
+        row.update(extra)
+        return [row]
+
+    monkeypatch.setattr("app.liquidity_signals.scan_trendline_reversal", lambda *_a, **_k: one())
+    monkeypatch.setattr(
+        "app.liquidity_signals.scan_retest",
+        lambda *_a, **_k: one(pool="PDH Support") + one(pool="OR-30 High"),
+    )
+    monkeypatch.setattr("app.liquidity_signals.scan", lambda *_a, **_k: one())
+    bars = [
+        {"date": f"2026-11-02 11:{15 + i * 5:02d}", "open": 100, "high": 102, "low": 98, "close": 101, "volume": 0}
+        for i in range(6)
+    ]
+    setups = DetectorAgent().scan_multi_timeframe_strategies(
+        tf_bars_map={"5m": bars},
+        levels=SessionLevels(pdh=110, pdl=90, pdc=100, pivot=100, r1=110, s1=90, all_key_levels=[100]),
+        news_sentiment=NewsSentiment(
+            sentiment_score=0.0, sentiment_label="NEUTRAL", event_risk_level="LOW",
+            is_trading_safe=True, high_impact_event_active=False, event_warning=None, catalyst_summary=[],
+        ),
+        current_time_str="11:40",
+    )
+    names = [s.strategy for s in setups]
+    assert "Trendline Reversal" in names[0]
+    assert names[1].startswith("Breakout & Retest (PD)")
+    assert "OR-30" in names[2]
+    assert names[3].startswith("Liquidity Sweep")

@@ -24,9 +24,13 @@ from app.trading.scaling_law import (
 )
 
 
+# Empty until a real option premium exists. Unpriced index points must not move the reserve.
+PREMIUM_PNL_METHODS: frozenset[str] = frozenset()
+
+
 @dataclass
 class SafetyWallSummary:
-    today_net_pnl: float
+    today_net_pnl: float | None
     added_to_reserve: float
     current_reserve_balance: float
     current_tier_lots: int
@@ -73,7 +77,23 @@ class SafetyWallAgent:
 
     def process_daily_pnl(self, today_trades: list[dict[str, Any]]) -> SafetyWallSummary:
         """Process today's booked P&L, allocate safety reserve, and set tomorrow's sizing."""
-        today_net_pnl = sum(float(t.get("pnl_rupees", 0.0)) for t in today_trades)
+        priced = [
+            float(t["pnl_rupees"])
+            for t in today_trades
+            if t.get("pnl_method") in PREMIUM_PNL_METHODS and t.get("pnl_rupees") is not None
+        ]
+        if not priced:
+            return SafetyWallSummary(
+                today_net_pnl=None,
+                added_to_reserve=0.0,
+                current_reserve_balance=round(self.reserve_balance, 2),
+                current_tier_lots=self.current_lots,
+                tomorrow_approved_lots=self.current_lots,
+                gate_evaluation_status=f"Reserve unchanged at ₹{self.reserve_balance:,.2f}. Option rupees are not priced.",
+                action_taken="Reserve unchanged. Option rupees are not priced, so the safety wall did not move.",
+            )
+
+        today_net_pnl = sum(priced)
         added_to_reserve = 0.0
         action = "NO_CHANGE"
 

@@ -33,6 +33,7 @@ class JournalAgent:
         self.trades_dir = trades_dir or Path("trades")
         self.trades_dir.mkdir(parents=True, exist_ok=True)
         self.db_path = db_path or Path("data/trades.db")
+        self.load_failed = False
 
     def _get_active_file(self, date_str: str | None = None) -> Path:
         d = date_str or datetime.now().strftime("%Y-%m-%d")
@@ -42,21 +43,30 @@ class JournalAgent:
         """Load active trades JSON with milestone set coercion to prevent serialization crashes."""
         path = self._get_active_file(date_str)
         if not path.exists():
+            self.load_failed = False
             return {}
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("active journal is not an object")
             # Ensure milestones_hit is converted to set for every trade
             for t in data.values():
                 if "milestones_hit" in t and isinstance(t["milestones_hit"], list):
                     t["milestones_hit"] = set(t["milestones_hit"])
+            self.load_failed = False
             return data
         except Exception as e:
+            # Fail closed: callers must not treat this as an empty book or overwrite the file.
+            self.load_failed = True
             logger.error(f"Error loading active trades: {e}")
             return {}
 
     def save_active_trades(self, trades: dict[str, Any], date_str: str | None = None) -> None:
         """Save active trades to JSON, converting sets to lists for valid JSON."""
+        if self.load_failed:
+            logger.error("Refusing to save the journal after a failed load")
+            return
         path = self._get_active_file(date_str)
         serializable = {}
         for k, v in trades.items():
@@ -70,7 +80,7 @@ class JournalAgent:
         except Exception as e:
             logger.error(f"Error saving active trades: {e}")
 
-    def record_entry(self, signal: TradeSignal, date_str: str | None = None) -> dict[str, Any]:
+    def record_entry(self, signal: TradeSignal, date_str: str | None = None) -> dict[str, Any] | None:
         """Record a new open trade in the active cache and SQLite."""
         import uuid
         trade_id = f"TRADE_{signal.symbol}_{int(datetime.now().timestamp() * 1000)}_{uuid.uuid4().hex[:6]}"
@@ -104,9 +114,17 @@ class JournalAgent:
             "bars_in_trade": 0,
             "milestones_hit": set(),
             "status": "OPEN",
+            "path_target_pct": getattr(signal, "path_target_pct", None),
+            "path_stop_pct": getattr(signal, "path_stop_pct", None),
+            "path_neither_pct": getattr(signal, "path_neither_pct", None),
+            "path_verdict": getattr(signal, "path_verdict", None),
+            "odds_line": getattr(signal, "odds_line", None),
+            "rc_quick_cut": False,
         }
 
         active = self.load_active_trades(date_str)
+        if self.load_failed:
+            return None
         active[trade_id] = trade_data
         self.save_active_trades(active, date_str)
 
@@ -145,19 +163,18 @@ class JournalAgent:
     ) -> dict[str, Any] | None:
         """Record trade completion, persist to SQLite & executed trades log, and clear active state."""
         active = self.load_active_trades(date_str)
-        if trade_id not in active:
+        if self.load_failed or trade_id not in active:
             return None
 
         trade = active[trade_id]
-        lots = int(trade.get("lots", 1))
-        runner_pnl = decision.realized_points * 0.5 * (lots * lot_qty)
-        booked_prior = float(trade.get("booked_pnl_rupees", 0.0))
-        pnl_rupees = runner_pnl + booked_prior
-
         trade["exit_price"] = decision.exit_price
         trade["realized_points"] = decision.realized_points
         trade["realized_r"] = decision.realized_r
-        trade["pnl_rupees"] = round(pnl_rupees, 2)
+        # Index points are not an option premium. Rupees stay empty until a real fill prices them.
+        trade["pnl_rupees"] = None
+        trade["pnl_method"] = "index_points_not_priced"
+        trade["exit_reason"] = decision.exit_reason
+        trade["exit_action"] = decision.action
         t_now = exit_time_str or datetime.now().strftime("%H:%M:%S")
         if len(t_now) == 5:
             t_now = f"{t_now}:00"

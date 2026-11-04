@@ -74,32 +74,17 @@ class BrokerBridgeAgent:
                 latency_ms=round(latency, 2),
             )
 
-        # Real broker order dispatch path
-        try:
-            # Direct API call to broker adapter
-            latency = (datetime.now() - start_time).total_seconds() * 1000.0
-            return BrokerOrderResult(
-                success=True,
-                order_id=order_id,
-                symbol=symbol,
-                side=side,
-                lots=lots,
-                quantity=quantity,
-                price=price,
-                status="FILLED",
-                latency_ms=round(latency, 2),
-            )
-        except Exception as e:
-            logger.error(f"Live broker order dispatch failed: {e}")
-            return BrokerOrderResult(
-                success=False,
-                order_id=order_id,
-                symbol=symbol,
-                side=side,
-                lots=lots,
-                quantity=quantity,
-                price=price,
-                status="REJECTED",
-                latency_ms=0.0,
-                error_message=str(e),
-            )
+        # No broker adapter is wired. Never report a live fill.
+        logger.error("[NO_BROKER_ADAPTER] refused %s %s qty of %s", side, quantity, symbol)
+        return BrokerOrderResult(
+            success=False,
+            order_id="UNSENT",
+            symbol=symbol,
+            side=side,
+            lots=lots,
+            quantity=quantity,
+            price=price,
+            status="REJECTED",
+            latency_ms=0.0,
+            error_message="no broker adapter",
+        )

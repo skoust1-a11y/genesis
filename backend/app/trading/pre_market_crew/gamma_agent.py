@@ -31,6 +31,7 @@ class GammaAnalysis:
     trap_warning: str | None
     total_call_oi: int
     total_put_oi: int
+    walls_live: bool = False
 
 
 class GammaAgent:
@@ -44,8 +45,24 @@ class GammaAgent:
         current_spot: float,
         chain_data: list[dict[str, Any]] | None = None,
     ) -> GammaAnalysis:
-        """Analyze option chain strikes or synthesize nearest institutional strikes."""
-        if chain_data and len(chain_data) > 0:
+        """Analyze option chain strikes. Walls count only when open interest is actually there."""
+        walls_live = False
+        if chain_data and len(chain_data) > 0 and any(isinstance(r, dict) and ("ce" in r or "pe" in r) for r in chain_data):
+            from app.trading.crew.order_flow_agent import OrderFlowAgent
+
+            walls = OrderFlowAgent().extract_option_oi_walls(chain_data)
+            call_wall = walls.get("call_oi_wall")
+            put_wall = walls.get("put_oi_wall")
+            pcr = float(walls.get("pcr") or 1.0)
+            total_call_oi = 0
+            total_put_oi = 0
+            max_pain = round(current_spot / 50.0) * 50.0
+            walls_live = call_wall is not None and put_wall is not None
+            if not walls_live:
+                atm = round(current_spot / 100.0) * 100.0
+                call_wall = float(call_wall or atm + 250.0)
+                put_wall = float(put_wall or atm - 250.0)
+        elif chain_data and len(chain_data) > 0:
             call_oi_map: dict[float, int] = {}
             put_oi_map: dict[float, int] = {}
 
@@ -60,12 +77,17 @@ class GammaAgent:
             total_call_oi = sum(call_oi_map.values())
             total_put_oi = sum(put_oi_map.values())
 
-            call_wall = max(call_oi_map, key=lambda s: call_oi_map[s]) if call_oi_map else round(current_spot / 100) * 100 + 100.0
-            put_wall = max(put_oi_map, key=lambda s: put_oi_map[s]) if put_oi_map else round(current_spot / 100) * 100 - 100.0
+            call_wall = max(call_oi_map, key=lambda s: call_oi_map[s]) if call_oi_map and max(call_oi_map.values()) > 0 else None
+            put_wall = max(put_oi_map, key=lambda s: put_oi_map[s]) if put_oi_map and max(put_oi_map.values()) > 0 else None
             pcr = round(total_put_oi / max(1, total_call_oi), 2)
             max_pain = round(current_spot / 50.0) * 50.0
+            walls_live = call_wall is not None and put_wall is not None
+            if not walls_live:
+                atm = round(current_spot / 100.0) * 100.0
+                call_wall = float(call_wall or atm + 250.0)
+                put_wall = float(put_wall or atm - 250.0)
         else:
-            # Fallback estimation based on round numbers around spot
+            # No chain. Numbers below are not live walls and must not open a trade.
             atm = round(current_spot / 100.0) * 100.0
             call_wall = atm + 250.0
             put_wall = atm - 250.0
@@ -103,4 +125,5 @@ class GammaAgent:
             trap_warning=trap_msg,
             total_call_oi=total_call_oi,
             total_put_oi=total_put_oi,
+            walls_live=walls_live,
         )

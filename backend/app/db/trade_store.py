@@ -153,8 +153,17 @@ def upsert_trade(trade: dict[str, Any]) -> str:
     qty = int(trade.get("Qty") or trade.get("qty") or (lots * 65))
     capital = float(trade.get("Capital Deployed") or trade.get("capital_deployed") or (entry_prem * qty))
     exit_val = float(trade.get("Exit Value") or trade.get("exit_value") or (exit_prem * qty))
-    pnl = float(trade.get("Est P&L (Rs)") or trade.get("est_pnl_inr") or (exit_val - capital))
-    roi = float(trade.get("ROI %") or trade.get("roi_pct") or ((pnl / capital * 100) if capital > 0 else 0.0))
+    if trade.get("pnl_method") == "index_points_not_priced" or (
+        "pnl_rupees" in trade and trade.get("pnl_rupees") is None
+    ):
+        pnl = None
+        roi = None
+    else:
+        raw_pnl = trade.get("Est P&L (Rs)")
+        if raw_pnl is None:
+            raw_pnl = trade.get("est_pnl_inr")
+        pnl = float(exit_val - capital) if raw_pnl is None else float(raw_pnl)
+        roi = float(trade.get("ROI %") or trade.get("roi_pct") or ((pnl / capital * 100) if capital > 0 else 0.0))
     rationale = str(trade.get("Rationale") or trade.get("rationale") or "")
     source = str(trade.get("source") or "live")
 

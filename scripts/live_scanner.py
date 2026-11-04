@@ -35,6 +35,7 @@ import logging
 import sys
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 # Paths
@@ -45,7 +46,6 @@ sys.path.insert(0, str(BACKEND_DIR))
 
 import pandas as pd
 from app.trading.crew.manager import TradeManager
-from app.trading.execution_crew.execution_manager import ExecutionManager
 from app.trading.post_market_crew.post_market_manager import PostMarketManager
 from app.trading.pre_market_crew.pre_market_manager import PreMarketManager
 from app.trading.scanner_crew.scanner_manager import ScannerManager
@@ -60,6 +60,100 @@ MARKET_OPEN = "09:15"
 MARKET_CLOSE = "15:30"
 SUPPORTED_TIMEFRAMES = ["1m", "2m", "5m", "15m", "30m"]
 DEFAULT_TIMEFRAMES = ["1m", "5m", "15m"]
+
+
+def _fetch_nifty_chain() -> dict | None:
+    """One Groww Nifty chain for this scan. None when the page has no contracts."""
+    try:
+        from app.brokers.groww import GrowwQuotes
+
+        page = GrowwQuotes()._page("NIFTY")
+        oc = page.get("optionChain") or {}
+        contracts = oc.get("optionContracts") or []
+        if not contracts:
+            return None
+        agg = oc.get("aggregatedDetails") or {}
+        return {"contracts": contracts, "expiry": agg.get("currentExpiry"), "lot_size": agg.get("lotSize")}
+    except Exception as exc:
+        logger.warning(f"Nifty option chain unavailable: {exc}")
+        return None
+
+
+def _drop_forming(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
+    """A 5-minute bar is not a signal until it has closed."""
+    from datetime import timedelta
+
+    if df is None or len(df) == 0:
+        return df
+    text = str(df.iloc[-1].get("date") or df.iloc[-1].get("timestamp") or "")[:16]
+    try:
+        start = datetime.strptime(text, "%Y-%m-%d %H:%M")
+    except ValueError:
+        return df
+    if now < start + timedelta(minutes=5):
+        return df.iloc[:-1].copy()
+    return df
+
+
+def _stamp_quote_age(df: pd.DataFrame, now: datetime) -> pd.DataFrame:
+    """Age of the closed 5-minute bar, in seconds. A still-forming bar is not the one that is stamped."""
+    from datetime import timedelta
+
+    if df is None or len(df) == 0:
+        return df
+    out = df.copy()
+    out["quote_age_seconds"] = pd.NA
+
+    def _start(row) -> datetime | None:
+        text = str(row.get("date") or row.get("timestamp") or "")[:16]
+        try:
+            return datetime.strptime(text, "%Y-%m-%d %H:%M")
+        except ValueError:
+            return None
+
+    row = out.iloc[-1]
+    start = _start(row)
+    if start is not None and now < start + timedelta(minutes=5) and len(out) >= 2:
+        row = out.iloc[-2]
+        start = _start(row)
+    if start is None:
+        return out
+    age = (now - (start + timedelta(minutes=5))).total_seconds()
+    out.loc[row.name, "quote_age_seconds"] = age
+    return out
+
+
+def _fetch_stock_packs() -> dict:
+    from datetime import timedelta
+
+    from app.api.market import _chart, parse_yahoo_chart
+    from app.trading.stock_flag import LIQUID_STOCKS
+
+    now = datetime.now()
+    packs = {}
+    for symbol in LIQUID_STOCKS:
+        try:
+            intra = parse_yahoo_chart(_chart(f"{symbol}.NS", "5m", "5d"))
+            daily = parse_yahoo_chart(_chart(f"{symbol}.NS", "1d", "1mo"))
+        except Exception:
+            continue
+        closed = []
+        for bar in intra:
+            try:
+                start = datetime.strptime(str(bar["date"])[:16], "%Y-%m-%d %H:%M")
+            except (KeyError, ValueError):
+                continue
+            if now >= start + timedelta(minutes=5):
+                closed.append(bar)
+        if not closed:
+            continue
+        today = closed[-1]["date"][:10]
+        closed = [b for b in closed if b["date"][:10] == today]
+        pdh = pdl = None
+        if len(daily) >= 2:
+            pdh, pdl = daily[-2].get("high"), daily[-2].get("low")
+        packs[symbol] = {"bars": closed, "pdh": pdh, "pdl": pdl}
+    return packs
 
 
 def is_market_hours() -> bool:
@@ -88,7 +182,7 @@ def main() -> None:
     args = parser.parse_args()
 
     active_timeframes = [tf.strip().lower() for tf in args.timeframes.split(",") if tf.strip()]
-    today_str = datetime.now().strftime("%Y-%m-%d")
+    today_str = datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d")
 
     print("=======================================================")
     print("  Genesis Multi-Timeframe Institutional Scanner Daemon")
@@ -107,9 +201,6 @@ def main() -> None:
         is_paper_trading=True,
         trades_dir=ROOT_DIR / "trades",
         db_path=ROOT_DIR / "data" / "trades.db",
-    )
-    execution_manager = ExecutionManager(
-        is_live_broker=False,
     )
     pre_market_manager = PreMarketManager(
         trades_dir=ROOT_DIR / "trades",
@@ -204,13 +295,22 @@ def main() -> None:
             # -------------------------------------------------------------
             # Step 1: Scanner Crew Market Snapshot (1M, 5M, 15M + News + Levels)
             # -------------------------------------------------------------
+            nifty_chain = _fetch_nifty_chain()
+            candles_5m = _drop_forming(scanner_manager.feed_agent.fetch_timeframe_candles("5m"), datetime.now())
+            candles_5m = _stamp_quote_age(candles_5m, datetime.now())
+            candles_15m = scanner_manager.feed_agent.fetch_timeframe_candles("15m")
             snapshot = scanner_manager.produce_scan_snapshot(
+                df_5m=candles_5m,
                 current_time_str=cur_time_str,
                 timeframes=active_timeframes,
                 strategy_filter=args.strategy,
+                option_contracts=(nifty_chain or {}).get("contracts"),
             )
-            candles_5m = scanner_manager.feed_agent.fetch_timeframe_candles("5m")
-            candles_15m = scanner_manager.feed_agent.fetch_timeframe_candles("15m")
+            try:
+                from app.trading.odds import save_nifty_5m
+                save_nifty_5m(candles_5m.to_dict(orient="records") if candles_5m is not None and len(candles_5m) else [])
+            except Exception as save_err:
+                logger.debug(f"Could not store 5-minute bars: {save_err}")
 
             # Candle confirmation logs
             if not candles_5m.empty:
@@ -224,6 +324,13 @@ def main() -> None:
             # -------------------------------------------------------------
             # Step 2: Trade Crew Real-Time Execution & Position Management
             # -------------------------------------------------------------
+            from app.trading.crew.manager import bar_is_stale
+
+            stock_bars = None
+            names = " ".join(s.strategy for s in snapshot.actionable_setups).lower()
+            fresh = not bar_is_stale(candles_5m, today_str, cur_time_str)
+            if fresh and nifty_chain and "retest" not in names and "trendline" not in names:
+                stock_bars = _fetch_stock_packs()
             tick_result = trade_manager.on_market_tick(
                 cmp=snapshot.cmp,
                 df_5m=candles_5m,
@@ -232,13 +339,15 @@ def main() -> None:
                 key_levels=snapshot.levels.all_key_levels,
                 morning_floor=snapshot.levels.or30_low,
                 candidate_setups=snapshot.actionable_setups,
-                date_str=today_str,
+                date_str=datetime.now(ZoneInfo("Asia/Kolkata")).strftime("%Y-%m-%d"),
                 current_time_str=cur_time_str,
                 df_15m=candles_15m,
+                nifty_chain=nifty_chain,
+                stock_bars=stock_bars,
             )
 
             for act in tick_result.get("actions", []):
-                print(f"⚡ Trade Action Executed: {act['action']} on {act.get('trade_id')} ({act.get('reason', '')})")
+                print(f"SIGNAL: {act['action']} on {act.get('trade_id')} ({act.get('reason', '')})")
 
             # -------------------------------------------------------------
             # Periodic Flat Heartbeat (Every 60 mins when no trades open)

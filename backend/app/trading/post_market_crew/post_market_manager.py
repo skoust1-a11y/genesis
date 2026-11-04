@@ -40,7 +40,11 @@ class PostMarketManager:
         
         self.autopsy_agent = AutopsyAgent()
         self.parameter_agent = ParameterAgent()
-        self.safety_wall_agent = SafetyWallAgent(base_capital=base_capital)
+        self.safety_wall_agent = SafetyWallAgent(
+            base_capital=base_capital,
+            state_file=self.trades_dir / "safety_wall_state.json",
+            config_file=self.trades_dir / "daily_risk_config.json",
+        )
         self.code_quality_agent = CodeQualityAgent()
         self.briefing_agent = BriefingAgent(reports_dir=self.reports_dir)
 
@@ -102,9 +106,9 @@ class PostMarketManager:
             df_recent=df_intraday,
             executed_trades=trades,
         )
-        self.parameter_agent.save_calibrated_parameters(
+        self.parameter_agent.append_proposals(
             param_recs,
-            config_path=self.trades_dir / "active_strategy_params.json",
+            log_path=self.trades_dir / "parameter_proposals.jsonl",
         )
 
         # Step 3: Safety Wall Reserve

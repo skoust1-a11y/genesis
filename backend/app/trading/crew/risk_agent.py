@@ -14,8 +14,13 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Literal
+
+# No method name is trusted until a real option premium is booked.
+PREMIUM_PNL_METHODS: frozenset[str] = frozenset()
+
 
 from app.trading.scaling_law import (
     LOT_CAPITAL_MILESTONES,
@@ -65,6 +70,11 @@ class RiskAgent:
         self.daily_losses_count = 0
         self.daily_cumulative_r = 0.0
         self.is_safety_wall_locked = False
+        self.session_date: str | None = None
+        self.session_blocked = False
+        self.manual_lock = False
+        self._persist_manual_lock = False
+        self.reserve_basis = "index_points_x_0.5_frozen"
         self._load_config()
 
     def _load_config(self) -> None:
@@ -78,36 +88,53 @@ class RiskAgent:
                     self.daily_losses_count = int(data.get("daily_losses_count", 0))
                     self.daily_cumulative_r = float(data.get("daily_cumulative_r", 0.0))
                     self.is_safety_wall_locked = bool(data.get("is_safety_wall_locked", False))
+                    self.session_date = data.get("session_date")
+                    if "manual_lock" in data:
+                        self._persist_manual_lock = True
+                        self.manual_lock = bool(data["manual_lock"])
+                    if data.get("reserve_basis"):
+                        self.reserve_basis = str(data["reserve_basis"])
                     if "default_lots" in data and self.default_lots is None:
                         self.default_lots = int(data["default_lots"])
             except Exception:
-                pass
+                # A risk file we cannot read is not a fresh day.
+                self.session_blocked = True
 
     def save_config(self) -> None:
         """Save persistent risk configuration to disk."""
         self.config_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "base_capital": self.base_capital,
+            "safety_wall_reserve": self.safety_wall_reserve,
+            "effective_capital": self.base_capital + self.safety_wall_reserve,
+            "tomorrow_approved_lots": self.max_super_lots if self.default_lots is not None else 2,
+            "default_lots": self.default_lots or 3,
+            "daily_losses_count": self.daily_losses_count,
+            "daily_cumulative_r": round(self.daily_cumulative_r, 2),
+            "is_safety_wall_locked": self.is_safety_wall_locked,
+            "session_date": self.session_date,
+            "reserve_basis": self.reserve_basis,
+        }
+        if self._persist_manual_lock:
+            payload["manual_lock"] = self.manual_lock
         with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "base_capital": self.base_capital,
-                "safety_wall_reserve": self.safety_wall_reserve,
-                "effective_capital": self.base_capital + self.safety_wall_reserve,
-                "tomorrow_approved_lots": self.max_super_lots if self.default_lots is not None else 2,
-                "default_lots": self.default_lots or 3,
-                "daily_losses_count": self.daily_losses_count,
-                "daily_cumulative_r": round(self.daily_cumulative_r, 2),
-                "is_safety_wall_locked": self.is_safety_wall_locked,
-            }, f, indent=2)
+            json.dump(payload, f, indent=2)
 
-    def record_trade_outcome(self, is_win: bool, pnl_rupees: float, realized_r: float = 0.0) -> None:
-        """Update daily risk counters, ratchet 50% profit to safety wall, and evaluate circuit breakers."""
-        if is_win and pnl_rupees > 0:
-            # 50% Capital Safety Wall Enforcement:
-            # Automatically ratchet 50% of net realized profit into safety_wall_reserve
-            reserve_addition = round(pnl_rupees * 0.50, 2)
-            self.safety_wall_reserve += reserve_addition
-        elif pnl_rupees <= -500.0 or realized_r <= -0.5:
-            # Only count as a true loss if capital was materially lost (e.g. stop loss hit)
-            # Scratches and breakeven capital-preservation exits are not failure losses
+    def record_trade_outcome(
+        self,
+        is_win: bool,
+        pnl_rupees: float | None = None,
+        realized_r: float = 0.0,
+        pnl_method: str | None = None,
+    ) -> None:
+        """Update daily R counters. The reserve moves only on a priced option premium."""
+        priced = pnl_method in PREMIUM_PNL_METHODS and pnl_rupees is not None
+        if is_win and priced and pnl_rupees > 0:
+            self.safety_wall_reserve += round(pnl_rupees * 0.50, 2)
+
+        if is_win or realized_r > 0:
+            self.daily_losses_count = 0
+        elif realized_r <= -0.5 or (priced and pnl_rupees is not None and pnl_rupees <= -500.0):
             self.daily_losses_count += 1
 
         self.daily_cumulative_r += realized_r
@@ -118,11 +145,37 @@ class RiskAgent:
 
         self.save_config()
 
+    def begin_session(self, today: date) -> bool:
+        """Reset daily counters when the Asia/Kolkata date changes. A failed save blocks entries."""
+        key = today.isoformat()
+        if self.session_date == key and not self.session_blocked:
+            return True
+        snapshot = (
+            self.daily_losses_count,
+            self.daily_cumulative_r,
+            self.is_safety_wall_locked,
+            self.session_date,
+        )
+        self.daily_losses_count = 0
+        self.daily_cumulative_r = 0.0
+        if not self.manual_lock:
+            self.is_safety_wall_locked = False
+        self.session_date = key
+        try:
+            self.save_config()
+        except Exception:
+            self.daily_losses_count, self.daily_cumulative_r, self.is_safety_wall_locked, self.session_date = snapshot
+            self.session_blocked = True
+            return False
+        self.session_blocked = False
+        return True
+
     def reset_daily_counters(self) -> None:
         """Reset intraday loss counters at beginning of trading day."""
         self.daily_losses_count = 0
         self.daily_cumulative_r = 0.0
-        self.is_safety_wall_locked = False
+        if not self.manual_lock:
+            self.is_safety_wall_locked = False
         self.save_config()
 
     def evaluate_order(
@@ -139,7 +192,13 @@ class RiskAgent:
         eff_safety = self.safety_wall_reserve or safety_wall_balance
 
         # 1. Check daily circuit breaker (consecutive losses >= 2 or cumulative drawdown <= -2.0R)
-        if self.is_safety_wall_locked or self.daily_losses_count >= self.max_daily_losses or self.daily_cumulative_r <= -2.0:
+        if self.session_blocked or self.manual_lock or self.is_safety_wall_locked or self.daily_losses_count >= self.max_daily_losses or self.daily_cumulative_r <= -2.0:
+            if self.session_blocked:
+                reason = "Session reset failed. Entries are blocked until the risk file can be saved."
+            elif self.manual_lock:
+                reason = "Manual lock is set. Entries are blocked."
+            else:
+                reason = f"Circuit Breaker Triggered: {self.daily_losses_count} losses or {self.daily_cumulative_r:.1f}R daily drawdown. Safety wall locked."
             return RiskApproval(
                 approved=False,
                 lots=0,
@@ -147,7 +206,7 @@ class RiskAgent:
                 risk_points=risk_points,
                 max_loss_rupees=0.0,
                 safety_wall_balance=eff_safety,
-                rejection_reason=f"Circuit Breaker Triggered: {self.daily_losses_count} losses or {self.daily_cumulative_r:.1f}R daily drawdown. Safety wall locked.",
+                rejection_reason=reason,
             )
 
         # 2. Check risk ceiling (55-pt trap prevention)

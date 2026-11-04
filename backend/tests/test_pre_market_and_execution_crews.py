@@ -115,7 +115,7 @@ def test_pre_market_manager_battleplan(tmp_path):
 # -----------------------------------------------------------------------------
 # Broker Execution Crew Tests
 # -----------------------------------------------------------------------------
-def test_broker_bridge_dispatch():
+def test_broker_bridge_simulated_fill():
     bridge = BrokerBridgeAgent(is_live_broker=False)
     res = bridge.place_order(
         symbol="NIFTY 23200 CE",
@@ -129,6 +129,23 @@ def test_broker_bridge_dispatch():
     assert res.status == "SIMULATED_FILLED"
     assert res.order_id.startswith("ORD_")
     assert res.quantity == 195
+
+
+def test_broker_bridge_live_flag_is_rejected():
+    bridge = BrokerBridgeAgent(is_live_broker=True)
+    res = bridge.place_order(
+        symbol="NIFTY 23200 CE",
+        side="BUY",
+        lots=3,
+        quantity=195,
+        price=110.50,
+    )
+
+    assert res.success is False
+    assert res.status == "REJECTED"
+    assert res.error_message == "no broker adapter"
+    assert res.status != "FILLED"
+    assert not res.order_id.startswith("ORD_")
 
 
 def test_smart_routing_standard_vs_whale():
@@ -188,3 +205,15 @@ def test_execution_manager_end_to_end():
     assert receipt_exit.success is True
     assert receipt_exit.slippage_saved_pts == 0.5
     assert em.total_slippage_points_saved == 1.5
+
+
+def test_execution_manager_live_flag_does_not_fill():
+    em = ExecutionManager(is_live_broker=True, lot_qty=65)
+    receipt = em.execute_entry(
+        symbol="NIFTY 23200 CE",
+        direction="CALL",
+        lots=1,
+        cmp_price=100.0,
+    )
+    assert receipt.success is False
+    assert receipt.status == "REJECTED"

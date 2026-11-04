@@ -162,7 +162,8 @@ class ExitAgent:
         # If trade has not hit Target 1 (+1.8R) within 6 completed 5m bars (30 minutes), trigger immediate market exit
         # Exception: If trade has locked Breakeven (be_locked is True) and current_r >= 0.5, allow trailing runner to run
         trade_bars = bars_in_trade or int(active_trade.get("bars_in_trade", 0))
-        if trade_bars >= 6 and current_r < 1.8 and not (active_trade.get("be_locked", False) and current_r >= 0.5):
+        max_bars = 10 if (active_trade.get("be_locked", False) and current_r >= 0.2) else 6
+        if trade_bars >= max_bars and current_r < 1.8:
             return ExitDecision(
                 action="STAGNATION_TIME_STOP",
                 exit_price=cmp,

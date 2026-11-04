@@ -52,9 +52,29 @@ def create_sample_df(n_bars: int = 20, base_price: float = 23000.0) -> pd.DataFr
 # -----------------------------------------------------------------------------
 # Live Trading Crew Tests
 # -----------------------------------------------------------------------------
+def _with_trend(df: pd.DataFrame, n: int = 40) -> pd.DataFrame:
+    """ADX needs 28 bars. Keep the last rows, which are the sweep."""
+    if len(df) >= n:
+        return df
+    price = float(df.iloc[0]["close"]) - 3.0 * (n - len(df))
+    rows = []
+    for _ in range(n - len(df)):
+        price += 3.0
+        rows.append({
+            "timestamp": "2026-11-02 09:15:00",
+            "open": price - 1.0,
+            "high": price + 4.0,
+            "low": price - 2.0,
+            "close": price,
+            "volume": 1000,
+        })
+    pad = pd.DataFrame(rows)
+    return pd.concat([pad, df], ignore_index=True)
+
+
 def test_trend_agent_regime_and_dynamic_rr():
     ta = TrendAgent()
-    df = create_sample_df(25, 23000.0)
+    df = create_sample_df(40, 23000.0)
     
     # Blue sky runway
     regime = ta.evaluate_regime(df, 23120.0, "CALL", key_levels=[23300.0])
@@ -78,8 +98,8 @@ def test_risk_agent_circuit_breaker(tmp_path):
     assert "exceeds institutional ceiling" in appr_wide.rejection_reason
 
     # 2 consecutive losses -> Circuit breaker locks safety wall
-    ra.record_trade_outcome(is_win=False, pnl_rupees=-2000.0)
-    ra.record_trade_outcome(is_win=False, pnl_rupees=-2000.0)
+    ra.record_trade_outcome(is_win=False, pnl_rupees=None, realized_r=-1.0)
+    ra.record_trade_outcome(is_win=False, pnl_rupees=None, realized_r=-1.0)
     appr_locked = ra.evaluate_order(entry_price=23000.0, stop_loss=22970.0)
     assert appr_locked.approved is False
     assert "Circuit Breaker Triggered" in appr_locked.rejection_reason
@@ -191,11 +211,12 @@ def test_safety_wall_50_percent_allocation(tmp_path):
     cfg_f = tmp_path / "daily_risk.json"
     swa = SafetyWallAgent(base_capital=50000.0, state_file=state_f, config_file=cfg_f)
     
-    # Day 1: Booked +₹10,000 profit -> Allocates ₹5,000 (50%) to Safety Wall
+    # Unpriced rupees do not move the reserve.
     trades = [{"pnl_rupees": 10000.0}]
     summary = swa.process_daily_pnl(trades)
-    assert summary.added_to_reserve == 5000.0
-    assert summary.current_reserve_balance == 5000.0
+    assert summary.today_net_pnl is None
+    assert summary.added_to_reserve == 0.0
+    assert summary.current_reserve_balance == 0.0
     assert summary.tomorrow_approved_lots == 2
 
 
@@ -203,6 +224,7 @@ def test_post_market_manager_pipeline(tmp_path):
     reports_d = tmp_path / "reports"
     trades_d = tmp_path / "trades"
     pmm = PostMarketManager(base_capital=50000.0, reports_dir=reports_d, trades_dir=trades_d)
+    pmm.briefing_agent.bot_token = None
     
     df = create_sample_df(15, 23000.0)
     executed = [{
@@ -225,7 +247,8 @@ def test_post_market_manager_pipeline(tmp_path):
         executed_trades=executed,
     )
     assert Path(res["report_path"]).exists()
-    assert res["safety_wall"].added_to_reserve == 4634.5
+    assert res["safety_wall"].today_net_pnl is None
+    assert res["safety_wall"].added_to_reserve == 0.0
     assert res["autopsy"].net_realized_points == 75.0
 
 
@@ -253,8 +276,22 @@ def test_alert_agent_entry_and_trailing_alerts():
         adx=28.4,
     )
 
-    # 1. Test Option Entry Zone Ticket
-    ok_entry = alert_agent.send_entry_alert(sig)
+    # 1. Test Option Entry Zone Ticket. A missing quote does not send a model price.
+    assert alert_agent.send_entry_alert(sig) is False
+    assert dispatched_msgs == []
+    from datetime import datetime, time, timedelta
+    from app.market.feed import IST
+    from app.trading.option_pnl import black76
+    spot, basis, iv = sig.entry_price, 80.0, 0.13
+    expiry = (datetime.now(IST).date() + timedelta(days=6)).isoformat()
+    expires = datetime.combine(datetime.fromisoformat(expiry).date(), time(15, 30), IST)
+    years = max((expires - datetime.now(IST)).total_seconds() / 86400 / 365, 1 / 365)
+    chain = {"expiry": expiry, "lot_size": 65, "contracts": [
+        {"strike": strike, "ce": {"liveData": {"ltp": round(black76(spot + basis, strike, years, iv, "CE"), 2)}, "marketLot": 65},
+         "pe": {"liveData": {"ltp": round(black76(spot + basis, strike, years, iv, "PE"), 2)}, "marketLot": 65}}
+        for strike in range(24200, 24600, 50)
+    ]}
+    ok_entry = alert_agent.send_entry_alert(sig, nifty_chain=chain)
     assert ok_entry is True
     assert len(dispatched_msgs) == 1
     assert "OPTION ENTRY ZONE" in dispatched_msgs[0]
@@ -345,14 +382,14 @@ def test_directional_thesis_structure_and_enforcement():
     # Test EntryAgent evaluates sweep with Directional Thesis attachment
     ea = EntryAgent(otm_steps=2)
     # Candle sweeping PDL with long lower wick
-    df = pd.DataFrame({
+    df = _with_trend(pd.DataFrame({
         "timestamp": ["2026-11-02 10:00:00", "2026-11-02 10:05:00"],
         "open": [23020.0, 22995.0],
         "high": [23025.0, 23010.0],
         "low": [22990.0, 22960.0],  # Sweeps PDL 22970.0
         "close": [23010.0, 23005.0], # Closes back above PDL with lower wick
         "volume": [1000, 2500],
-    })
+    }))
     sig = ea.evaluate_sweep(
         df_5m=df,
         pdh=23150.0,
@@ -386,14 +423,14 @@ def test_strike_selection_2_otm_and_delta_floor():
 def test_gamma_wall_clearance_and_vacuum_gates():
     ea = EntryAgent(otm_steps=2)
     # Candle sweeping PDL
-    df = pd.DataFrame({
+    df = _with_trend(pd.DataFrame({
         "timestamp": ["2026-11-02 10:00:00", "2026-11-02 10:05:00"],
         "open": [23020.0, 22995.0],
         "high": [23025.0, 23010.0],
         "low": [22990.0, 22960.0],
         "close": [23010.0, 23005.0],
         "volume": [1000, 2500],
-    })
+    }))
 
     # Case 1: Call wall within 20 points (distance < 20) -> VETO Long
     sig_wall_too_close = ea.evaluate_sweep(
@@ -523,14 +560,23 @@ def test_idempotent_order_deduplication(tmp_path):
         db_path=tmp_path / "trades.db",
     )
     # Candle sweeping PDL to trigger Bullish Sweep
-    df = pd.DataFrame({
-        "timestamp": ["2026-11-02 10:10:00", "2026-11-02 10:15:00"],
+    df = _with_trend(pd.DataFrame({
+        "timestamp": ["2026-11-02 10:05:00", "2026-11-02 10:10:00"],
         "open": [24020.0, 23995.0],
         "high": [24025.0, 24010.0],
         "low": [23990.0, 23960.0],
         "close": [24010.0, 24005.0],
         "volume": [1000, 2500],
-    })
+    }))
+    chain = {
+        "expiry": "2026-11-10",
+        "lot_size": 65,
+        "contracts": [
+            {"strike": 24500, "ce": {"liveData": {"oi": 1_000_000, "ltp": 12}, "greeks": {"delta": 0.05}, "marketLot": 65}, "pe": {"liveData": {"oi": 1, "ltp": 400}}},
+            {"strike": 24050, "ce": {"liveData": {"oi": 10, "ltp": 80}, "greeks": {"delta": 0.42}, "marketLot": 65}, "pe": {"liveData": {"oi": 10, "ltp": 70}}},
+            {"strike": 23500, "ce": {"liveData": {"oi": 1, "ltp": 800}}, "pe": {"liveData": {"oi": 1_000_000, "ltp": 15}, "greeks": {"delta": -0.05}, "marketLot": 65}},
+        ],
+    }
 
     # First tick -> Order opened
     res1 = tm.on_market_tick(
@@ -541,9 +587,10 @@ def test_idempotent_order_deduplication(tmp_path):
         current_time_str="10:15",
         date_str="2026-11-02",
         india_vix=14.0,
+        nifty_chain=chain,
     )
-    assert any(a["action"] == "ENTRY_OPENED" for a in res1["actions"])
-    trade_id = res1["actions"][0]["trade_id"]
+    opened = next(a for a in res1["actions"] if a["action"] == "ENTRY_OPENED")
+    assert opened["trade_id"]
 
     # Manually clear active trade cache to simulate a flat state with a re-broadcast candidate
     tm.journal_agent.save_active_trades({}, date_str="2026-11-02")
@@ -557,6 +604,7 @@ def test_idempotent_order_deduplication(tmp_path):
         current_time_str="10:15",
         date_str="2026-11-02",
         india_vix=14.0,
+        nifty_chain=chain,
     )
     assert any(a["action"] == "DUPLICATE_ORDER_SUPPRESSED" for a in res2["actions"])
 
@@ -565,15 +613,14 @@ def test_safety_wall_50_percent_ratchet_and_circuit_breaker(tmp_path):
     cfg = tmp_path / "daily_risk.json"
     ra = RiskAgent(base_capital=50000.0, default_lots=3, max_super_lots=4, config_path=cfg)
 
-    # 1. Winning trade of ₹10,000 realized profit
-    # 50% (₹5,000) automatically ratcheted into safety_wall_reserve
+    # Unpriced profit does not move the reserve. The win still clears the loss count.
     ra.record_trade_outcome(is_win=True, pnl_rupees=10000.0, realized_r=2.5)
-    assert ra.safety_wall_reserve == 5000.0
+    assert ra.safety_wall_reserve == 0.0
     assert ra.daily_losses_count == 0
 
-    # 2. Losing trade does NOT deplete safety_wall_reserve (reserve balance locked permanently!)
+    # A later loss is counted in R. The reserve stays where it was.
     ra.record_trade_outcome(is_win=False, pnl_rupees=-2500.0, realized_r=-1.0)
-    assert ra.safety_wall_reserve == 5000.0
+    assert ra.safety_wall_reserve == 0.0
     assert ra.daily_losses_count == 1
     assert ra.is_safety_wall_locked is False
 
@@ -587,5 +634,52 @@ def test_safety_wall_50_percent_ratchet_and_circuit_breaker(tmp_path):
     appr = ra.evaluate_order(entry_price=24000.0, stop_loss=23970.0)
     assert appr.approved is False
     assert "Circuit Breaker Triggered" in appr.rejection_reason
+
+
+def test_holding_agent_diagnostics_and_cushioning():
+    from app.trading.crew.holding_agent import HoldingAgent
+
+    ha = HoldingAgent(retest_cushion_pts=8.0, preemptive_loss_cutoff_r=-0.35)
+
+    # 1. Healthy Retest: Trade locked breakeven earlier, shallow retest within -0.10R to +0.60R
+    trade = {
+        "direction": "CALL",
+        "entry_price": 24000.0,
+        "stop_loss": 24000.0,
+        "target_price": 24075.0,
+        "risk_points": 25.0,
+        "be_locked": True,
+        "bars_in_trade": 3,
+    }
+    dec_retest = ha.evaluate_holding(trade, cmp=24005.0)
+    assert dec_retest.state == "HEALTHY_RETEST"
+    assert dec_retest.action == "HOLD"
+    assert dec_retest.cushion_sl == 23992.0  # entry_price - 8.0 cushion
+
+    # 2. Consolidation Flag: Risk-free in profit >= +0.20R, held >= 6 bars, narrow 2-bar range
+    df_box = pd.DataFrame({
+        "open": [24010.0, 24012.0],
+        "high": [24018.0, 24015.0],
+        "low": [24008.0, 24010.0],
+        "close": [24014.0, 24012.0],
+    })
+    dec_flag = ha.evaluate_holding(trade, cmp=24012.0, df_5m=df_box, bars_in_trade=6)
+    assert dec_flag.state == "CONSOLIDATION_FLAG"
+    assert dec_flag.action == "HOLD"
+
+    # 3. Healthy Expansion
+    trade_new = {
+        "direction": "CALL",
+        "entry_price": 24000.0,
+        "stop_loss": 23975.0,
+        "target_price": 24075.0,
+        "risk_points": 25.0,
+        "be_locked": False,
+        "bars_in_trade": 1,
+    }
+    dec_healthy = ha.evaluate_holding(trade_new, cmp=24020.0)
+    assert dec_healthy.state == "HEALTHY_EXPANSION"
+    assert dec_healthy.action == "HOLD"
+
 
 

@@ -1,10 +1,10 @@
 {
   "base_capital": 50000.0,
-  "safety_wall_reserve": 152580.29,
-  "effective_capital": 202580.29,
+  "safety_wall_reserve": 213954.1,
+  "effective_capital": 263954.1,
   "tomorrow_approved_lots": 4,
   "default_lots": 3,
-  "daily_losses_count": 1,
-  "daily_cumulative_r": -1.0,
+  "daily_losses_count": 0,
+  "daily_cumulative_r": 9.65,
   "is_safety_wall_locked": false
 }

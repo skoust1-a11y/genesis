@@ -27,6 +27,22 @@ import numpy as np
 logger = logging.getLogger("genesis.order_flow_agent")
 
 
+def _leg_oi(leg: Any) -> float:
+    """Groww open interest is liveData.oi. openInterest on that object is empty."""
+    if not isinstance(leg, dict):
+        return 0.0
+    live = leg.get("liveData") or {}
+    raw = live.get("oi")
+    if raw is None:
+        raw = live.get("openInterest")
+    if raw is None:
+        raw = leg.get("open_interest")
+    try:
+        return float(raw or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
 @dataclass
 class OrderFlowSignal:
     volume_delta: float  # Estimated buyer volume minus seller volume
@@ -83,7 +99,8 @@ class OrderFlowAgent:
         vol = float(curr.get("volume") or 0.0)
         has_volume = "volume" in df_5m.columns and (float(df_5m["volume"].sum()) > 0.0)
         avg_vol = float(df_5m["volume"].tail(10).mean()) if has_volume else 0.0
-        vol_surge = (vol >= avg_vol * 1.3) if has_volume else True
+        # Volume 0 (Yahoo Nifty) is not a surge.
+        vol_surge = bool(has_volume and avg_vol > 0 and vol > 0 and vol >= avg_vol * 1.3)
 
         # 1. Bullish Breakout Trap (Sellers absorbing buyers at highs)
         # Price made a high, but has heavy upper wick (>= 50% of candle range)
@@ -278,17 +295,17 @@ class OrderFlowAgent:
             if strike > 100000:
                 strike = strike / 100.0  # normalize Groww paise
 
-            ce_oi = float(r.get("ce", {}).get("open_interest") or r.get("ce", {}).get("liveData", {}).get("openInterest") or 0.0)
-            pe_oi = float(r.get("pe", {}).get("open_interest") or r.get("pe", {}).get("liveData", {}).get("openInterest") or 0.0)
+            ce_oi = _leg_oi(r.get("ce"))
+            pe_oi = _leg_oi(r.get("pe"))
 
             total_ce_oi += ce_oi
             total_pe_oi += pe_oi
 
-            if ce_oi > max_ce_oi:
+            if ce_oi > 0 and ce_oi > max_ce_oi:
                 max_ce_oi = ce_oi
                 call_wall = strike
 
-            if pe_oi > max_pe_oi:
+            if pe_oi > 0 and pe_oi > max_pe_oi:
                 max_pe_oi = pe_oi
                 put_wall = strike
 

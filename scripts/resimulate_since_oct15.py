@@ -359,6 +359,8 @@ def run_resimulation():
         print("\n=== TRADE DETAILS ===")
         cols_to_print = [c for c in ["timestamp", "strategy", "direction", "entry_price", "exit_price", "realized_r", "pnl_rupees", "exit_reason"] if c in df_trades.columns]
         print(df_trades[cols_to_print].to_string())
+        Path("reports").mkdir(exist_ok=True)
+        df_trades.to_json("reports/last_sim_trades.json", orient="records", indent=2)
 
     return {
         "total_trades": total_trades,

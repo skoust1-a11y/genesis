@@ -184,7 +184,6 @@ class DetectorAgent:
                             target_points=round(abs(entry - target), 2),
                             rr_ratio=round(abs(entry - target) / max(1.0, risk), 2),
                             veto_reason=veto_msg,
-                            is_super_trend=bool(risk <= 25.0),
                         ))
                 except Exception as te:
                     logger.debug(f"Trendline scanner note for {tf}: {te}")
@@ -227,8 +226,6 @@ class DetectorAgent:
                         pool_desc = str(s.get("pool", ""))
                         is_orb = "OR" in pool_desc
                         strat_name = f"Breakout & Retest ({'OR-30' if is_orb else 'PD'}) [{tf.upper()}]"
-                        time_part = str(s.get("time", ""))[11:16]
-                        is_super = ("or" in strat_name.lower() or "pd" in strat_name.lower()) and (time_part <= "11:30" if time_part else True)
 
                         setups.append(CandidateSetup(
                             strategy=strat_name,
@@ -248,7 +245,6 @@ class DetectorAgent:
                             target_points=round(abs(entry - target), 2),
                             rr_ratio=round(abs(entry - target) / max(1.0, risk), 2),
                             veto_reason=veto_msg,
-                            is_super_trend=is_super,
                         ))
                 except Exception as re:
                     logger.debug(f"Retest scanner note for {tf}: {re}")
@@ -349,7 +345,6 @@ class DetectorAgent:
                             risk_points=round(risk, 2),
                             target_points=round(abs(entry - target), 2),
                             rr_ratio=3.0,
-                            is_super_trend=True,
                         ))
 
                 # Check EQL Sweep: Price swept below EQL level by 1 to 18 pts, but absorbed with decisive lower wick
@@ -389,7 +384,6 @@ class DetectorAgent:
                             risk_points=round(risk, 2),
                             target_points=round(abs(entry - target), 2),
                             rr_ratio=3.0,
-                            is_super_trend=True,
                         ))
 
         return setups

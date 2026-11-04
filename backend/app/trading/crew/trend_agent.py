@@ -78,7 +78,7 @@ class TrendAgent:
     def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
         """Calculate Average Directional Index (ADX) to measure trend strength."""
         if len(df) < period * 2:
-            return 22.0
+            return 0.0  # below the 18 breakout cutoff; a short sample is not a trend
             
         high = df["high"]
         low = df["low"]
@@ -116,12 +116,12 @@ class TrendAgent:
             return 120.0  # Open runway
             
         if direction == "CALL":
-            overhead = [lvl for lvl in key_levels if lvl > current_price + 2.0]
+            overhead = [lvl for lvl in key_levels if lvl > current_price + 8.0]
             if not overhead:
                 return 150.0  # Blue sky / no overhead barrier
             return min(overhead) - current_price
         else:
-            support = [lvl for lvl in key_levels if lvl < current_price - 2.0]
+            support = [lvl for lvl in key_levels if lvl < current_price - 8.0]
             if not support:
                 return 150.0  # Open floor
             return current_price - max(support)

@@ -21,6 +21,12 @@ from app.trading.post_market_crew.safety_wall_agent import SafetyWallSummary
 logger = logging.getLogger("genesis.briefing_agent")
 
 
+def _pnl_text(net: float | None) -> str:
+    if net is None:
+        return "not priced (index points are not option P&L)"
+    return f"₹{net:+,.2f}"
+
+
 class BriefingAgent:
     """Post-Market Executive Briefing and Report Generator."""
 
@@ -68,7 +74,7 @@ class BriefingAgent:
             "",
             "## 1. Executive Summary",
             f"- **Net Realized Points:** `{autopsy.net_realized_points:+.2f} pts`",
-            f"- **Today's Net Realized P&L:** `₹{safety.today_net_pnl:+,.2f}`",
+            f"- **Today's Net Realized P&L:** `{_pnl_text(safety.today_net_pnl)}`",
             f"- **Trades Executed:** `{autopsy.trades_executed_count}`",
             f"- **Missed Setups Detected:** `{autopsy.trades_missed_count}`",
             f"- **Total Points Given Back:** `{autopsy.total_points_given_back:.2f} pts`",
@@ -126,8 +132,8 @@ class BriefingAgent:
             "---",
             "",
             "## 5. Safety Wall & Tomorrow's Risk Limits",
-            f"- **Today's Allocation to Reserve:** `₹{safety.added_to_reserve:+,.2f}`",
-            f"- **Current Safety Wall Balance:** `₹{safety.current_reserve_balance:,.2f}`",
+            f"- **Today's Allocation to Reserve:** `{_pnl_text(None) if safety.today_net_pnl is None else f'₹{safety.added_to_reserve:+,.2f}'}`",
+            f"- **Current Safety Wall Balance:** `₹{safety.current_reserve_balance:,.2f}` (not broker cash)",
             f"- **Tomorrow's Approved Lot Sizing:** `🏷️ {safety.tomorrow_approved_lots} Lots`",
             f"- **Gate Status:** {safety.gate_evaluation_status}",
             f"- **Safety Action:** {safety.action_taken}",
@@ -155,11 +161,11 @@ class BriefingAgent:
         code: CodeQualityReport,
     ) -> bool:
         """Send formatted high-level executive digest to Telegram."""
-        pnl_emoji = "🟢 💰" if safety.today_net_pnl >= 0 else "🔴 🛑"
+        pnl_emoji = "⚪" if safety.today_net_pnl is None else ("🟢 💰" if safety.today_net_pnl >= 0 else "🔴 🛑")
         
         msg = (
             f"📊 *DAILY POST-MARKET BRIEFING* — `{autopsy.date_str}`\n\n"
-            f"{pnl_emoji} *Today's Realized P&L:* `₹{safety.today_net_pnl:+,.2f}` ({autopsy.net_realized_points:+.1f} pts)\n"
+            f"{pnl_emoji} *Today's Realized P&L:* `{_pnl_text(safety.today_net_pnl)}` ({autopsy.net_realized_points:+.1f} pts)\n"
             f"📦 *Trades Taken:* `{autopsy.trades_executed_count}` | *Missed Setups:* `{autopsy.trades_missed_count}`\n"
             f"📉 *Points Given Back:* `{autopsy.total_points_given_back:.1f} pts`\n\n"
             f"🛡️ *Safety Wall Reserve:* `₹{safety.current_reserve_balance:,.2f}`\n"

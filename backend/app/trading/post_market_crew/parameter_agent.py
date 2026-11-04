@@ -11,8 +11,12 @@ Responsibilities:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 import pandas as pd
 
 
@@ -78,41 +82,40 @@ class ParameterAgent:
 
         return recommendations
 
+    def append_proposals(
+        self,
+        recommendations: list[ParameterRecommendation],
+        log_path: Path | None = None,
+    ) -> Path:
+        """Append recommendations. This cannot approve or replace the live parameter file."""
+        p = log_path or Path("trades/parameter_proposals.jsonl")
+        if p.name == "active_strategy_params.json":
+            p = p.with_name("parameter_proposals.jsonl")
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not recommendations:
+            return p
+        created = datetime.now(ZoneInfo("Asia/Kolkata")).isoformat()
+        with open(p, "a", encoding="utf-8") as f:
+            for rec in recommendations:
+                row = {
+                    "parameter": rec.parameter_name,
+                    "previous_value": rec.current_value,
+                    "proposed_value": rec.recommended_value,
+                    "reason": rec.rationale,
+                    "evidence": "none",
+                    "backtest_version": "none",
+                    "oos": "none",
+                    "validation_status": "proposed",
+                    "approval_status": "pending",
+                    "created_at": created,
+                }
+                f.write(json.dumps(row) + "\n")
+        return p
+
     def save_calibrated_parameters(
         self,
         recommendations: list[ParameterRecommendation],
         config_path: Path | None = None,
     ) -> Path:
-        """Persist calibrated strategy parameters to disk for live scanner auto-adaptation."""
-        import json
-        from datetime import datetime
-
-        p = config_path or Path("trades/active_strategy_params.json")
-        p.parent.mkdir(parents=True, exist_ok=True)
-
-        current_data = {
-            "micro_wick_stop_buffer": 8.0,
-            "dynamic_rr_ceiling": 4.0,
-            "adx_breakout_threshold": 18.0,
-            "otm_steps": 2,
-            "updated_at": datetime.now().isoformat(),
-        }
-        if p.exists():
-            try:
-                with open(p, "r", encoding="utf-8") as f:
-                    current_data.update(json.load(f))
-            except Exception:
-                pass
-
-        for rec in recommendations:
-            if rec.parameter_name == "micro_wick_stop_buffer":
-                current_data["micro_wick_stop_buffer"] = 10.0 if "10" in str(rec.recommended_value) else 8.0
-            elif rec.parameter_name == "dynamic_rr_ceiling":
-                current_data["dynamic_rr_ceiling"] = 4.0 if "4" in str(rec.recommended_value) else 3.0
-            elif rec.parameter_name == "adx_breakout_threshold":
-                current_data["adx_breakout_threshold"] = 18.0
-
-        current_data["updated_at"] = datetime.now().isoformat()
-        with open(p, "w", encoding="utf-8") as f:
-            json.dump(current_data, f, indent=2)
-        return p
+        """Old name. Writes the proposal log only, never active_strategy_params.json."""
+        return self.append_proposals(recommendations, log_path=config_path)

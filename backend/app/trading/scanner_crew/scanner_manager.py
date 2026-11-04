@@ -36,6 +36,7 @@ class ScanSnapshot:
     news_sentiment: NewsSentiment
     candidate_setups: list[CandidateSetup] = field(default_factory=list)
     actionable_setups: list[CandidateSetup] = field(default_factory=list)
+    option_contracts: list[dict] | None = None
 
 
 class ScannerManager:
@@ -65,6 +66,7 @@ class ScannerManager:
         current_time_str: str | None = None,
         timeframes: list[str] | None = None,
         strategy_filter: str = "auto",
+        option_contracts: list[dict] | None = None,
     ) -> ScanSnapshot:
         """Run the end-to-end scanner pipeline across 1M, 5M, 15M and return market state."""
         t_str = current_time_str or datetime.now().strftime("%H:%M")
@@ -85,7 +87,7 @@ class ScannerManager:
         cmp = float(candles_5m["close"].iloc[-1]) if not candles_5m.empty else 23000.0
 
         # 2. Extract Session Levels
-        levels = self.levels_agent.extract_session_levels(daily_bars, candles_5m)
+        levels = self.levels_agent.extract_session_levels(daily_bars, candles_5m, option_contracts)
 
         # 3. Check Volatility Compression & Chop
         compression = self.consolidation_agent.evaluate_compression(candles_5m, current_time_str=t_str)
@@ -112,4 +114,5 @@ class ScannerManager:
             news_sentiment=news_sentiment,
             candidate_setups=candidates,
             actionable_setups=actionable,
+            option_contracts=option_contracts,
         )
