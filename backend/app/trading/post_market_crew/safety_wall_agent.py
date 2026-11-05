@@ -1,12 +1,10 @@
 """SafetyWallAgent: Capital Preservation, Profit Reserve Allocation & Sizing Engine.
 
 Responsibilities:
-1. Daily Profit Allocation: Sweeps 50% of today's net booked profits into the Safety Wall Reserve.
-2. 4-Gate Scale-Up Evaluation: Checks whether the account has satisfied statistical depth,
-   accumulated R, and safety reserves to step up to the next lot tier.
-3. Downshift Protection: If drawdown threatens the reserve buffer, automatically enforces
-   an institutional downshift to protect base capital.
-4. Tomorrow's Risk Dispatch: Writes approved lot sizing directly to trades/daily_risk_config.json.
+1. Report today's priced net. Unpriced rows leave the reserve where it was loaded.
+2. Do not move reserve_balance, current lots, or tomorrow's lot tier.
+3. Do not open the risk file and do not call _save_state from the P&L path.
+4. Tomorrow's Risk Dispatch: the priced net figure stays. Neither file is written.
 """
 
 from __future__ import annotations
@@ -15,14 +13,6 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-from app.trading.scaling_law import (
-    LOT_CAPITAL_MILESTONES,
-    ScaleUpLawConfig,
-    ScalingTierState,
-    evaluate_scaling,
-)
-
 
 # Empty until a real option premium exists. Unpriced index points must not move the reserve.
 PREMIUM_PNL_METHODS: frozenset[str] = frozenset()
@@ -76,7 +66,7 @@ class SafetyWallAgent:
             }, f, indent=2)
 
     def process_daily_pnl(self, today_trades: list[dict[str, Any]]) -> SafetyWallSummary:
-        """Process today's booked P&L, allocate safety reserve, and set tomorrow's sizing."""
+        """Report today's priced net. The reserve and both files stay where they were loaded."""
         priced = [
             float(t["pnl_rupees"])
             for t in today_trades
@@ -94,56 +84,15 @@ class SafetyWallAgent:
             )
 
         today_net_pnl = sum(priced)
-        added_to_reserve = 0.0
-        action = "NO_CHANGE"
-
-        if today_net_pnl > 0:
-            # 50% Rule: lock 50% of daily gains into Safety Wall
-            added_to_reserve = today_net_pnl * 0.50
-            self.reserve_balance += added_to_reserve
-            action = f"Allocated ₹{added_to_reserve:,.2f} (50%) to Safety Wall Reserve"
-        elif today_net_pnl < 0:
-            # Drawdown absorbed by reserve if available
-            loss = abs(today_net_pnl)
-            if self.reserve_balance >= loss:
-                self.reserve_balance -= loss
-                action = f"Safety Wall absorbed full loss of ₹{loss:,.2f}. Base capital untouched."
-            else:
-                remaining_loss = loss - self.reserve_balance
-                self.reserve_balance = 0.0
-                action = f"Safety Wall depleted. Base capital experienced ₹{remaining_loss:,.2f} drawdown."
-
-        # Evaluate Tomorrow's Lot Size
-        effective_capital = self.base_capital + self.reserve_balance
-        approved_lots = self.current_lots
-
-        # Determine lot tier from milestones
-        for tier_lots, cap_req in sorted(LOT_CAPITAL_MILESTONES.items()):
-            if effective_capital >= cap_req:
-                approved_lots = tier_lots
-
-        gate_status = f"Effective Capital: ₹{effective_capital:,.2f} | Reserve: ₹{self.reserve_balance:,.2f}"
-
-        # Write approved configuration for tomorrow
-        self.config_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.config_file, "w", encoding="utf-8") as f:
-            json.dump({
-                "base_capital": self.base_capital,
-                "safety_wall_reserve": round(self.reserve_balance, 2),
-                "effective_capital": round(effective_capital, 2),
-                "tomorrow_approved_lots": approved_lots,
-                "daily_losses_count": 0,
-                "is_safety_wall_locked": False,
-            }, f, indent=2)
-
-        self._save_state()
-
         return SafetyWallSummary(
             today_net_pnl=round(today_net_pnl, 2),
-            added_to_reserve=round(added_to_reserve, 2),
+            added_to_reserve=0.0,
             current_reserve_balance=round(self.reserve_balance, 2),
             current_tier_lots=self.current_lots,
-            tomorrow_approved_lots=approved_lots,
-            gate_evaluation_status=gate_status,
-            action_taken=action,
+            tomorrow_approved_lots=self.current_lots,
+            gate_evaluation_status=(
+                f"Effective Capital: ₹{self.base_capital + self.reserve_balance:,.2f} | "
+                f"Reserve: ₹{self.reserve_balance:,.2f}"
+            ),
+            action_taken="Reserve was not moved and the risk file was not written.",
         )

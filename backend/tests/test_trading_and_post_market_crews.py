@@ -363,7 +363,7 @@ def test_exit_agent_liquidity_hopping():
 # -----------------------------------------------------------------------------
 # Genesis Architecture C (Optimized Hybrid Engine) Tests
 # -----------------------------------------------------------------------------
-def test_directional_thesis_structure_and_enforcement():
+def test_directional_thesis_structure_and_enforcement(tmp_path):
     from app.trading.crew.entry_agent import DirectionalThesis, select_strike_with_delta_floor
     
     thesis = DirectionalThesis(
@@ -380,7 +380,9 @@ def test_directional_thesis_structure_and_enforcement():
     assert thesis.thesis_conviction in ["HIGH", "SUPER_TREND", "SCALP_REVERSAL"]
 
     # Test EntryAgent evaluates sweep with Directional Thesis attachment
-    ea = EntryAgent(otm_steps=2)
+    risk_path = tmp_path / "daily_risk_config.json"
+    ea = EntryAgent(otm_steps=2, risk_agent=RiskAgent(config_path=risk_path))
+    assert ea.risk_agent.config_path == risk_path
     # Candle sweeping PDL with long lower wick
     df = _with_trend(pd.DataFrame({
         "timestamp": ["2026-11-02 10:00:00", "2026-11-02 10:05:00"],
@@ -420,8 +422,10 @@ def test_strike_selection_2_otm_and_delta_floor():
     assert delta_put >= 0.35
 
 
-def test_gamma_wall_clearance_and_vacuum_gates():
-    ea = EntryAgent(otm_steps=2)
+def test_gamma_wall_clearance_and_vacuum_gates(tmp_path):
+    risk_path = tmp_path / "daily_risk_config.json"
+    ea = EntryAgent(otm_steps=2, risk_agent=RiskAgent(config_path=risk_path))
+    assert ea.risk_agent.config_path == risk_path
     # Candle sweeping PDL
     df = _with_trend(pd.DataFrame({
         "timestamp": ["2026-11-02 10:00:00", "2026-11-02 10:05:00"],

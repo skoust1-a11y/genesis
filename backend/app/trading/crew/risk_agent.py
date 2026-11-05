@@ -12,23 +12,141 @@ Responsibilities:
 
 from __future__ import annotations
 
+import fcntl
 import json
-from dataclasses import dataclass, field
-from datetime import date
+import logging
+import math
+import os
+import threading
+import uuid
+import warnings
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
+from zoneinfo import ZoneInfo
 
 # No method name is trusted until a real option premium is booked.
 PREMIUM_PNL_METHODS: frozenset[str] = frozenset()
 
 
-from app.trading.scaling_law import (
-    LOT_CAPITAL_MILESTONES,
-    ScaleUpLawConfig,
-    ScalingTierState,
-    evaluate_scaling,
-    check_daily_circuit_breaker,
-)
+from app.trading.scaling_law import LOT_CAPITAL_MILESTONES
+
+
+logger = logging.getLogger(__name__)
+
+# flock is per-process on macOS, so it does not stop a second thread. The RLock does.
+_PROCESS_LOCKS: dict[str, threading.RLock] = {}
+_PROCESS_LOCKS_GUARD = threading.Lock()
+
+
+def risk_lock_path(config_path: Path) -> Path:
+    """Lock file beside the ledger. with_suffix('.lock') would drop '.json'."""
+    return config_path.parent / (config_path.name + ".lock")
+
+
+def _process_lock(config_path: Path) -> threading.RLock:
+    key = str(config_path.resolve())
+    with _PROCESS_LOCKS_GUARD:
+        lock = _PROCESS_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PROCESS_LOCKS[key] = lock
+        return lock
+
+
+def _finite_number(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number):
+        return None
+    return number
+
+
+def _iso_date(value: Any) -> bool:
+    if not isinstance(value, str) or len(value) != 10:
+        return False
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _parse_risk_document(data: Any) -> dict[str, Any] | None:
+    """Return a validated document, or None when the bytes must not be trusted."""
+    if not isinstance(data, dict):
+        return None
+    parsed: dict[str, Any] = {}
+    if "base_capital" in data:
+        number = _finite_number(data["base_capital"])
+        if number is None:
+            return None
+        parsed["base_capital"] = number
+    if "safety_wall_reserve" in data:
+        number = _finite_number(data["safety_wall_reserve"])
+        if number is None:
+            return None
+        parsed["safety_wall_reserve"] = number
+    if "daily_losses_count" in data:
+        count = data["daily_losses_count"]
+        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+            return None
+        parsed["daily_losses_count"] = count
+    else:
+        parsed["daily_losses_count"] = 0
+    if "daily_cumulative_r" in data:
+        number = _finite_number(data["daily_cumulative_r"])
+        if number is None:
+            return None
+        parsed["daily_cumulative_r"] = number
+    else:
+        parsed["daily_cumulative_r"] = 0.0
+    if "is_safety_wall_locked" in data:
+        if not isinstance(data["is_safety_wall_locked"], bool):
+            return None
+        parsed["is_safety_wall_locked"] = data["is_safety_wall_locked"]
+    else:
+        parsed["is_safety_wall_locked"] = False
+    if "manual_lock" in data:
+        if not isinstance(data["manual_lock"], bool):
+            return None
+        parsed["manual_lock"] = data["manual_lock"]
+    if "session_date" in data and data["session_date"] is not None:
+        if not _iso_date(data["session_date"]):
+            return None
+        parsed["session_date"] = data["session_date"]
+    else:
+        parsed["session_date"] = None
+    if data.get("reserve_basis"):
+        if not isinstance(data["reserve_basis"], str):
+            return None
+        parsed["reserve_basis"] = data["reserve_basis"]
+    if "default_lots" in data:
+        lots = data["default_lots"]
+        if isinstance(lots, bool) or not isinstance(lots, int) or lots < 0:
+            return None
+        parsed["default_lots"] = lots
+    for key in ("loss_counted_trade_ids", "reserve_posted_for"):
+        if key not in data:
+            continue
+        items = data[key]
+        if not isinstance(items, list) or any(not isinstance(item, str) for item in items):
+            return None
+        parsed[key] = list(items)
+    return parsed
+
+
+def _fsync_directory(directory: Path) -> None:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(directory, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 @dataclass
@@ -75,35 +193,201 @@ class RiskAgent:
         self.manual_lock = False
         self._persist_manual_lock = False
         self.reserve_basis = "index_points_x_0.5_frozen"
+        self.config_unreadable = False
+        self.directory_durability_unconfirmed = False
+        self._loss_counted_trade_ids: list[str] | None = None
+        self._reserve_posted_for: list[str] | None = None
+        self._lock_fd: int | None = None
+        self._lock_depth = 0
+        self._hold_adopted = False
+        self._adopted_bytes: bytes | None = None
+        self._adopted_existed = False
+        self._stale_refused = False
         self._load_config()
+
+    def _assign_parsed(self, parsed: dict[str, Any]) -> None:
+        if "base_capital" in parsed:
+            self.base_capital = parsed["base_capital"]
+        if "safety_wall_reserve" in parsed:
+            self.safety_wall_reserve = parsed["safety_wall_reserve"]
+        self.daily_losses_count = parsed["daily_losses_count"]
+        self.daily_cumulative_r = parsed["daily_cumulative_r"]
+        self.is_safety_wall_locked = parsed["is_safety_wall_locked"]
+        self.session_date = parsed["session_date"]
+        if "manual_lock" in parsed:
+            self.manual_lock = parsed["manual_lock"]
+            self._persist_manual_lock = True
+        else:
+            self.manual_lock = False
+            self._persist_manual_lock = False
+        if "reserve_basis" in parsed:
+            self.reserve_basis = parsed["reserve_basis"]
+        if "default_lots" in parsed and self.default_lots is None:
+            self.default_lots = parsed["default_lots"]
+        self._loss_counted_trade_ids = parsed.get("loss_counted_trade_ids")
+        self._reserve_posted_for = parsed.get("reserve_posted_for")
+
+    def _snapshot(self) -> dict[str, Any]:
+        return {
+            "base_capital": self.base_capital,
+            "safety_wall_reserve": self.safety_wall_reserve,
+            "daily_losses_count": self.daily_losses_count,
+            "daily_cumulative_r": self.daily_cumulative_r,
+            "is_safety_wall_locked": self.is_safety_wall_locked,
+            "session_date": self.session_date,
+            "manual_lock": self.manual_lock,
+            "persist_manual_lock": self._persist_manual_lock,
+            "reserve_basis": self.reserve_basis,
+            "default_lots": self.default_lots,
+            "loss_counted_trade_ids": (
+                None if self._loss_counted_trade_ids is None else list(self._loss_counted_trade_ids)
+            ),
+            "reserve_posted_for": (
+                None if self._reserve_posted_for is None else list(self._reserve_posted_for)
+            ),
+        }
+
+    def _restore(self, snap: dict[str, Any]) -> None:
+        self.base_capital = snap["base_capital"]
+        self.safety_wall_reserve = snap["safety_wall_reserve"]
+        self.daily_losses_count = snap["daily_losses_count"]
+        self.daily_cumulative_r = snap["daily_cumulative_r"]
+        self.is_safety_wall_locked = snap["is_safety_wall_locked"]
+        self.session_date = snap["session_date"]
+        self.manual_lock = snap["manual_lock"]
+        self._persist_manual_lock = snap["persist_manual_lock"]
+        self.reserve_basis = snap["reserve_basis"]
+        self.default_lots = snap["default_lots"]
+        copied_losses = snap["loss_counted_trade_ids"]
+        copied_reserve = snap["reserve_posted_for"]
+        self._loss_counted_trade_ids = None if copied_losses is None else list(copied_losses)
+        self._reserve_posted_for = None if copied_reserve is None else list(copied_reserve)
 
     def _load_config(self) -> None:
         """Load persistent risk configuration and safety wall state."""
-        if self.config_path.exists():
-            try:
-                with open(self.config_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.base_capital = float(data.get("base_capital", self.base_capital))
-                    self.safety_wall_reserve = float(data.get("safety_wall_reserve", self.safety_wall_reserve))
-                    self.daily_losses_count = int(data.get("daily_losses_count", 0))
-                    self.daily_cumulative_r = float(data.get("daily_cumulative_r", 0.0))
-                    self.is_safety_wall_locked = bool(data.get("is_safety_wall_locked", False))
-                    self.session_date = data.get("session_date")
-                    if "manual_lock" in data:
-                        self._persist_manual_lock = True
-                        self.manual_lock = bool(data["manual_lock"])
-                    if data.get("reserve_basis"):
-                        self.reserve_basis = str(data["reserve_basis"])
-                    if "default_lots" in data and self.default_lots is None:
-                        self.default_lots = int(data["default_lots"])
-            except Exception:
-                # A risk file we cannot read is not a fresh day.
-                self.session_blocked = True
+        if not self.config_path.exists():
+            return
+        if not self.config_path.is_file():
+            self.config_unreadable = True
+            self.session_blocked = True
+            return
+        try:
+            with open(self.config_path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception:
+            self.config_unreadable = True
+            self.session_blocked = True
+            return
+        parsed = _parse_risk_document(data)
+        if parsed is None:
+            self.config_unreadable = True
+            self.session_blocked = True
+            return
+        self._assign_parsed(parsed)
 
-    def save_config(self) -> None:
-        """Save persistent risk configuration to disk."""
-        self.config_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {
+    def _acquire_lock(self) -> bool:
+        thread_lock = _process_lock(self.config_path)
+        thread_lock.acquire()
+        try:
+            if self._lock_depth == 0:
+                self.config_path.parent.mkdir(parents=True, exist_ok=True)
+                fd = os.open(risk_lock_path(self.config_path), os.O_CREAT | os.O_RDWR, 0o644)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX)
+                except OSError:
+                    os.close(fd)
+                    raise
+                self._lock_fd = fd
+            self._lock_depth += 1
+            return True
+        except OSError:
+            thread_lock.release()
+            return False
+
+    def _release_lock(self) -> None:
+        thread_lock = _process_lock(self.config_path)
+        try:
+            self._lock_depth -= 1
+            if self._lock_depth <= 0:
+                self._lock_depth = 0
+                self._hold_adopted = False
+                self._adopted_bytes = None
+                fd = self._lock_fd
+                self._lock_fd = None
+                if fd is not None:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_UN)
+                    finally:
+                        os.close(fd)
+        finally:
+            thread_lock.release()
+
+    def _adopt_locked(self) -> bool:
+        """Read the ledger under the lock. A missing file keeps the in-memory reserve."""
+        if not self.config_path.exists():
+            self._adopted_bytes = None
+            self._hold_adopted = True
+            self._adopted_existed = False
+            return True
+        if not self.config_path.is_file():
+            self.config_unreadable = True
+            self.session_blocked = True
+            return False
+        try:
+            raw = self.config_path.read_bytes()
+            data = json.loads(raw.decode("utf-8"))
+        except Exception:
+            self.config_unreadable = True
+            self.session_blocked = True
+            return False
+        parsed = _parse_risk_document(data)
+        if parsed is None:
+            self.config_unreadable = True
+            self.session_blocked = True
+            return False
+        self._assign_parsed(parsed)
+        self._adopted_bytes = raw
+        self._hold_adopted = True
+        self._adopted_existed = True
+        return True
+
+    def _refuse_stale(self, current: bytes | None) -> bool:
+        """Load the bytes now on disk and do not replace them."""
+        if current is None:
+            self._stale_refused = True
+            return False
+        try:
+            data = json.loads(current.decode("utf-8"))
+        except Exception:
+            self.config_unreadable = True
+            self.session_blocked = True
+            return False
+        parsed = _parse_risk_document(data)
+        if parsed is None:
+            self.config_unreadable = True
+            self.session_blocked = True
+            return False
+        self._assign_parsed(parsed)
+        self._adopted_bytes = current
+        self._hold_adopted = True
+        self._adopted_existed = True
+        self._stale_refused = True
+        return False
+
+    def _sweep_temps(self) -> None:
+        parent = self.config_path.parent
+        prefix = f".{self.config_path.name}."
+        if not parent.is_dir():
+            return
+        for child in parent.iterdir():
+            if child.name.startswith(prefix) and child.name.endswith(".tmp"):
+                try:
+                    child.unlink()
+                except OSError:
+                    pass
+
+    def _payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "base_capital": self.base_capital,
             "safety_wall_reserve": self.safety_wall_reserve,
             "effective_capital": self.base_capital + self.safety_wall_reserve,
@@ -117,8 +401,94 @@ class RiskAgent:
         }
         if self._persist_manual_lock:
             payload["manual_lock"] = self.manual_lock
-        with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        if self._loss_counted_trade_ids is not None:
+            payload["loss_counted_trade_ids"] = list(self._loss_counted_trade_ids)
+        if self._reserve_posted_for is not None:
+            payload["reserve_posted_for"] = list(self._reserve_posted_for)
+        return payload
+
+    def _save_under_lock(self) -> bool:
+        self._stale_refused = False
+        if self.config_unreadable or self.directory_durability_unconfirmed:
+            return False
+        try:
+            current = self.config_path.read_bytes() if self.config_path.is_file() else None
+        except OSError:
+            self.config_unreadable = True
+            self.session_blocked = True
+            return False
+        if self._hold_adopted:
+            if current != self._adopted_bytes:
+                return self._refuse_stale(current)
+        elif current is not None:
+            return self._refuse_stale(current)
+
+        tmp = self.config_path.parent / (
+            f".{self.config_path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            self._sweep_temps()
+            with open(tmp, "w", encoding="utf-8") as handle:
+                json.dump(self._payload(), handle, indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.config_path)
+        except OSError:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return False
+        try:
+            _fsync_directory(self.config_path.parent)
+        except OSError:
+            logger.error("directory fsync failed after replace for %s", self.config_path)
+            self.directory_durability_unconfirmed = True
+            return False
+        try:
+            self._adopted_bytes = self.config_path.read_bytes()
+            self._hold_adopted = True
+            self._adopted_existed = True
+        except OSError:
+            pass
+        return True
+
+    def save_config(self) -> bool:
+        """Replace the ledger. True only after replace and directory fsync both return."""
+        if self.config_unreadable or self.directory_durability_unconfirmed:
+            return False
+        if not self._acquire_lock():
+            return False
+        try:
+            return self._save_under_lock()
+        finally:
+            self._release_lock()
+
+    def _persist_mutation(
+        self,
+        *,
+        file_existed: bool,
+        adopted: dict[str, Any],
+        pre_call: dict[str, Any],
+    ) -> bool:
+        """Commit only when save_config is True. Do not roll back a finished replace."""
+        self._stale_refused = False
+        saved: Any = None
+        try:
+            saved = self.save_config()
+        except Exception:
+            saved = None
+        if saved is True:
+            self.directory_durability_unconfirmed = False
+            self.session_blocked = False
+            return True
+        if self.directory_durability_unconfirmed:
+            self.session_blocked = True
+            return False
+        if not self._stale_refused:
+            self._restore(adopted if file_existed else pre_call)
+        self.session_blocked = True
+        return False
 
     def record_trade_outcome(
         self,
@@ -126,57 +496,93 @@ class RiskAgent:
         pnl_rupees: float | None = None,
         realized_r: float = 0.0,
         pnl_method: str | None = None,
-    ) -> None:
+    ) -> bool:
         """Update daily R counters. The reserve moves only on a priced option premium."""
-        priced = pnl_method in PREMIUM_PNL_METHODS and pnl_rupees is not None
-        if is_win and priced and pnl_rupees > 0:
-            self.safety_wall_reserve += round(pnl_rupees * 0.50, 2)
+        if self.config_unreadable or self.directory_durability_unconfirmed:
+            self.session_blocked = True
+            return False
+        if not self._acquire_lock():
+            self.session_blocked = True
+            return False
+        try:
+            pre_call = self._snapshot()
+            if not self._adopt_locked():
+                self.session_blocked = True
+                return False
+            adopted = self._snapshot()
+            file_existed = self._adopted_existed
+            priced = pnl_method in PREMIUM_PNL_METHODS and pnl_rupees is not None
+            if is_win and priced and pnl_rupees > 0:
+                self.safety_wall_reserve += round(pnl_rupees * 0.50, 2)
 
-        if is_win or realized_r > 0:
-            self.daily_losses_count = 0
-        elif realized_r <= -0.5 or (priced and pnl_rupees is not None and pnl_rupees <= -500.0):
-            self.daily_losses_count += 1
+            if is_win or realized_r > 0:
+                self.daily_losses_count = 0
+            elif realized_r <= -0.5 or (priced and pnl_rupees is not None and pnl_rupees <= -500.0):
+                self.daily_losses_count += 1
 
-        self.daily_cumulative_r += realized_r
+            self.daily_cumulative_r += realized_r
 
-        # Daily Circuit Breaker: Halt if 2 consecutive losses or cumulative drawdown <= -2.0R
-        if self.daily_losses_count >= self.max_daily_losses or self.daily_cumulative_r <= -2.0:
-            self.is_safety_wall_locked = True
+            # Daily Circuit Breaker: Halt if 2 consecutive losses or cumulative drawdown <= -2.0R
+            if self.daily_losses_count >= self.max_daily_losses or self.daily_cumulative_r <= -2.0:
+                self.is_safety_wall_locked = True
 
-        self.save_config()
+            return self._persist_mutation(
+                file_existed=file_existed,
+                adopted=adopted,
+                pre_call=pre_call,
+            )
+        finally:
+            self._release_lock()
 
     def begin_session(self, today: date) -> bool:
         """Reset daily counters when the Asia/Kolkata date changes. A failed save blocks entries."""
-        key = today.isoformat()
-        if self.session_date == key and not self.session_blocked:
-            return True
-        snapshot = (
-            self.daily_losses_count,
-            self.daily_cumulative_r,
-            self.is_safety_wall_locked,
-            self.session_date,
-        )
-        self.daily_losses_count = 0
-        self.daily_cumulative_r = 0.0
-        if not self.manual_lock:
-            self.is_safety_wall_locked = False
-        self.session_date = key
-        try:
-            self.save_config()
-        except Exception:
-            self.daily_losses_count, self.daily_cumulative_r, self.is_safety_wall_locked, self.session_date = snapshot
+        if self.config_unreadable or self.directory_durability_unconfirmed:
             self.session_blocked = True
             return False
-        self.session_blocked = False
-        return True
+        key = today.isoformat()
+        if self.session_date == key:
+            if self.session_blocked:
+                return False
+            return True
+        if not self._acquire_lock():
+            self.session_blocked = True
+            return False
+        try:
+            pre_call = self._snapshot()
+            if not self._adopt_locked():
+                self.session_blocked = True
+                return False
+            if self.session_date == key:
+                if self.directory_durability_unconfirmed:
+                    self.session_blocked = True
+                    return False
+                self.session_blocked = False
+                return True
+            adopted = self._snapshot()
+            file_existed = self._adopted_existed
+            self.daily_losses_count = 0
+            self.daily_cumulative_r = 0.0
+            if not self.manual_lock:
+                self.is_safety_wall_locked = False
+            self.session_date = key
+            return self._persist_mutation(
+                file_existed=file_existed,
+                adopted=adopted,
+                pre_call=pre_call,
+            )
+        finally:
+            self._release_lock()
 
-    def reset_daily_counters(self) -> None:
+    def reset_daily_counters(self, today: date | None = None) -> bool:
         """Reset intraday loss counters at beginning of trading day."""
-        self.daily_losses_count = 0
-        self.daily_cumulative_r = 0.0
-        if not self.manual_lock:
-            self.is_safety_wall_locked = False
-        self.save_config()
+        warnings.warn(
+            "reset_daily_counters delegates to begin_session and no longer zeros a same-day count",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        if today is None:
+            today = datetime.now(ZoneInfo("Asia/Kolkata")).date()
+        return self.begin_session(today)
 
     def evaluate_order(
         self,

@@ -189,7 +189,7 @@ class TradeManager:
                 }],
                 "active_count": 0,
             }
-        self.risk_agent.begin_session(session_day(date_str))
+        session_ready = self.risk_agent.begin_session(session_day(date_str)) is True
         date_val = date_str or datetime.now().strftime("%Y-%m-%d")
         time_val = current_time_str or datetime.now().strftime("%H:%M")
         contracts = (nifty_chain or {}).get("contracts") or None
@@ -354,32 +354,61 @@ class TradeManager:
                 })
 
             elif exit_decision.is_fully_closed:
-                closed_trade = self.journal_agent.record_exit(trade_id, exit_decision, date_str, exit_time_str=time_val)
-                lots = int(trade.get("lots", 1))
-                self.alert_agent.send_exit_alert(
-                    symbol=trade.get("symbol", "NIFTY"),
-                    strike=trade.get("suggested_strike", "NIFTY OPTION"),
-                    decision=exit_decision,
-                    lots=lots,
-                )
-                pnl_rupees = None if not closed_trade else closed_trade.get("pnl_rupees")
-                self.risk_agent.record_trade_outcome(
-                    is_win=(exit_decision.realized_points > 0),
-                    pnl_rupees=pnl_rupees,
-                    realized_r=exit_decision.realized_r,
-                    pnl_method=None if not closed_trade else closed_trade.get("pnl_method"),
-                )
-                results["actions"].append({
-                    "action": exit_decision.action,
-                    "trade_id": trade_id,
-                    "pnl_rupees": pnl_rupees,
-                    "realized_points": exit_decision.realized_points,
-                    "realized_r": exit_decision.realized_r,
-                    "reason": exit_decision.exit_reason,
-                })
-                # Position squared off; update active list
-                del active_trades[trade_id]
-                self.journal_agent.save_active_trades(active_trades, date_str)
+                if (
+                    self.risk_agent.config_unreadable
+                    or not session_ready
+                    or self.risk_agent.session_blocked
+                ):
+                    results["actions"].append({
+                        "action": "EXIT_BLOCKED",
+                        "trade_id": trade_id,
+                        "reason": exit_decision.exit_reason,
+                    })
+                else:
+                    closed_trade = self.journal_agent.record_exit(
+                        trade_id, exit_decision, date_str, exit_time_str=time_val
+                    )
+                    if closed_trade is None:
+                        results["actions"].append({
+                            "action": "EXIT_JOURNAL_REFUSED",
+                            "trade_id": trade_id,
+                            "reason": exit_decision.exit_reason,
+                        })
+                    else:
+                        pnl_rupees = closed_trade.get("pnl_rupees")
+                        outcome_saved = self.risk_agent.record_trade_outcome(
+                            is_win=(exit_decision.realized_points > 0),
+                            pnl_rupees=pnl_rupees,
+                            realized_r=exit_decision.realized_r,
+                            pnl_method=closed_trade.get("pnl_method"),
+                        )
+                        if outcome_saved is not True:
+                            results["actions"].append({
+                                "action": "EXIT_RISK_UNPERSISTED",
+                                "trade_id": trade_id,
+                                "pnl_rupees": pnl_rupees,
+                                "realized_points": exit_decision.realized_points,
+                                "realized_r": exit_decision.realized_r,
+                                "reason": exit_decision.exit_reason,
+                            })
+                        else:
+                            lots = int(trade.get("lots", 1))
+                            self.alert_agent.send_exit_alert(
+                                symbol=trade.get("symbol", "NIFTY"),
+                                strike=trade.get("suggested_strike", "NIFTY OPTION"),
+                                decision=exit_decision,
+                                lots=lots,
+                            )
+                            results["actions"].append({
+                                "action": exit_decision.action,
+                                "trade_id": trade_id,
+                                "pnl_rupees": pnl_rupees,
+                                "realized_points": exit_decision.realized_points,
+                                "realized_r": exit_decision.realized_r,
+                                "reason": exit_decision.exit_reason,
+                            })
+                            del active_trades[trade_id]
+                            self.journal_agent.save_active_trades(active_trades, date_str)
             else:
                 # Active Position: Post-entry Trailing Milestone Monitoring (+1.0R and +2.0R)
                 current_r = exit_decision.realized_r
