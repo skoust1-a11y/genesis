@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
-import sqlite3.dbapi2
+import os
+import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -23,6 +23,7 @@ from app.live.store import LiveStore
 from app.main import app
 from app.strategies.rules import rules_sha256
 from app.strategies.schema import parse_strategy_markdown
+from app.trading import odds
 
 BACKEND = Path(__file__).resolve().parents[1]
 VERSION_FIELDS = ("id", "strategy_id", "version", "markdown", "content_sha256")
@@ -61,38 +62,61 @@ Sell an iron condor on NIFTY when implied volatility is rich.
 """
 
 
-PROD_TRADES_DB = trade_store.DEFAULT_DB_PATH.resolve()
-PROTECTED_DB_FILES = {Path(f"{PROD_TRADES_DB}{s}") for s in ("", "-wal", "-shm", "-journal")}
-_real_connect = sqlite3.connect
+# Settings URLs are CWD-relative (sqlite:///data/...), so both data dirs hold production databases.
+PRODUCTION_DATA_DIRS = (trade_store.ROOT_DIR.resolve() / "data", BACKEND / "data")
+_production_opens: list[str] = []
 
 
-def _prod_fingerprint() -> dict[str, str]:
-    files = (PROD_TRADES_DB, Path(f"{PROD_TRADES_DB}-wal"))
-    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files if p.exists()}
-
-
-def _guarded_connect(database, *args, **kwargs):
-    target = str(database)
+def _guard_production_sqlite(event: str, args: tuple) -> None:
+    # The sqlite3.connect audit event fires for every SQLite open: sqlite3, SQLAlchemy, Connection().
+    if event != "sqlite3.connect":
+        return
+    target = os.fsdecode(args[0]) if isinstance(args[0], bytes | os.PathLike) else str(args[0])
     if target.startswith("file:"):
         target = unquote(urlparse(target).path)
-    if target and target != ":memory:" and Path(target).resolve() in PROTECTED_DB_FILES:
-        raise RuntimeError(f"Test attempted to open the production trade database: {target}")
-    return _real_connect(database, *args, **kwargs)
+    if target and target != ":memory:" and any(Path(target).resolve().is_relative_to(d) for d in PRODUCTION_DATA_DIRS):
+        _production_opens.append(target)
+        raise RuntimeError(f"Test attempted to open a production database: {target}")
+
+
+sys.addaudithook(_guard_production_sqlite)
+
+
+def _production_fingerprint() -> dict[str, str]:
+    """SHA-256 of every production SQLite file, including -wal, -shm and -journal companions."""
+    out = {}
+    for path in sorted(p for d in PRODUCTION_DATA_DIRS for p in d.glob("*.db*")):
+        with path.open("rb") as f:
+            out[str(path)] = hashlib.file_digest(f, "sha256").hexdigest()
+    return out
 
 
 @pytest.fixture(scope="session", autouse=True)
-def _production_trades_db_unchanged():
-    before = _prod_fingerprint()
+def _production_databases_unchanged():
+    before = _production_fingerprint()
     yield
-    assert _prod_fingerprint() == before, f"{PROD_TRADES_DB} changed during the test session"
+    after = _production_fingerprint()
+    changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+    assert not changed, f"production databases changed during the test session: {changed}"
+
+
+@pytest.fixture
+def production_db_opens():
+    """Production opens the guard blocked in this test; tests that trip the guard on purpose clear it."""
+    return _production_opens
 
 
 @pytest.fixture(autouse=True)
-def _isolated_trade_store(tmp_path, monkeypatch):
-    """Every test gets a temporary trade store; opening the production file raises."""
+def _isolated_databases(tmp_path, monkeypatch):
+    """Every test starts on temporary databases; any attempt to open a production one fails the test,
+    even when the code under test swallows the guard's error."""
     monkeypatch.setattr(trade_store, "DEFAULT_DB_PATH", tmp_path / "trades.db")
-    monkeypatch.setattr(sqlite3, "connect", _guarded_connect)
-    monkeypatch.setattr(sqlite3.dbapi2, "connect", _guarded_connect)
+    monkeypatch.setattr(odds, "NIFTY_5M_DB_PATH", tmp_path / "nifty_5m.db")
+    for name in ("DATABASE_URL", "LIVE_DATABASE_URL", "MARKET_DATABASE_URL"):
+        monkeypatch.setenv(name, f"sqlite:///{tmp_path / 'unconfigured' / f'{name.lower()}.db'}")
+    _production_opens.clear()
+    yield
+    assert not _production_opens, f"test opened production databases: {_production_opens}"
 
 
 def alembic_config(url: str, live: bool = False) -> Config:

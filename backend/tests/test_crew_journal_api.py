@@ -416,8 +416,8 @@ def test_20_legacy_quarantine_does_not_modify_the_source(tmp_path):
     pub = hashlib.sha256(b"pub").hexdigest()
     with pytest.raises(sqlite3.IntegrityError, match="ACTIONABLE"):
         conn.execute(
-            "INSERT INTO crew_outbox (publication_id, trade_id, kind, purpose, body, body_sha256, state, created_at)"
-            " VALUES (?, 'TRADE_NIFTY_1793365556', 'RECOMMENDATION', 'entry', 'b', ?, 'PENDING', ?)",
+            "INSERT INTO crew_outbox (publication_id, trade_id, kind, purpose, body, body_sha256, state, created_at,"
+            " chat_id) VALUES (?, 'TRADE_NIFTY_1793365556', 'RECOMMENDATION', 'entry', 'b', ?, 'PENDING', ?, '-100')",
             (pub, hashlib.sha256(b"body").hexdigest(), CANDLE),
         )
     conn.close()
@@ -444,11 +444,12 @@ def test_21_open_trade_loading_is_read_only(tmp_path):
     conn.close()
 
 
-def test_22_production_database_hashes_are_unchanged():
+def test_22_production_database_hashes_are_unchanged(production_db_opens):
     assert hashlib.sha256(PROD_DB.read_bytes()).hexdigest() == PROD_HASH
     assert hashlib.sha256(OCT30.read_bytes()).hexdigest() == OCT30_HASH
-    with pytest.raises(RuntimeError, match="production trade database"):
+    with pytest.raises(RuntimeError, match="production database"):
         cj.connect(PROD_DB)
+    production_db_opens.clear()
 
 
 def _journal_rows(path):

@@ -22,7 +22,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _DAY = "GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'"
 _HEX64 = "length({c}) = 64 AND {c} NOT GLOB '*[^0-9a-f]*'"
@@ -369,6 +369,35 @@ INSERT OR IGNORE INTO crew_meta (key, value, set_at)
 VALUES ('schema_version', '{SCHEMA_VERSION}', strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
 """
 
+# v2: a Telegram message_id is unique only within its chat, so a publication carries its destination.
+# v1 rows keep chat_id NULL ("destination not recorded"): they cannot be claimed, and their message_ids
+# count as clashes in every chat.
+_V2_ADD_CHAT = (
+    "ALTER TABLE crew_outbox ADD COLUMN chat_id TEXT"
+    " CHECK (chat_id IS NULL OR (chat_id <> '' AND chat_id = trim(chat_id)));"
+)
+SCHEMA_V2 = """
+CREATE UNIQUE INDEX IF NOT EXISTS crew_outbox_chat_message ON crew_outbox(chat_id, telegram_message_id)
+    WHERE telegram_message_id IS NOT NULL;
+
+CREATE TRIGGER IF NOT EXISTS crew_outbox_insert_chat BEFORE INSERT ON crew_outbox
+BEGIN
+    SELECT RAISE(ABORT, 'crew_outbox: a publication needs its destination chat_id')
+    WHERE NEW.chat_id IS NULL;
+    SELECT RAISE(ABORT, 'crew_outbox: MONITORING must go to its parent''s chat')
+    WHERE NEW.kind = 'MONITORING' AND EXISTS (SELECT 1 FROM crew_outbox p
+        WHERE p.publication_id = NEW.parent_publication_id AND p.chat_id IS NOT NEW.chat_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS crew_outbox_chat_immutable BEFORE UPDATE OF chat_id ON crew_outbox
+BEGIN
+    SELECT RAISE(ABORT, 'crew_outbox: identity columns are immutable') WHERE NEW.chat_id IS NOT OLD.chat_id;
+END;
+
+UPDATE crew_meta SET value = '2', set_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE key = 'schema_version' AND value <> '2';
+"""
+
 
 def connect(db_path: Path | str, *, create: bool = False) -> sqlite3.Connection:
     """Open the journal: WAL, synchronous=FULL, foreign_keys=ON, autocommit (use ``transaction``).
@@ -410,7 +439,8 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 def migrate(db_path: Path | str) -> int:
     """Create the crew_* schema additively and idempotently in one transaction. Returns the schema version.
 
-    Only CREATE ... IF NOT EXISTS statements; existing tables (including legacy ones) are never altered.
+    Only CREATE ... IF NOT EXISTS statements, plus v2's nullable ``crew_outbox.chat_id`` column;
+    existing rows and legacy tables are never rewritten.
     """
     conn = connect(db_path, create=True)
     try:
@@ -419,8 +449,10 @@ def migrate(db_path: Path | str) -> int:
             row = conn.execute("SELECT value FROM crew_meta WHERE key='schema_version'").fetchone()
             if row and int(row[0]) > SCHEMA_VERSION:
                 raise RuntimeError(f"crew journal schema {row[0]} is newer than this code ({SCHEMA_VERSION})")
+        has_chat = any(r[1] == "chat_id" for r in conn.execute("PRAGMA table_info(crew_outbox)"))
         try:
-            conn.executescript(f"BEGIN IMMEDIATE;\n{SCHEMA}\nCOMMIT;")
+            # A concurrent migrator can win the ALTER; this one then rolls back whole and a rerun is a no-op.
+            conn.executescript(f"BEGIN IMMEDIATE;\n{SCHEMA}\n{'' if has_chat else _V2_ADD_CHAT}\n{SCHEMA_V2}\nCOMMIT;")
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")

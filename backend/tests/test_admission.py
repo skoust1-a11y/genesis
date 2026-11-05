@@ -173,8 +173,8 @@ def test_13_research_only_trade_has_no_recommendation(tmp_path):
     conn = cj.connect(path)
     with pytest.raises(sqlite3.IntegrityError, match="ACTIONABLE"):
         conn.execute(
-            "INSERT INTO crew_outbox (publication_id, trade_id, kind, purpose, body, body_sha256, state, created_at)"
-            " VALUES (?, ?, 'RECOMMENDATION', 'entry', 'b', ?, 'PENDING', ?)",
+            "INSERT INTO crew_outbox (publication_id, trade_id, kind, purpose, body, body_sha256, state, created_at,"
+            " chat_id) VALUES (?, ?, 'RECOMMENDATION', 'entry', 'b', ?, 'PENDING', ?, '-100')",
             (hashlib.sha256(b"p").hexdigest(), trade["trade_id"], hashlib.sha256(b"b").hexdigest(), DAY),
         )
     conn.close()
@@ -259,11 +259,12 @@ def test_18_no_telegram_broker_or_network(tmp_path, monkeypatch):
     track(ready(tmp_path), run())
 
 
-def test_19_production_files_are_unchanged():
+def test_19_production_files_are_unchanged(production_db_opens):
     assert hashlib.sha256(PROD_DB.read_bytes()).hexdigest() == PROD_HASH
     assert hashlib.sha256(OCT30.read_bytes()).hexdigest() == OCT30_HASH
-    with pytest.raises(RuntimeError, match="production trade database"):
+    with pytest.raises(RuntimeError, match="production database"):
         adm.persist(PROD_DB, run(), session_id="S1")
+    production_db_opens.clear()
 
 
 def test_20_frozen_v0_strategy_sources_are_untouched():

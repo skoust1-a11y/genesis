@@ -4,20 +4,44 @@ import hashlib
 import sqlite3
 
 import pytest
+from sqlalchemy import create_engine
 
+from app import alerts
+from app.config import get_settings
 from app.db import trade_store
 from app.trading.crew.exit_agent import ExitDecision
 from app.trading.crew.journal_agent import JournalAgent
+from tests.conftest import BACKEND
 
 PROD_TRADES_DB = trade_store.ROOT_DIR / "data" / "trades.db"
 TRADE = {"date": "2026-11-04", "time": "10:15", "strategy": "Liquidity Sweep", "side": "LONG", "entry": 100.0}
 
 
-def test_guard_blocks_production_db():
-    with pytest.raises(RuntimeError, match="production trade database"):
+def test_guard_blocks_production_db(production_db_opens, monkeypatch):
+    genesis_db = BACKEND / "data" / "genesis.db"
+    with pytest.raises(RuntimeError, match="production database"):
         sqlite3.connect(str(PROD_TRADES_DB))
-    with pytest.raises(RuntimeError, match="production trade database"):
+    with pytest.raises(RuntimeError, match="production database"):
         sqlite3.connect(f"{PROD_TRADES_DB.as_uri()}?mode=ro", uri=True)
+    with pytest.raises(RuntimeError, match="production database"):
+        sqlite3.Connection(str(PROD_TRADES_DB) + "-wal")
+    with pytest.raises(RuntimeError, match="production database"):
+        create_engine(f"sqlite:///{genesis_db}").connect()
+    monkeypatch.chdir(BACKEND)  # the settings default URL is relative to the working directory
+    with pytest.raises(RuntimeError, match="production database"):
+        create_engine("sqlite:///data/genesis_live.db").connect()
+    assert len(production_db_opens) == 5
+    production_db_opens.clear()
+
+
+def test_guard_records_opens_that_the_code_swallows(production_db_opens, monkeypatch):
+    assert alerts.record(title="t", message="m") is None  # the default temporary DATABASE_URL has no schema
+    assert production_db_opens == []
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{BACKEND / 'data' / 'genesis.db'}")
+    get_settings.cache_clear()
+    assert alerts.record(title="t", message="m") is None  # record() never raises
+    assert production_db_opens == [str(BACKEND / "data" / "genesis.db")]
+    production_db_opens.clear()
 
 
 def test_default_path_is_temporary(tmp_path):

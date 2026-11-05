@@ -80,7 +80,7 @@ def pub(n):
 def enqueue(c, n, kind="RECOMMENDATION", trade=None, parent=None, state="PENDING"):
     c.execute(
         "INSERT INTO crew_outbox (publication_id, trade_id, parent_publication_id, kind, purpose, body, body_sha256,"
-        " state, created_at) VALUES (?, ?, ?, ?, 'entry', 'b', ?, ?, ?)",
+        " state, created_at, chat_id) VALUES (?, ?, ?, ?, 'entry', 'b', ?, ?, ?, '-100')",
         (pub(n), trade, parent, kind, sid(0), state, T0),
     )
     audit(c, n, 1, None, state)
@@ -367,8 +367,9 @@ def test_legacy_import_is_quarantined_research_only(db):
             " 'legacy', 'CALL', 1, 1, ?)", (sid(78), DAY, T0))  # fmt: skip
     with rejects("ACTIONABLE"):
         c.execute(
-            "INSERT INTO crew_outbox (publication_id, trade_id, kind, purpose, body, body_sha256, state, created_at)"
-            " VALUES (?, 'L1', 'RECOMMENDATION', 'entry', 'b', ?, 'PENDING', ?)", (pub(1), sid(0), T0))  # fmt: skip
+            "INSERT INTO crew_outbox (publication_id, trade_id, kind, purpose, body, body_sha256, state, created_at,"
+            " chat_id) VALUES (?, 'L1', 'RECOMMENDATION', 'entry', 'b', ?, 'PENDING', ?, '-100')",
+            (pub(1), sid(0), T0))  # fmt: skip
 
 
 # --- publication invariants -------------------------------------------------------------------
@@ -545,8 +546,9 @@ def test_transaction_rolls_back_on_constraint_failure(db):
     assert db.execute("SELECT count(*) FROM crew_trades").fetchone()[0] == 1
 
 
-def test_production_trades_db_is_guarded():
+def test_production_trades_db_is_guarded(production_db_opens):
     from app.db import trade_store
 
-    with pytest.raises(RuntimeError, match="production trade database"):
+    with pytest.raises(RuntimeError, match="production database"):
         cj.connect(trade_store.ROOT_DIR / "data" / "trades.db")
+    production_db_opens.clear()

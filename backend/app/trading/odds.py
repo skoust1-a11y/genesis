@@ -15,6 +15,7 @@ from __future__ import annotations
 from bisect import bisect_right
 from dataclasses import asdict, dataclass
 from datetime import date, timedelta
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from app.strategies.rules import Check
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
     from app.strategies.rules import StrategyRules
     from app.trading.policy import OddsGate
 
+NIFTY_5M_DB_PATH = Path(__file__).resolve().parents[3] / "data" / "nifty_5m.db"
 SAMPLE_CHECK = "odds.sample"
 EXPECTANCY_CHECK = "odds.expectancy"
 
@@ -168,11 +170,7 @@ def strategy_history(
 
 
 def _nifty_5m_db(db_path: Any = None):
-    from pathlib import Path
-
-    if db_path is not None:
-        return Path(db_path)
-    return Path(__file__).resolve().parents[3] / "data" / "nifty_5m.db"
+    return Path(db_path) if db_path is not None else NIFTY_5M_DB_PATH
 
 
 def save_nifty_5m(rows: list[dict], db_path: Any = None) -> int:
