@@ -147,18 +147,43 @@ def long_premium_risk(
     funds: Decimal | None = None,
 ) -> PremiumRisk:
     """Full premium plus buy-side charges. The caller passes 3 lots, or 4 for a super trend."""
-    blank = PremiumRisk(0, quote.lot_size, 0, Decimal(0), Decimal(0), Decimal(0), CostBreakdown.zero())
-    if decision.status != "executable" or decision.buy is None or decision.buy <= 0 or lots_ceiling < 1:
+    lot_size = quote.lot_size
+    if isinstance(lot_size, bool) or not isinstance(lot_size, int) or lot_size < 1:
+        lot_size = 0
+    blank = PremiumRisk(0, lot_size, 0, Decimal(0), Decimal(0), Decimal(0), CostBreakdown.zero())
+    buy = decision.buy
+    if (
+        decision.status != "executable"
+        or lot_size < 1
+        or not isinstance(buy, Decimal)
+        or buy <= 0
+        or not isinstance(quote.ask, Decimal)
+        or quote.ask <= 0
+        or isinstance(lots_ceiling, bool)
+        or not isinstance(lots_ceiling, int)
+        or lots_ceiling < 1
+        or not isinstance(risk_ceiling, Decimal)
+        or not risk_ceiling.is_finite()
+        or risk_ceiling <= 0
+        or not isinstance(funds, Decimal)
+        or not funds.is_finite()
+        or funds <= 0
+    ):
         return blank
     priced = replace(profile, slippage_bps=0, slippage_min_ticks=0)
     for lots in range(lots_ceiling, 0, -1):
-        quantity = lots * quote.lot_size
-        exposure = decision.buy * quantity
-        breakdown = leg_costs([("BUY", float(decision.buy), quantity)], priced, trade_date)
+        quantity = lots * lot_size
+        exposure = buy * quantity
+        try:
+            breakdown = leg_costs([("BUY", float(buy), quantity)], priced, trade_date)
+        except Exception:  # noqa: BLE001  ponytail: unknown charges are an unknown loss; size nothing until costs raise a typed error
+            return blank
         charges = Decimal(str(breakdown.total))
+        if not charges.is_finite() or charges < 0:
+            return blank
         max_loss = exposure + charges
-        if max_loss <= risk_ceiling and (funds is None or max_loss <= funds):
-            return PremiumRisk(lots, quote.lot_size, quantity, exposure, charges, max_loss, breakdown)
+        if max_loss <= risk_ceiling and max_loss <= funds:
+            return PremiumRisk(lots, lot_size, quantity, exposure, charges, max_loss, breakdown)
     return blank
 
 
