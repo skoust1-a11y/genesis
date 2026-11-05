@@ -825,12 +825,12 @@ def test_signals_and_alerts_chat_separation(monkeypatch):
     settings = get_settings().model_copy(
         update={
             "alert_telegram_bot_token": "TOKEN",
-            "signals_telegram_chat_id": "-5301947207",
+            "signals_telegram_chat_id": "signals-chat",
             "alert_telegram_chat_id": "999999",
         }
     )
     alerts.send_signal(settings, "NIFTY BUY", "Entry: 25000")
-    assert calls[-1][1]["chat_id"] == "-5301947207"
+    assert calls[-1][1]["chat_id"] == "signals-chat"
 
     alerts.notify(settings, "paused", "dep-1", "drawdown reached 2%")
     assert calls[-1][1]["chat_id"] == "999999"
@@ -843,5 +843,5 @@ def test_signals_and_alerts_chat_separation(monkeypatch):
 
     # But signals still go to the signals group
     alerts.send_signal(silent_admin, "NIFTY SELL", "Entry: 24800")
-    assert calls[-1][1]["chat_id"] == "-5301947207"
+    assert calls[-1][1]["chat_id"] == "signals-chat"
 

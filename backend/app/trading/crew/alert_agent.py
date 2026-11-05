@@ -20,6 +20,12 @@ from app.trading.crew.exit_agent import ExitDecision
 
 logger = logging.getLogger("genesis.alert_agent")
 
+
+def _configured(value: str | None) -> str | None:
+    text = (value or "").strip()
+    return text or None
+
+
 # Buy zone sits this fraction over the last traded price. Not a flat rupee band.
 BUY_PAD = 0.01
 
@@ -94,31 +100,26 @@ class AlertAgent:
         chat_id: str | None = None,
         is_paper_trading: bool = True,
     ) -> None:
-        # Defaults to project environment settings
-        self.bot_token = (
-            bot_token
-            or os.getenv("ALERT_TELEGRAM_BOT_TOKEN")
-            or os.getenv("TELEGRAM_BOT_TOKEN")
-            or "8910290265:AAHJ7rHpcd9Y97hcKfGvCbbSwD0PZoK4aks"
-        )
+        from app.config import get_settings
+
+        settings = get_settings()
+        self.bot_token = _configured(bot_token) or _configured(settings.alert_telegram_bot_token)
         self.chat_id = (
-            chat_id
-            or os.getenv("SIGNALS_TELEGRAM_CHAT_ID")
-            or os.getenv("ALERT_TELEGRAM_CHAT_ID")
-            or "-5301947207"
+            _configured(chat_id)
+            or _configured(settings.signals_telegram_chat_id)
+            or _configured(settings.alert_telegram_chat_id)
         )
         self.is_paper_trading = is_paper_trading
 
     def _send(self, text: str) -> bool:
         """Send message via Telegram Bot API with error handling."""
+        if not self.bot_token or not self.chat_id:
+            logger.warning("Telegram bot_token or chat_id not configured.")
+            return False
         import sys
         if "pytest" in sys.modules or os.getenv("GENESIS_ENV") == "test" or "PYTEST_CURRENT_TEST" in os.environ:
             logger.info(f"[TEST ENVIRONMENT] Telegram dispatch suppressed: {text[:60]}...")
             return True
-
-        if not self.bot_token or not self.chat_id:
-            logger.warning("Telegram bot_token or chat_id not configured.")
-            return False
             
         url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
         payload = {

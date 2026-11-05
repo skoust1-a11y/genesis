@@ -21,6 +21,11 @@ from app.trading.post_market_crew.safety_wall_agent import SafetyWallSummary
 logger = logging.getLogger("genesis.briefing_agent")
 
 
+def _configured(value: str | None) -> str | None:
+    text = (value or "").strip()
+    return text or None
+
+
 def _pnl_text(net: float | None) -> str:
     if net is None:
         return "not priced (index points are not option P&L)"
@@ -38,8 +43,11 @@ class BriefingAgent:
     ) -> None:
         self.reports_dir = reports_dir or Path("reports")
         self.reports_dir.mkdir(parents=True, exist_ok=True)
-        self.bot_token = bot_token or "8422787103:AAGfXnI-L4l-bI1pP7y3cT2d7kY"
-        self.chat_id = chat_id or "-1002235941641"
+        from app.config import get_settings
+
+        settings = get_settings()
+        self.bot_token = _configured(bot_token) or _configured(settings.alert_telegram_bot_token)
+        self.chat_id = _configured(chat_id) or _configured(settings.alert_telegram_chat_id)
 
     def _send_telegram(self, text: str) -> bool:
         """Send message via Telegram Bot API with error handling."""
