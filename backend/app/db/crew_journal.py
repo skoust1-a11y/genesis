@@ -1,7 +1,9 @@
 """S1 crew journal: durable model-trade journal and Telegram outbox in SQLite.
 
-Schema and database-enforced invariants only (S1-P1). Tables are prefixed ``crew_`` so they
-never collide with the legacy ``live_and_forward_trades`` table that shares the file.
+P1 is the schema. P2 is the model-trade API: admission, entry, partial exit, full exit,
+level updates, prior-day expiry, legacy quarantine, and read-only recovery checks.
+Tables are prefixed ``crew_`` so they never collide with the legacy
+``live_and_forward_trades`` table that shares the file.
 
 State changes follow a lockstep protocol inside one transaction: append the event
 (``crew_events`` / ``crew_outbox_events``) with ``seq = version + 1``, then UPDATE the
@@ -11,9 +13,13 @@ any illegal transition, and any UPDATE/DELETE of append-only rows.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 SCHEMA_VERSION = 1
@@ -422,3 +428,703 @@ def migrate(db_path: Path | str) -> int:
         return int(conn.execute("SELECT value FROM crew_meta WHERE key='schema_version'").fetchone()[0])
     finally:
         conn.close()
+
+
+# --- P2 journal API ---------------------------------------------------------------------------
+
+_FORBIDDEN = frozenset({
+    "fill_price", "broker_order_id", "broker_qty", "avg_price", "pnl_rupees", "realized_pnl",
+    "pnl_inr", "net_pnl_inr", "realized_pnl_inr", "fill_qty", "filled_qty",
+})
+_LEVEL_KEYS = frozenset({"spot", "stop", "target", "entry"})
+_OPEN_STATES = frozenset({"TRACKING", "PARTIALLY_EXITED"})
+_ENTRY_TYPES = frozenset({"MODEL_ENTRY", "LEGACY_IMPORT"})
+# ponytail: legacy imports use strategy_version "legacy" until a real version is known.
+_LEGACY_VERSION = "legacy"
+
+
+class JournalError(Exception):
+    pass
+
+
+class VersionConflict(JournalError):
+    pass
+
+
+class InvalidTransition(JournalError):
+    pass
+
+
+class TradeIdCollision(JournalError):
+    pass
+
+
+class AdmissionConflict(JournalError):
+    pass
+
+
+class ConsistencyError(JournalError):
+    def __init__(self, findings: list[dict]):
+        super().__init__(f"{len(findings)} journal inconsistencies")
+        self.findings = findings
+
+
+def canonical_signal_fingerprint(
+    *, market_day: str, instrument: str, strategy_id: str, strategy_version: str,
+    signal_candle: str, direction: str, setup_id: str,
+) -> str:
+    """UTF-8 identity hashed by ``signal_id_for``. No clock, pid, or random id.
+
+    One ``name=value`` line, in this order: market_day, instrument, strategy_id,
+    strategy_version, signal_candle, direction, setup_id.
+    """
+    day = _market_day(market_day)
+    candle = _candle(signal_candle)
+    if candle[:10] != day:
+        raise InvalidTransition("signal candle is not on the market day")
+    fields = {
+        "market_day": day,
+        "instrument": _text(instrument).upper(),
+        "strategy_id": _text(strategy_id),
+        "strategy_version": _text(strategy_version),
+        "signal_candle": candle,
+        "direction": _text(direction).upper(),
+        "setup_id": _text(setup_id),
+    }
+    if fields["direction"] not in ("CALL", "PUT"):
+        raise InvalidTransition("direction must be CALL or PUT")
+    if not fields["instrument"] or not fields["strategy_id"] or not fields["setup_id"]:
+        raise InvalidTransition("instrument, strategy_id and setup_id are required")
+    return "\n".join(f"{name}={fields[name]}" for name in fields)
+
+
+def signal_id_for(**fields: str) -> str:
+    """Lowercase SHA-256 hex of the canonical fingerprint."""
+    return hashlib.sha256(canonical_signal_fingerprint(**fields).encode("utf-8")).hexdigest()
+
+
+def trade_id_for(market_day: str, signal_id: str) -> str:
+    day = _market_day(market_day)
+    if len(signal_id) != 64 or any(c not in "0123456789abcdef" for c in signal_id):
+        raise InvalidTransition("signal_id must be 64 lowercase hex characters")
+    return f"T_{day.replace('-', '')}_{signal_id[:12]}"
+
+
+def connect_readonly(db_path: Path | str) -> sqlite3.Connection:
+    """Read-only connection. Does not create the file and cannot write it."""
+    path = Path(db_path).resolve()
+    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA query_only = ON")
+    return conn
+
+
+def record_admission(
+    db_path: Path | str, *, session_id: str, admission_class: str, reasons: list[str] | tuple[str, ...],
+    market_day: str, instrument: str, strategy_id: str, strategy_version: str, signal_candle: str,
+    direction: str, setup_id: str, inputs: dict | None = None, decided_at: str | None = None,
+) -> dict:
+    """Insert one admission, or return it when the same signal is replayed."""
+    if admission_class not in ("ACTIONABLE", "RESEARCH_ONLY", "REJECTED"):
+        raise InvalidTransition("admission class is not ACTIONABLE, RESEARCH_ONLY or REJECTED")
+    cleaned = _reason_list(reasons)
+    parts, sid = _identity(
+        market_day=market_day, instrument=instrument, strategy_id=strategy_id,
+        strategy_version=strategy_version, signal_candle=signal_candle, direction=direction, setup_id=setup_id,
+    )
+    decided = parts["signal_candle"] if decided_at is None else _candle(decided_at)
+    if decided[:10] != parts["market_day"]:
+        raise InvalidTransition("decided_at is not on the market day")
+    extra = dict(inputs or {})
+    for key, value in extra.items():
+        if key in parts and value != parts[key]:
+            raise InvalidTransition(f"inputs[{key}] disagrees with the signal identity")
+    _reject_forbidden(extra)
+    stored = {**extra, **parts}
+    aid = f"A_{parts['market_day'].replace('-', '')}_{sid[:12]}"
+
+    def op(conn: sqlite3.Connection) -> dict:
+        row = conn.execute(
+            "SELECT * FROM crew_admissions WHERE signal_id=? AND market_day=?", (sid, parts["market_day"])
+        ).fetchone()
+        if row is not None:
+            if not _admission_matches(row, session_id=session_id, admission_class=admission_class,
+                                      reasons=cleaned, stored=stored, decided=decided):
+                raise AdmissionConflict(f"admission {row['admission_id']} already records this signal")
+            return {"replayed": True, "admission": _public_admission(row)}
+        clash = conn.execute("SELECT signal_id FROM crew_admissions WHERE admission_id=?", (aid,)).fetchone()
+        if clash is not None:
+            raise TradeIdCollision(f"admission id {aid} belongs to signal {clash['signal_id']}")
+        conn.execute(
+            "INSERT INTO crew_admissions (admission_id, signal_id, market_day, session_id, class, reasons,"
+            " inputs, decided_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (aid, sid, parts["market_day"], session_id, admission_class,
+             json.dumps(cleaned, separators=(",", ":")),
+             json.dumps(stored, sort_keys=True, separators=(",", ":")), decided),
+        )
+        saved = conn.execute("SELECT * FROM crew_admissions WHERE admission_id=?", (aid,)).fetchone()
+        return {"replayed": False, "admission": _public_admission(saved)}
+
+    return _immediate(db_path, op)
+
+
+def open_trade(
+    db_path: Path | str, *, admission_id: str, model_lots: int, entry_spot: float, stop_spot: float,
+    target_spot: float, contract: str | None = None, expiry: str | None = None,
+    lot_size_ref: int | None = None,
+) -> dict:
+    """Open one TRACKING trade and its MODEL_ENTRY, or return the existing trade."""
+    lots = _pos_int("model_lots", model_lots)
+    entry_spot, stop_spot, target_spot = _number("entry_spot", entry_spot), _number("stop_spot", stop_spot), _number("target_spot", target_spot)
+    if lot_size_ref is not None:
+        lot_size_ref = _pos_int("lot_size_ref", lot_size_ref)
+
+    def op(conn: sqlite3.Connection) -> dict:
+        admission = conn.execute("SELECT * FROM crew_admissions WHERE admission_id=?", (admission_id,)).fetchone()
+        if admission is None:
+            raise InvalidTransition(f"unknown admission {admission_id}")
+        if admission["class"] not in ("ACTIONABLE", "RESEARCH_ONLY"):
+            raise InvalidTransition("a rejected admission is not a trade")
+        parts = json.loads(admission["inputs"])
+        sid, day = admission["signal_id"], admission["market_day"]
+        tid = trade_id_for(day, sid)
+        existing = conn.execute("SELECT * FROM crew_trades WHERE signal_id=?", (sid,)).fetchone()
+        if existing is not None:
+            if existing["legacy_ref"] or existing["admission_id"] != admission_id:
+                raise TradeIdCollision(f"signal {sid} is already recorded as {existing['trade_id']}")
+            if not _same_open(existing, lots=lots, entry=entry_spot, stop=stop_spot, target=target_spot,
+                              contract=contract, expiry=expiry, lot_size_ref=lot_size_ref):
+                raise InvalidTransition("open_trade does not match the stored trade")
+            event = _event_by_key(conn, f"{existing['trade_id']}:entry")
+            if event is None:
+                raise ConsistencyError([{"kind": "missing_entry", "trade_id": existing["trade_id"]}])
+            return {"replayed": True, "trade": dict(existing), "event": _public_event(event)}
+        clash = conn.execute("SELECT signal_id FROM crew_trades WHERE trade_id=?", (tid,)).fetchone()
+        if clash is not None:
+            raise TradeIdCollision(f"{tid} already belongs to signal {clash['signal_id']}")
+        payload = {
+            "direction": parts["direction"], "entry_spot": entry_spot, "instrument": parts["instrument"],
+            "model_lots": lots, "setup_id": parts["setup_id"], "signal_candle": parts["signal_candle"],
+            "stop_spot": stop_spot, "strategy_id": parts["strategy_id"],
+            "strategy_version": parts["strategy_version"], "target_spot": target_spot,
+        }
+        if contract is not None:
+            payload["contract"] = contract
+        if expiry is not None:
+            payload["expiry"] = expiry
+        _reject_forbidden(payload)
+        conn.execute(
+            "INSERT INTO crew_trades (trade_id, signal_id, admission_id, admission_class, market_day,"
+            " owner_session_id, state, strategy, direction, contract, expiry, lot_size_ref, entry_spot,"
+            " stop_spot, target_spot, model_lots_initial, model_lots_open, opened_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, 'TRACKING', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (tid, sid, admission_id, admission["class"], day, admission["session_id"], parts["strategy_id"],
+             parts["direction"], contract, expiry, lot_size_ref, entry_spot, stop_spot, target_spot,
+             lots, lots, parts["signal_candle"]),
+        )
+        # Event follows the insert: seq 1 must observe the trade already at TRACKING / version 1.
+        key = f"{tid}:entry"
+        _insert_event(conn, key=key, trade_id=tid, seq=1, event_type="MODEL_ENTRY", from_state=None,
+                      to_state="TRACKING", session_id=admission["session_id"], occurred_at=parts["signal_candle"],
+                      payload=payload)
+        return {"replayed": False, "trade": dict(_trade(conn, tid)), "event": _public_event(_event_by_key(conn, key))}
+
+    return _immediate(db_path, op)
+
+
+def partial_exit(
+    db_path: Path | str, *, trade_id: str, expected_version: int, reason: str, lots_after: int,
+    signal_candle: str, index_levels: dict, idempotency_key: str | None = None,
+) -> dict:
+    """Reduce hypothetical model lots once per idempotency key."""
+    version = _version(expected_version)
+    why = _text(reason)
+    if not why:
+        raise InvalidTransition("partial exit needs a reason")
+    if type(lots_after) is not int or lots_after < 1:
+        raise InvalidTransition("lots_after must leave at least one model lot")
+    candle = _candle(signal_candle)
+    levels = _levels(index_levels)
+    key = idempotency_key or f"{trade_id}:partial:{candle}:{lots_after}:{why}"
+
+    def op(conn: sqlite3.Connection) -> dict:
+        prior = _event_by_key(conn, key)
+        if prior is not None:
+            return _replay_partial(conn, prior, trade_id=trade_id, reason=why, lots_after=lots_after,
+                                   candle=candle, levels=levels)
+        trade = _require_open(conn, trade_id, version)
+        before = trade["model_lots_open"]
+        if lots_after >= before:
+            raise InvalidTransition("partial exit must reduce model lots")
+        payload = {"index_levels": levels, "lots_after": lots_after, "lots_before": before,
+                   "reason": why, "signal_candle": candle}
+        return _project(conn, trade, event_type="MODEL_PARTIAL_EXIT", to_state="PARTIALLY_EXITED", key=key,
+                        occurred_at=candle, payload=payload, lots=lots_after, stop=trade["stop_spot"],
+                        target=trade["target_spot"], closed_at=None)
+
+    return _immediate(db_path, op)
+
+
+def exit_trade(
+    db_path: Path | str, *, trade_id: str, expected_version: int, reason: str, signal_candle: str,
+    index_levels: dict, model_points: float | None = None, model_r: float | None = None,
+) -> dict:
+    """Close the model once. A second request returns that exit and writes nothing."""
+    version = _version(expected_version)
+    why = _text(reason)
+    if not why:
+        raise InvalidTransition("exit needs a reason")
+    candle = _candle(signal_candle)
+    levels = _levels(index_levels)
+    points = None if model_points is None else _number("model_points", model_points)
+    r_multiple = None if model_r is None else _number("model_r", model_r)
+    key = f"{trade_id}:EXIT"
+
+    def op(conn: sqlite3.Connection) -> dict:
+        prior = _event_by_key(conn, key)
+        if prior is not None:
+            if prior["trade_id"] != trade_id or prior["event_type"] != "MODEL_EXIT":
+                raise InvalidTransition(f"exit key {key} belongs to another event")
+            return {"replayed": True, "trade": dict(_trade(conn, trade_id)), "event": _public_event(prior)}
+        trade = _require_open(conn, trade_id, version)
+        payload = {"index_levels": levels, "reason": why, "signal_candle": candle}
+        if points is not None:
+            payload["model_points"] = points
+        if r_multiple is not None:
+            payload["model_r"] = r_multiple
+        return _project(conn, trade, event_type="MODEL_EXIT", to_state="CLOSED", key=key, occurred_at=candle,
+                        payload=payload, lots=0, stop=trade["stop_spot"], target=trade["target_spot"],
+                        closed_at=candle)
+
+    return _immediate(db_path, op)
+
+
+def update_levels(
+    db_path: Path | str, *, trade_id: str, expected_version: int, signal_candle: str,
+    stop_spot: float | None = None, target_spot: float | None = None, reason: str | None = None,
+    idempotency_key: str | None = None,
+) -> dict:
+    """Record a stop or target move without changing model state or lots."""
+    version = _version(expected_version)
+    if stop_spot is None and target_spot is None:
+        raise InvalidTransition("update_levels needs a stop or a target")
+    candle = _candle(signal_candle)
+    new_stop = None if stop_spot is None else _number("stop_spot", stop_spot)
+    new_target = None if target_spot is None else _number("target_spot", target_spot)
+    why = _text(reason or "LEVELS")
+
+    def op(conn: sqlite3.Connection) -> dict:
+        trade = _trade(conn, trade_id)
+        if trade is None:
+            raise InvalidTransition(f"unknown trade {trade_id}")
+        stop = trade["stop_spot"] if new_stop is None else new_stop
+        target = trade["target_spot"] if new_target is None else new_target
+        key = idempotency_key or f"{trade_id}:levels:{candle}:{_num(stop)}:{_num(target)}"
+        prior = _event_by_key(conn, key)
+        if prior is not None:
+            stored = json.loads(prior["payload"])
+            if (prior["trade_id"] != trade_id or stored.get("signal_candle") != candle
+                    or not _same_number(stored.get("stop_spot"), stop)
+                    or not _same_number(stored.get("target_spot"), target)):
+                raise InvalidTransition("idempotency key reused with different levels")
+            return {"replayed": True, "trade": dict(trade), "event": _public_event(prior)}
+        if trade["state"] not in _OPEN_STATES:
+            raise InvalidTransition(f"{trade_id} is {trade['state']} and cannot change")
+        if trade["version"] != version:
+            raise VersionConflict(f"{trade_id} is at version {trade['version']}, not {version}")
+        payload = {"reason": why, "signal_candle": candle, "stop_spot": stop, "target_spot": target}
+        return _project(conn, trade, event_type="MODEL_LEVELS_UPDATED", to_state=trade["state"], key=key,
+                        occurred_at=candle, payload=payload, lots=trade["model_lots_open"], stop=stop,
+                        target=target, closed_at=None)
+
+    return _immediate(db_path, op)
+
+
+def expire_unresolved(db_path: Path | str, *, as_of_day: str, at: str) -> list[dict]:
+    """Mark prior-day open trades EXPIRED_UNRESOLVED. Does not invent a price or P&L."""
+    day = _market_day(as_of_day)
+    stamp = _candle(at)
+    if stamp[:10] != day:
+        raise InvalidTransition("expiry time must fall on the new market day")
+
+    def op(conn: sqlite3.Connection) -> list[dict]:
+        pending = conn.execute(
+            "SELECT * FROM crew_trades WHERE state IN ('TRACKING','PARTIALLY_EXITED') AND market_day < ?"
+            " ORDER BY trade_id", (day,)
+        ).fetchall()
+        results = []
+        seen = set()
+        for trade in pending:
+            key = f"{trade['trade_id']}:EXPIRED_UNRESOLVED"
+            prior = _event_by_key(conn, key)
+            if prior is not None:
+                if trade["state"] != "EXPIRED_UNRESOLVED":
+                    raise ConsistencyError([{"kind": "projection_mismatch", "trade_id": trade["trade_id"]}])
+                results.append({"replayed": True, "trade": dict(trade), "event": _public_event(prior)})
+            else:
+                payload = {"as_of_day": day, "market_day": trade["market_day"], "reason": "PRIOR_MARKET_DAY"}
+                results.append(_project(
+                    conn, trade, event_type="EXPIRED_UNRESOLVED", to_state="EXPIRED_UNRESOLVED", key=key,
+                    occurred_at=stamp, payload=payload, lots=trade["model_lots_open"], stop=trade["stop_spot"],
+                    target=trade["target_spot"], closed_at=stamp,
+                ))
+            seen.add(trade["trade_id"])
+        already = conn.execute(
+            "SELECT * FROM crew_trades WHERE state='EXPIRED_UNRESOLVED' AND market_day < ? ORDER BY trade_id",
+            (day,),
+        ).fetchall()
+        for trade in already:
+            if trade["trade_id"] in seen:
+                continue
+            event = conn.execute(
+                "SELECT * FROM crew_events WHERE trade_id=? AND event_type='EXPIRED_UNRESOLVED' ORDER BY seq DESC LIMIT 1",
+                (trade["trade_id"],),
+            ).fetchone()
+            results.append({"replayed": True, "trade": dict(trade), "event": _public_event(event)})
+        return results
+
+    return _immediate(db_path, op)
+
+
+def quarantine_legacy_reference(db_path: Path | str, source_path: Path | str) -> list[dict]:
+    """Record OPEN rows from a legacy JSON file. The file is only read."""
+    path = Path(source_path)
+    raw = path.read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        book = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise InvalidTransition(f"legacy journal is not JSON: {path}") from e
+    if not isinstance(book, dict):
+        raise InvalidTransition("legacy journal must be an object of trades")
+    opened = [(str(key), book[key]) for key in sorted(book)
+              if isinstance(book[key], dict) and book[key].get("status") == "OPEN"]
+    resolved = str(path.resolve())
+
+    def op(conn: sqlite3.Connection) -> list[dict]:
+        results = []
+        for key, rec in opened:
+            for field in ("symbol", "strategy", "direction", "timestamp", "lots"):
+                if rec.get(field) in (None, ""):
+                    raise InvalidTransition(f"{key} is missing {field}")
+            lots = rec["lots"]
+            if type(lots) is not int or lots < 1:
+                raise InvalidTransition(f"{key} lots must be a positive integer")
+            parts, sid = _identity(
+                market_day=_candle(rec["timestamp"])[:10], instrument=rec["symbol"], strategy_id=rec["strategy"],
+                strategy_version=_LEGACY_VERSION, signal_candle=rec["timestamp"], direction=rec["direction"],
+                setup_id=rec.get("suggested_strike") or key,
+            )
+            legacy_ref = f"{resolved}#{digest[:8]}:{key}"
+            existing = conn.execute("SELECT * FROM crew_trades WHERE trade_id=?", (key,)).fetchone()
+            if existing is not None:
+                if existing["legacy_ref"] != legacy_ref or existing["signal_id"] != sid or existing["state"] != "QUARANTINED":
+                    raise TradeIdCollision(f"legacy trade {key} does not match the stored quarantine")
+                event = _event_by_key(conn, f"{key}:legacy")
+                results.append({"replayed": True, "trade": dict(existing), "event": _public_event(event)})
+                continue
+            clash = conn.execute("SELECT trade_id FROM crew_trades WHERE signal_id=?", (sid,)).fetchone()
+            if clash is not None:
+                raise TradeIdCollision(f"signal {sid} is already recorded as {clash['trade_id']}")
+            payload = {"legacy_ref": legacy_ref, "source_sha256": digest, "source_trade_id": key}
+            _reject_forbidden(payload)
+            # closed_at is the source bar: QUARANTINED is not an open state, and this is not an exit price.
+            conn.execute(
+                "INSERT INTO crew_trades (trade_id, signal_id, admission_class, market_day, state, strategy,"
+                " direction, entry_spot, stop_spot, target_spot, model_lots_initial, model_lots_open, opened_at,"
+                " closed_at, legacy_ref) VALUES (?, ?, 'RESEARCH_ONLY', ?, 'QUARANTINED', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (key, sid, parts["market_day"], parts["strategy_id"], parts["direction"], rec.get("entry_price"),
+                 rec.get("stop_loss"), rec.get("target_price"), lots, lots, parts["signal_candle"],
+                 parts["signal_candle"], legacy_ref),
+            )
+            event_key = f"{key}:legacy"
+            _insert_event(conn, key=event_key, trade_id=key, seq=1, event_type="LEGACY_IMPORT", from_state=None,
+                          to_state="QUARANTINED", session_id=None, occurred_at=parts["signal_candle"], payload=payload)
+            results.append({"replayed": False, "trade": dict(_trade(conn, key)),
+                            "event": _public_event(_event_by_key(conn, event_key))})
+        return results
+
+    return _immediate(db_path, op)
+
+
+def load_open_trades(db_path: Path | str, *, market_day: str | None = None) -> list[dict]:
+    """Return TRACKING and PARTIALLY_EXITED projections. Read-only."""
+    day = None if market_day is None else _market_day(market_day)
+    conn = connect_readonly(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT * FROM crew_trades WHERE state IN ('TRACKING','PARTIALLY_EXITED')"
+            " AND (? IS NULL OR market_day=?) ORDER BY market_day, opened_at, trade_id",
+            (day, day),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_trade_events(db_path: Path | str, trade_id: str) -> list[dict]:
+    conn = connect_readonly(db_path)
+    try:
+        rows = conn.execute("SELECT * FROM crew_events WHERE trade_id=? ORDER BY seq", (trade_id,)).fetchall()
+        return [_public_event(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def check_consistency(db_path: Path | str) -> list[dict]:
+    """Report orphan events, missing entries, sequence gaps and projection mismatches.
+
+    Reads only. Never repairs.
+    """
+    conn = connect_readonly(db_path)
+    try:
+        trades = [dict(row) for row in conn.execute("SELECT * FROM crew_trades ORDER BY trade_id")]
+        events = [dict(row) for row in conn.execute("SELECT * FROM crew_events ORDER BY trade_id, seq")]
+    finally:
+        conn.close()
+    trade_ids = {trade["trade_id"] for trade in trades}
+    grouped: dict[str, list[dict]] = {}
+    findings = []
+    for event in events:
+        if event["trade_id"] not in trade_ids:
+            findings.append({"kind": "orphan_event", "event_id": event["event_id"], "trade_id": event["trade_id"]})
+            continue
+        grouped.setdefault(event["trade_id"], []).append(event)
+    for trade in trades:
+        evs = grouped.get(trade["trade_id"], [])
+        if not evs or evs[0]["seq"] != 1 or evs[0]["event_type"] not in _ENTRY_TYPES:
+            findings.append({"kind": "missing_entry", "trade_id": trade["trade_id"]})
+        seqs = [event["seq"] for event in evs]
+        if seqs != list(range(1, len(seqs) + 1)):
+            findings.append({"kind": "sequence_gap", "trade_id": trade["trade_id"], "seqs": seqs})
+        if evs and trade["version"] != evs[-1]["seq"]:
+            findings.append({"kind": "version_mismatch", "trade_id": trade["trade_id"],
+                             "version": trade["version"], "last_seq": evs[-1]["seq"]})
+        if evs and _projection_disagrees(trade, evs):
+            projected = _projected_lots(trade["model_lots_initial"], evs)
+            findings.append({"kind": "projection_mismatch", "trade_id": trade["trade_id"],
+                             "state": trade["state"], "event_state": evs[-1]["to_state"],
+                             "model_lots_open": trade["model_lots_open"], "projected_lots": projected})
+    return findings
+
+
+def _immediate(db_path: Path | str, fn):
+    conn = connect(db_path)
+    try:
+        with transaction(conn):
+            return fn(conn)
+    except sqlite3.IntegrityError as e:
+        if "duplicate trade" in str(e):
+            raise TradeIdCollision(str(e)) from e
+        raise InvalidTransition(str(e)) from e
+    finally:
+        conn.close()
+
+
+def _project(conn, trade, *, event_type, to_state, key, occurred_at, payload, lots, stop, target, closed_at) -> dict:
+    # The UPDATE trigger requires this event to exist while the trade is still at the old version.
+    seq = trade["version"] + 1
+    _insert_event(conn, key=key, trade_id=trade["trade_id"], seq=seq, event_type=event_type,
+                  from_state=trade["state"], to_state=to_state, session_id=trade["owner_session_id"],
+                  occurred_at=occurred_at, payload=payload)
+    cur = conn.execute(
+        "UPDATE crew_trades SET state=?, model_lots_open=?, stop_spot=?, target_spot=?, version=?, closed_at=?"
+        " WHERE trade_id=? AND version=?",
+        (to_state, lots, stop, target, seq, closed_at, trade["trade_id"], trade["version"]),
+    )
+    if cur.rowcount != 1:
+        raise VersionConflict(trade["trade_id"])
+    return {"replayed": False, "trade": dict(_trade(conn, trade["trade_id"])), "event": _public_event(_event_by_key(conn, key))}
+
+
+# ponytail: tests set this to "event" to fail after an earlier write in the same transaction.
+_failpoint = None
+
+
+def _insert_event(conn, *, key, trade_id, seq, event_type, from_state, to_state, session_id, occurred_at, payload):
+    if _failpoint == "event":
+        raise sqlite3.IntegrityError("injected event failure")
+    _reject_forbidden(payload)
+    conn.execute(
+        "INSERT INTO crew_events (event_id, trade_id, seq, event_type, from_state, to_state, idempotency_key,"
+        " session_id, occurred_at, recorded_at, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (key, trade_id, seq, event_type, from_state, to_state, key, session_id, occurred_at, _recorded_at(),
+         json.dumps(payload, sort_keys=True, separators=(",", ":"))),
+    )
+
+
+def _require_open(conn, trade_id: str, version: int):
+    trade = _trade(conn, trade_id)
+    if trade is None:
+        raise InvalidTransition(f"unknown trade {trade_id}")
+    if trade["state"] not in _OPEN_STATES:
+        raise InvalidTransition(f"{trade_id} is {trade['state']} and cannot change")
+    if trade["version"] != version:
+        raise VersionConflict(f"{trade_id} is at version {trade['version']}, not {version}")
+    return trade
+
+
+def _replay_partial(conn, prior, *, trade_id, reason, lots_after, candle, levels) -> dict:
+    stored = json.loads(prior["payload"])
+    if (prior["trade_id"] != trade_id or prior["event_type"] != "MODEL_PARTIAL_EXIT"
+            or stored.get("reason") != reason or stored.get("lots_after") != lots_after
+            or stored.get("signal_candle") != candle or stored.get("index_levels") != levels):
+        raise InvalidTransition("idempotency key reused with a different partial exit")
+    return {"replayed": True, "trade": dict(_trade(conn, trade_id)), "event": _public_event(prior)}
+
+
+def _projection_disagrees(trade: dict, events: list[dict]) -> bool:
+    if trade["state"] != events[-1]["to_state"]:
+        return True
+    return _projected_lots(trade["model_lots_initial"], events) != trade["model_lots_open"]
+
+
+def _projected_lots(initial: int, events: list[dict]):
+    lots = initial
+    for event in events:
+        if event["event_type"] == "MODEL_EXIT":
+            lots = 0
+        elif event["event_type"] == "MODEL_PARTIAL_EXIT":
+            try:
+                payload = json.loads(event["payload"])
+            except json.JSONDecodeError:
+                return None
+            after = payload.get("lots_after")
+            if payload.get("lots_before") != lots or type(after) is not int:
+                return None
+            lots = after
+    return lots
+
+
+def _identity(**fields: str) -> tuple[dict[str, str], str]:
+    text = canonical_signal_fingerprint(**fields)
+    parts = dict(line.split("=", 1) for line in text.split("\n"))
+    return parts, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _admission_matches(row, *, session_id, admission_class, reasons, stored, decided) -> bool:
+    return (row["session_id"] == session_id and row["class"] == admission_class
+            and json.loads(row["reasons"]) == reasons and json.loads(row["inputs"]) == stored
+            and row["decided_at"] == decided)
+
+
+def _same_open(trade, *, lots, entry, stop, target, contract, expiry, lot_size_ref) -> bool:
+    return (trade["model_lots_initial"] == lots and _same_number(trade["entry_spot"], entry)
+            and _same_number(trade["stop_spot"], stop) and _same_number(trade["target_spot"], target)
+            and trade["contract"] == contract and trade["expiry"] == expiry
+            and trade["lot_size_ref"] == lot_size_ref)
+
+
+def _public_admission(row) -> dict:
+    body = dict(row)
+    body["reasons"] = json.loads(body["reasons"])
+    body["inputs"] = json.loads(body["inputs"])
+    return body
+
+
+def _public_event(row) -> dict:
+    body = dict(row)
+    body["payload"] = json.loads(body["payload"])
+    return body
+
+
+def _trade(conn, trade_id: str):
+    return conn.execute("SELECT * FROM crew_trades WHERE trade_id=?", (trade_id,)).fetchone()
+
+
+def _event_by_key(conn, key: str):
+    return conn.execute("SELECT * FROM crew_events WHERE idempotency_key=?", (key,)).fetchone()
+
+
+def _reject_forbidden(value) -> None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in _FORBIDDEN:
+                raise InvalidTransition(f"forbidden payload key {key}")
+            _reject_forbidden(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _reject_forbidden(item)
+
+
+def _levels(levels: dict) -> dict:
+    if not isinstance(levels, dict) or not levels:
+        raise InvalidTransition("index levels are required")
+    _reject_forbidden(levels)
+    cleaned = {}
+    for key, value in levels.items():
+        if key not in _LEVEL_KEYS:
+            raise InvalidTransition(f"unknown index level {key}")
+        cleaned[key] = _number(key, value)
+    return cleaned
+
+
+def _reason_list(reasons) -> list[str]:
+    if isinstance(reasons, str) or not isinstance(reasons, (list, tuple)):
+        raise InvalidTransition("reasons must be a list of strings")
+    cleaned = []
+    for reason in reasons:
+        if type(reason) is not str or not reason.strip():
+            raise InvalidTransition("reasons must be a list of strings")
+        cleaned.append(reason.strip())
+    return cleaned
+
+
+def _market_day(value: str) -> str:
+    day = _text(value)
+    try:
+        if date.fromisoformat(day).isoformat() != day:
+            raise ValueError
+    except ValueError as e:
+        raise InvalidTransition("market day must be YYYY-MM-DD") from e
+    return day
+
+
+def _candle(value: str) -> str:
+    text = str(value).strip().replace(" ", "T")
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text).replace(microsecond=0)
+    except ValueError as e:
+        raise InvalidTransition(f"not a timestamp: {value}") from e
+    return parsed.isoformat()
+
+
+def _text(value: str) -> str:
+    return " ".join(str(value).strip().split())
+
+
+def _number(name: str, value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        raise InvalidTransition(f"{name} must be a finite number")
+    return value
+
+
+def _pos_int(name: str, value) -> int:
+    if type(value) is not int or value < 1:
+        raise InvalidTransition(f"{name} must be a positive integer")
+    return value
+
+
+def _version(value: int) -> int:
+    if type(value) is not int or value < 1:
+        raise InvalidTransition("expected_version must be a positive integer")
+    return value
+
+
+def _same_number(left, right) -> bool:
+    if left is None or right is None:
+        return left is right
+    return float(left) == float(right)
+
+
+def _num(value) -> str:
+    if value is None:
+        return ""
+    number = float(value)
+    return str(int(number)) if number.is_integer() else format(number, ".10g")
+
+
+def _recorded_at() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
