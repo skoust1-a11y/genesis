@@ -20,6 +20,7 @@ import pytest
 from app.config import get_settings
 from app.db import crew_journal as cj
 from app.db import crew_outbox as ob
+from app.db import crew_session as cs
 from app.db import trade_store
 from app.telegram_transport import (DELIVERED, NOT_DELIVERED, UNKNOWN, DeliveryOutcome, TelegramTransport,
                                     classify_response)
@@ -50,34 +51,45 @@ def _no_network(monkeypatch):
     monkeypatch.setattr(socket, "getaddrinfo", blocked)
 
 
+LEASES: dict[Path, cs.Lease] = {}
+
+
 @pytest.fixture
 def path(tmp_path):
     p = tmp_path / "journal.db"
     cj.migrate(p)
-    conn = cj.connect(p)
-    for s in ("S1", "S2"):
-        conn.execute("INSERT INTO crew_sessions (session_id, market_day, started_at) VALUES (?, ?, ?)",
-                     (s, DAY, NOW.isoformat()))
-    conn.close()
+    LEASES[p] = cs.acquire(p, now=NOW, ttl_seconds=3600)
     return p
+
+
+def L(path):
+    """The journal's current session lease."""
+    return LEASES[path]
+
+
+def handover(path, at=NOW):
+    """The current owner stops and a new session takes the journal; returns the new lease."""
+    cs.release(path, LEASES[path], reason="test handover", now=at)
+    LEASES[path] = cs.acquire(path, now=at, ttl_seconds=3600)
+    return LEASES[path]
 
 
 def trade(path, setup="OR-30"):
     """An ACTIONABLE trade built through the P2 API. P3 itself never produces one."""
-    a = cj.record_admission(path, session_id="S1", admission_class="ACTIONABLE", reasons=[], market_day=DAY,
+    a = cj.record_admission(path, lease=L(path), now=NOW, admission_class="ACTIONABLE", reasons=[], market_day=DAY,
                             instrument="NIFTY", strategy_id="PDC Zone", strategy_version="v0",
                             signal_candle=CANDLE, direction="CALL", setup_id=setup)
-    return cj.open_trade(path, admission_id=a["admission"]["admission_id"], model_lots=3, entry_spot=23100,
-                         stop_spot=23080, target_spot=23160)["trade"]["trade_id"]
+    return cj.open_trade(path, lease=L(path), now=NOW, admission_id=a["admission"]["admission_id"], model_lots=3,
+                         entry_spot=23100, stop_spot=23080, target_spot=23160)["trade"]["trade_id"]
 
 
 def rec(path, tid, body="BUY NIFTY 26100 CE", now=NOW, purpose="entry", chat=CHAT):
-    return ob.enqueue_publication(path, kind="RECOMMENDATION", purpose=purpose, body=body, trade_id=tid,
+    return ob.enqueue_publication(path, lease=L(path), kind="RECOMMENDATION", purpose=purpose, body=body, trade_id=tid,
                                   chat_id=chat, now=now)["publication"]
 
 
 def ops(path, purpose="halt", body="crew halted", chat=CHAT):
-    return ob.enqueue_publication(path, kind="OPS", purpose=purpose, body=body, chat_id=chat, now=NOW)["publication"]
+    return ob.enqueue_publication(path, lease=L(path), kind="OPS", purpose=purpose, body=body, chat_id=chat, now=NOW)["publication"]
 
 
 class Fake:
@@ -101,8 +113,8 @@ def http(handler, calls=None):
     return TelegramTransport(TOKEN, timeout=1.5, client=httpx.Client(transport=httpx.MockTransport(wrapped)))
 
 
-def deliver(path, pid, transport, session="S1", at=NOW):
-    return ob.deliver_publication(path, pid, transport=transport, session_id=session, clock=lambda: at)
+def deliver(path, pid, transport, at=NOW):
+    return ob.deliver_publication(path, pid, transport=transport, lease=L(path), clock=lambda: at)
 
 
 def events(path, pid):
@@ -123,9 +135,9 @@ def raise_(exc):
 
 def test_01_duplicate_enqueue_returns_existing(path):
     tid = trade(path)
-    first = ob.enqueue_publication(path, kind="RECOMMENDATION", purpose="entry", body="b", trade_id=tid,
+    first = ob.enqueue_publication(path, lease=L(path), kind="RECOMMENDATION", purpose="entry", body="b", trade_id=tid,
                                    chat_id=CHAT, now=NOW)
-    again = ob.enqueue_publication(path, kind="RECOMMENDATION", purpose=" entry ", body="b", trade_id=tid,
+    again = ob.enqueue_publication(path, lease=L(path), kind="RECOMMENDATION", purpose=" entry ", body="b", trade_id=tid,
                                    chat_id=CHAT, now=NOW + timedelta(seconds=5))
     assert first["replayed"] is False and again["replayed"] is True
     assert again["publication"] == first["publication"]
@@ -141,7 +153,7 @@ def test_02_concurrent_enqueue_creates_one_row(path):
 
     def worker():
         barrier.wait()
-        results.append(ob.enqueue_publication(path, kind="RECOMMENDATION", purpose="entry", body="b",
+        results.append(ob.enqueue_publication(path, lease=L(path), kind="RECOMMENDATION", purpose="entry", body="b",
                                               trade_id=tid, chat_id=CHAT, now=NOW))
 
     threads = [threading.Thread(target=worker) for _ in range(8)]
@@ -160,7 +172,7 @@ def test_03_concurrent_claim_has_one_winner(path):
     def worker(i):
         barrier.wait()
         try:
-            won.append(ob.claim_publication(path, pid, session_id="S1" if i % 2 else "S2", now=NOW))
+            won.append(ob.claim_publication(path, pid, lease=L(path), now=NOW))
         except cj.InvalidTransition as e:
             lost.append(e)
 
@@ -204,7 +216,7 @@ def test_04_to_12_delivery_classification(path, name):
     sent = json.loads(calls[0].content)
     assert sent == {"chat_id": "-100", "text": "BUY NIFTY 26100 CE"}  # no parse_mode, no hidden fallback
     last = events(path, pid)[-1]
-    assert last["to_state"] == state and last["session_id"] == "S1"
+    assert last["to_state"] == state and last["session_id"] == L(path).session_id
     if state == "ACKED":
         assert final["telegram_message_id"] == 42 and last["message_id"] == 42 and last["http_status"] == 200
     else:
@@ -224,7 +236,7 @@ def test_10_http_429_retry_is_bounded_by_the_schema(path):
     for n, expected in ((1, "RETRY_WAIT"), (2, "FAILED_PERMANENT")):
         due = NOW + timedelta(seconds=3 * n)
         with pytest.raises(cj.InvalidTransition, match="not due"):
-            ob.claim_publication(path, pid, session_id="S1", now=due - timedelta(seconds=1))
+            ob.claim_publication(path, pid, lease=L(path), now=due - timedelta(seconds=1))
         assert pid in [p["publication_id"] for p in ob.list_pending_publications(path, now=due)]
         assert deliver(path, pid, fake, at=due)["state"] == expected
     assert len(fake.sent) == 3
@@ -272,8 +284,9 @@ def test_13_crash_before_http(path, monkeypatch):
     assert ob.inspect_publication(path, pid)["publication"]["state"] == "PENDING" and fake.sent == []
 
     # Killed after the claim committed but before transport.send: still ambiguous to the next process.
-    ob.claim_publication(path, pid, session_id="S1", now=NOW)
-    assert [r["publication_id"] for r in ob.recover_inflight_publications(path, session_id="S2", now=NOW)] == [pid]
+    ob.claim_publication(path, pid, lease=L(path), now=NOW)
+    nxt = handover(path)
+    assert [r["publication_id"] for r in ob.recover_inflight_publications(path, lease=nxt, now=NOW)] == [pid]
     assert ob.inspect_publication(path, pid)["publication"]["state"] == "UNKNOWN" and fake.sent == []
 
 
@@ -290,9 +303,10 @@ def test_14_crash_after_http_before_ack(path, monkeypatch):
     monkeypatch.undo()
     assert len(fake.sent) == 1
     assert ob.inspect_publication(path, pid)["publication"]["state"] == "SENDING"
-    ob.recover_inflight_publications(path, session_id="S2", now=NOW + timedelta(seconds=30))
+    later = NOW + timedelta(seconds=30)
+    ob.recover_inflight_publications(path, lease=handover(path, later), now=later)
     with pytest.raises(cj.InvalidTransition, match="UNKNOWN"):
-        deliver(path, pid, fake, session="S2")
+        deliver(path, pid, fake, at=later)
     assert len(fake.sent) == 1
 
 
@@ -300,19 +314,21 @@ def test_15_recovery_from_sending_preserves_evidence(path):
     tid = trade(path)
     old = rec(path, tid)["publication_id"]
     mine = ops(path)["publication_id"]
-    ob.claim_publication(path, old, session_id="S1", now=NOW)
-    ob.claim_publication(path, mine, session_id="S2", now=NOW)
-    recovered = ob.recover_inflight_publications(path, session_id="S2", now=NOW + timedelta(seconds=60))
+    s1 = L(path)
+    ob.claim_publication(path, old, lease=s1, now=NOW)
+    s2 = handover(path)
+    ob.claim_publication(path, mine, lease=s2, now=NOW)
+    recovered = ob.recover_inflight_publications(path, lease=s2, now=NOW + timedelta(seconds=60))
     assert [r["publication_id"] for r in recovered] == [old] and recovered[0]["state"] == "UNKNOWN"
     assert ob.inspect_publication(path, mine)["publication"]["state"] == "SENDING"
     evs = events(path, old)
     assert [(e["seq"], e["from_state"], e["to_state"]) for e in evs] == [
         (1, None, "PENDING"), (2, "PENDING", "SENDING"), (3, "SENDING", "UNKNOWN")]
-    assert evs[1]["session_id"] == "S1" and evs[2]["session_id"] == "S2"
-    assert "RECOVERED_INFLIGHT claimed by S1" in evs[2]["note"]
+    assert evs[1]["session_id"] == s1.session_id and evs[2]["session_id"] == s2.session_id
+    assert f"RECOVERED_INFLIGHT claimed by {s1.session_id}" in evs[2]["note"]
     row = ob.inspect_publication(path, old)["publication"]
-    assert row["claimed_by_session"] == "S1" and row["claimed_at"] == NOW.isoformat() and row["attempts"] == 1
-    assert ob.recover_inflight_publications(path, session_id="S2", now=NOW) == []
+    assert row["claimed_by_session"] == s1.session_id and row["claimed_at"] == NOW.isoformat() and row["attempts"] == 1
+    assert ob.recover_inflight_publications(path, lease=s2, now=NOW) == []
 
 
 def test_16_unknown_never_resends_and_blocks_recommendations(path):
@@ -321,19 +337,19 @@ def test_16_unknown_never_resends_and_blocks_recommendations(path):
     pid = rec(path, first)["publication_id"]
     deliver(path, pid, Fake(DeliveryOutcome(UNKNOWN, exc_class="ReadTimeout")))
     for _ in range(3):
-        ob.recover_inflight_publications(path, session_id="S2", now=NOW)
+        ob.recover_inflight_publications(path, lease=L(path), now=NOW)
         assert pid not in [p["publication_id"] for p in ob.list_pending_publications(path, now=NOW)]
         with pytest.raises(cj.InvalidTransition):
-            ob.claim_publication(path, pid, session_id="S2", now=NOW)
+            ob.claim_publication(path, pid, lease=L(path), now=NOW)
     with pytest.raises(cj.InvalidTransition, match="BLOCKED"):
-        ob.claim_publication(path, waiting, session_id="S1", now=NOW)
+        ob.claim_publication(path, waiting, lease=L(path), now=NOW)
     third = trade(path, "C")
     blocked = rec(path, third, purpose="entry-c")
     assert blocked["state"] == "SUPPRESSED" and "BLOCKED" in events(path, blocked["publication_id"])[0]["note"]
     assert deliver(path, ops(path)["publication_id"], Fake(OK))["state"] == "ACKED"
     assert ob.inspect_publication(path, pid)["publication"]["state"] == "UNKNOWN"
     ob.resolve_unknown(path, pid, operator="skoust", delivered=False, evidence="no message in -100", now=NOW)
-    assert ob.claim_publication(path, waiting, session_id="S1", now=NOW)["state"] == "SENDING"
+    assert ob.claim_publication(path, waiting, lease=L(path), now=NOW)["state"] == "SENDING"
     assert ob.inspect_publication(path, blocked["publication_id"])["publication"]["state"] == "SUPPRESSED"
 
 
@@ -357,7 +373,7 @@ def test_17_operator_resolution(path):
     assert "message 77" in last["note"]
     with pytest.raises(cj.InvalidTransition):
         ob.resolve_unknown(path, pid, operator="skoust", delivered=False, evidence="x", now=at)
-    monitor = ob.enqueue_publication(path, kind="MONITORING", purpose="target-hit", body="target hit",
+    monitor = ob.enqueue_publication(path, lease=L(path), kind="MONITORING", purpose="target-hit", body="target hit",
                                      trade_id=done["trade_id"], parent_publication_id=pid, chat_id=CHAT, now=at)
     assert monitor["publication"]["state"] == "PENDING"
 
@@ -369,7 +385,7 @@ def test_17b_resolved_not_delivered_is_terminal(path):
                               evidence="channel -100 has no message after 10:15:00")
     assert done["state"] == "RESOLVED_NOT_DELIVERED" and done["telegram_message_id"] is None
     with pytest.raises(cj.InvalidTransition):
-        ob.claim_publication(path, pid, session_id="S1", now=NOW)
+        ob.claim_publication(path, pid, lease=L(path), now=NOW)
 
 
 # --- publication rules -----------------------------------------------------------------------------
@@ -381,11 +397,15 @@ def test_18_stale_recommendation_is_suppressed(path):
     late = NOW + timedelta(seconds=ob.RECOMMENDATION_MAX_AGE_SECONDS + 1)
     assert deliver(path, pid, fake, at=late)["state"] == "SUPPRESSED" and fake.sent == []
     assert "STALE" in events(path, pid)[-1]["note"]
-    assert rec(path, tid, purpose="next-day", now=NOW + timedelta(days=1))["state"] == "SUPPRESSED"
     trade_row = cj.load_open_trades(path)[0]
-    cj.exit_trade(path, trade_id=tid, expected_version=trade_row["version"], reason="target",
-                  signal_candle="2026-11-06T10:20:00+05:30", index_levels={"spot": 23160})
+    cj.exit_trade(path, lease=L(path), now=NOW, trade_id=tid, expected_version=trade_row["version"],
+                  reason="target", signal_candle="2026-11-06T10:20:00+05:30", index_levels={"spot": 23160})
     assert rec(path, tid, purpose="after-exit")["state"] == "SUPPRESSED"
+    yesterday, tomorrow = trade(path, "yesterday"), NOW + timedelta(days=1)
+    handover(path, tomorrow)
+    assert rec(path, yesterday, purpose="next-day", now=tomorrow)["state"] == "SUPPRESSED"
+    assert "another market day" in events(path, ob.publication_id_for(
+        kind="RECOMMENDATION", purpose="next-day", trade_id=yesterday))[0]["note"]
 
 
 def test_18b_expiry_runs_from_admission_not_enqueue(path):
@@ -398,15 +418,15 @@ def test_18b_expiry_runs_from_admission_not_enqueue(path):
     assert deliver(path, fresh, fake, at=decided + limit + timedelta(seconds=1))["state"] == "SUPPRESSED"
     assert fake.sent == []
     edge = rec(path, trade(path, "C"), now=decided)["publication_id"]
-    assert ob.claim_publication(path, edge, session_id="S1", now=decided + limit)["state"] == "SENDING"
+    assert ob.claim_publication(path, edge, lease=L(path), now=decided + limit)["state"] == "SENDING"
 
 
 def test_18c_admission_time_without_timezone_is_stale(path):
-    a = cj.record_admission(path, session_id="S1", admission_class="ACTIONABLE", reasons=[], market_day=DAY,
+    a = cj.record_admission(path, lease=L(path), now=NOW, admission_class="ACTIONABLE", reasons=[], market_day=DAY,
                             instrument="NIFTY", strategy_id="PDC Zone", strategy_version="v0",
                             signal_candle="2026-11-06T10:15:00", direction="CALL", setup_id="naive")
-    tid = cj.open_trade(path, admission_id=a["admission"]["admission_id"], model_lots=3, entry_spot=23100,
-                        stop_spot=23080, target_spot=23160)["trade"]["trade_id"]
+    tid = cj.open_trade(path, lease=L(path), now=NOW, admission_id=a["admission"]["admission_id"], model_lots=3,
+                        entry_spot=23100, stop_spot=23080, target_spot=23160)["trade"]["trade_id"]
     assert "no timezone" in events(path, rec(path, tid)["publication_id"])[0]["note"]
 
 
@@ -421,25 +441,26 @@ def test_19_research_only_cannot_publish_and_p3_never_yields_actionable(path):
     classes = {adm.evaluate(replace(CANDIDATE, setup_id=f"s{i}"), q, now=NOW, settings=SETTINGS).admission_class
                for i, q in enumerate((QUOTE, executable, None, replace(QUOTE, ltp=None)))}
     assert "ACTIONABLE" not in classes
-    persisted = adm.persist(path, adm.evaluate(CANDIDATE, executable, now=NOW, settings=SETTINGS), session_id="S1")
-    tid = adm.open_research_trade(path, persisted, model_lots=3, entry_spot=23100, stop_spot=23080,
-                                  target_spot=23160)["trade"]["trade_id"]
+    persisted = adm.persist(path, adm.evaluate(CANDIDATE, executable, now=NOW, settings=SETTINGS), lease=L(path),
+                            now=NOW)
+    tid = adm.open_research_trade(path, persisted, lease=L(path), now=NOW, model_lots=3, entry_spot=23100,
+                                  stop_spot=23080, target_spot=23160)["trade"]["trade_id"]
     for kind in ("RECOMMENDATION", "MONITORING"):
         with pytest.raises(cj.InvalidTransition, match="ACTIONABLE"):
-            ob.enqueue_publication(path, kind=kind, purpose="entry", body="b", trade_id=tid, chat_id=CHAT,
+            ob.enqueue_publication(path, lease=L(path), kind=kind, purpose="entry", body="b", trade_id=tid, chat_id=CHAT,
                                    parent_publication_id="0" * 64 if kind == "MONITORING" else None, now=NOW)
     assert ob.list_pending_publications(path, now=NOW) == []
 
 
 def test_20_rejected_admission_cannot_publish(path):
     rejected = adm.evaluate(CANDIDATE, None, now=NOW, settings=SETTINGS)
-    stored = adm.persist(path, rejected, session_id="S1")["admission"]
+    stored = adm.persist(path, rejected, lease=L(path), now=NOW)["admission"]
     assert stored["class"] == "REJECTED"
     tid = cj.trade_id_for(DAY, stored["signal_id"])
     with pytest.raises(cj.InvalidTransition, match="ACTIONABLE"):
         rec(path, tid)
     with pytest.raises(cj.InvalidTransition):
-        ob.enqueue_publication(path, kind="OPS", purpose="x", body="b", trade_id=tid, chat_id=CHAT, now=NOW)
+        ob.enqueue_publication(path, lease=L(path), kind="OPS", purpose="x", body="b", trade_id=tid, chat_id=CHAT, now=NOW)
 
 
 def test_21_monitoring_needs_a_delivered_parent(path):
@@ -448,13 +469,13 @@ def test_21_monitoring_needs_a_delivered_parent(path):
     kw = {"kind": "MONITORING", "purpose": "stop-moved", "body": "stop moved", "trade_id": tid, "chat_id": CHAT,
           "now": NOW}
     with pytest.raises(cj.InvalidTransition, match="delivered RECOMMENDATION"):
-        ob.enqueue_publication(path, parent_publication_id=parent, **kw)
+        ob.enqueue_publication(path, lease=L(path), parent_publication_id=parent, **kw)
     with pytest.raises(cj.InvalidTransition, match="delivered RECOMMENDATION"):
-        ob.enqueue_publication(path, parent_publication_id=None, **kw)
+        ob.enqueue_publication(path, lease=L(path), parent_publication_id=None, **kw)
     with pytest.raises(cj.InvalidTransition, match="delivered RECOMMENDATION"):
-        ob.enqueue_publication(path, parent_publication_id=ops(path)["publication_id"], **kw)
+        ob.enqueue_publication(path, lease=L(path), parent_publication_id=ops(path)["publication_id"], **kw)
     deliver(path, parent, Fake(OK))
-    assert ob.enqueue_publication(path, parent_publication_id=parent, **kw)["publication"]["state"] == "PENDING"
+    assert ob.enqueue_publication(path, lease=L(path), parent_publication_id=parent, **kw)["publication"]["state"] == "PENDING"
 
 
 def test_22_duplicate_telegram_message_id_is_not_acked(path):
@@ -481,7 +502,7 @@ def test_22b_message_identity_is_per_chat_and_the_destination_is_bound(path):
     with pytest.raises(cj.InvalidTransition, match="chat_id"):
         ops(path, purpose="blank", chat=" -100")
     with pytest.raises(cj.InvalidTransition, match="parent's chat"):
-        ob.enqueue_publication(path, kind="MONITORING", purpose="m", body="m", trade_id=tid,
+        ob.enqueue_publication(path, lease=L(path), kind="MONITORING", purpose="m", body="m", trade_id=tid,
                                parent_publication_id=parent, chat_id="-200", now=NOW)
     conn = cj.connect(path)
     insert = ("INSERT INTO crew_outbox (publication_id, trade_id, parent_publication_id, kind, purpose, body,"
@@ -523,13 +544,16 @@ def test_22c_v1_journal_upgrades_without_reinterpreting_delivery_evidence(tmp_pa
     conn.close()
     before = ob.inspect_publication(p, acked)
 
-    assert cj.migrate(p) == 2 and cj.migrate(p) == 2
+    assert cj.migrate(p) == cj.SCHEMA_VERSION and cj.migrate(p) == cj.SCHEMA_VERSION
     after = ob.inspect_publication(p, acked)
     assert after == {**before, "publication": {**before["publication"], "chat_id": None}}
+    LEASES[p] = cs.acquire(p, now=NOW, ttl_seconds=3600)
     with pytest.raises(cj.InvalidTransition, match="no recorded chat"):
-        ob.claim_publication(p, pending, session_id="S1", now=NOW)
-    assert ob.suppress_publication(p, pending, reason="pre-v2: destination unknown", now=NOW)["state"] == "SUPPRESSED"
-    new = ob.enqueue_publication(p, kind="OPS", purpose="new", body="n", chat_id=CHAT, now=NOW)["publication"]
+        ob.claim_publication(p, pending, lease=L(p), now=NOW)
+    assert ob.suppress_publication(p, pending, lease=L(p), reason="pre-v2: destination unknown",
+                                   now=NOW)["state"] == "SUPPRESSED"
+    new = ob.enqueue_publication(p, lease=L(p), kind="OPS", purpose="new", body="n", chat_id=CHAT,
+                                 now=NOW)["publication"]
     final = deliver(p, new["publication_id"], Fake(OK))  # message 42 may be the legacy row's message in this chat
     assert final["state"] == "UNKNOWN" and f"already belongs to {acked}" in events(p, new["publication_id"])[-1]["note"]
 
@@ -537,29 +561,27 @@ def test_22c_v1_journal_upgrades_without_reinterpreting_delivery_evidence(tmp_pa
 def test_23_invalid_transitions_are_refused(path):
     pid = rec(path, trade(path))["publication_id"]
     with pytest.raises(cj.InvalidTransition):
-        ob.acknowledge_publication(path, pid, session_id="S1", message_id=5, now=NOW)
+        ob.acknowledge_publication(path, pid, lease=L(path), message_id=5, now=NOW)
     with pytest.raises(cj.InvalidTransition):
         ob.resolve_unknown(path, pid, operator="skoust", delivered=False, evidence="x", now=NOW)
-    ob.claim_publication(path, pid, session_id="S1", now=NOW)
+    ob.claim_publication(path, pid, lease=L(path), now=NOW)
     with pytest.raises(cj.InvalidTransition):
-        ob.suppress_publication(path, pid, reason="nope", now=NOW)
-    with pytest.raises(cj.InvalidTransition, match="not SENDING by S2"):
-        ob.acknowledge_publication(path, pid, session_id="S2", message_id=5, now=NOW)
+        ob.suppress_publication(path, pid, lease=L(path), reason="nope", now=NOW)
     with pytest.raises(cj.InvalidTransition):
-        ob.claim_publication(path, pid, session_id="S1", now=NOW)
+        ob.claim_publication(path, pid, lease=L(path), now=NOW)
     conn = cj.connect(path)
     with pytest.raises(sqlite3.IntegrityError):
         conn.execute("UPDATE crew_outbox SET state='PENDING', version=version+1")
     conn.close()
-    acked = ob.acknowledge_publication(path, pid, session_id="S1", message_id=5, now=NOW)
+    acked = ob.acknowledge_publication(path, pid, lease=L(path), message_id=5, now=NOW)
     assert acked["state"] == "ACKED" and acked["acked_at"] == NOW.isoformat()
-    assert ob.acknowledge_publication(path, pid, session_id="S1", message_id=5, now=NOW) == acked
+    assert ob.acknowledge_publication(path, pid, lease=L(path), message_id=5, now=NOW) == acked
     with pytest.raises(cj.InvalidTransition):
-        ob.mark_unknown(path, pid, session_id="S1", reason="late", now=NOW)
+        ob.mark_unknown(path, pid, lease=L(path), reason="late", now=NOW)
     with pytest.raises(cj.InvalidTransition):
-        ob.enqueue_publication(path, kind="OPS", purpose="x", body="b", chat_id=CHAT, now=NOW.replace(tzinfo=None))
+        ob.enqueue_publication(path, lease=L(path), kind="OPS", purpose="x", body="b", chat_id=CHAT, now=NOW.replace(tzinfo=None))
     with pytest.raises(cj.InvalidTransition, match="kind"):
-        ob.enqueue_publication(path, kind="ORDER", purpose="x", body="b", chat_id=CHAT, now=NOW)
+        ob.enqueue_publication(path, lease=L(path), kind="ORDER", purpose="x", body="b", chat_id=CHAT, now=NOW)
 
 
 def test_24_outbox_audit_is_append_only_and_lockstep(path):
@@ -581,7 +603,7 @@ def test_25_tokens_are_redacted_everywhere(path, caplog):
     caplog.set_level(logging.INFO)
     caplog.set_level(logging.INFO, logger="httpx")
     with pytest.raises(cj.InvalidTransition, match="credential"):
-        ob.enqueue_publication(path, kind="OPS", purpose="x", body=f"token bot{TOKEN}", chat_id=CHAT, now=NOW)
+        ob.enqueue_publication(path, lease=L(path), kind="OPS", purpose="x", body=f"token bot{TOKEN}", chat_id=CHAT, now=NOW)
     pid = rec(path, trade(path))["publication_id"]
     leaked_desc = reply(400, {"ok": False, "error_code": 400, "description": f"bad url bot{TOKEN}/sendMessage"})
     out = http(raise_(httpx.ReadTimeout)).send("-100", "x")
@@ -615,5 +637,6 @@ def test_27_production_files_are_unchanged(production_db_opens):
     assert hashlib.sha256(PROD_DB.read_bytes()).hexdigest() == PROD_HASH
     assert hashlib.sha256(OCT30.read_bytes()).hexdigest() == OCT30_HASH
     with pytest.raises(RuntimeError, match="production database"):
-        ob.enqueue_publication(PROD_DB, kind="OPS", purpose="x", body="b", chat_id=CHAT, now=NOW)
+        ob.enqueue_publication(PROD_DB, lease=cs.Lease("S1", DAY, 1, "unused"), kind="OPS", purpose="x", body="b",
+                               chat_id=CHAT, now=NOW)
     production_db_opens.clear()

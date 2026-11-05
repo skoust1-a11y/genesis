@@ -9,6 +9,10 @@ State changes follow a lockstep protocol inside one transaction: append the even
 (``crew_events`` / ``crew_outbox_events``) with ``seq = version + 1``, then UPDATE the
 trade/outbox row to ``version = seq``. Triggers reject any UPDATE without its matching event,
 any illegal transition, and any UPDATE/DELETE of append-only rows.
+
+Every operational write (admission, trade, expiry, outbox claim/outcome/suppression/recovery) takes the
+session's ``Lease`` and verifies it against ``crew_lease`` first, inside its own BEGIN IMMEDIATE transaction.
+A stale lease records FENCED, commits that audit row, and raises ``LeaseLost``; nothing else is written.
 """
 
 from __future__ import annotations
@@ -16,13 +20,19 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import socket
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+from app.trading.option_quote import IST
+
+SCHEMA_VERSION = 3
 
 _DAY = "GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'"
 _HEX64 = "length({c}) = 64 AND {c} NOT GLOB '*[^0-9a-f]*'"
@@ -395,7 +405,94 @@ BEGIN
 END;
 
 UPDATE crew_meta SET value = '2', set_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
-WHERE key = 'schema_version' AND value <> '2';
+WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 2;
+"""
+
+# v3: one exclusive journal lease (crew_lease, a single row) fenced by a generation that only grows,
+# and an append-only audit of every acquisition, release, refusal, fence and recovery.
+# Ownership comes from the lease alone; pid and host are recorded for the audit only.
+_V3_ADD_GENERATION = "ALTER TABLE crew_sessions ADD COLUMN generation INTEGER;"
+SCHEMA_V3 = f"""
+CREATE UNIQUE INDEX IF NOT EXISTS crew_sessions_generation ON crew_sessions(generation)
+    WHERE generation IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS crew_session_events (
+    id INTEGER PRIMARY KEY,
+    event_type TEXT NOT NULL CHECK (event_type IN ('ACQUIRED','TAKEOVER','RELEASED','REFUSED','FENCED','RECOVERED')),
+    session_id TEXT REFERENCES crew_sessions(session_id),
+    generation INTEGER,
+    prior_session_id TEXT REFERENCES crew_sessions(session_id),
+    prior_generation INTEGER,
+    market_day TEXT NOT NULL CHECK (market_day {_DAY} AND date(market_day) IS market_day),
+    at TEXT NOT NULL CHECK (julianday(at) IS NOT NULL),
+    pid INTEGER,
+    host TEXT,
+    detail TEXT NOT NULL DEFAULT '{{}}' CHECK (json_valid(detail) AND json_type(detail) = 'object'),
+    CHECK ((event_type = 'REFUSED') = (session_id IS NULL)),
+    CHECK ((session_id IS NULL) = (generation IS NULL)),
+    CHECK (event_type <> 'TAKEOVER' OR prior_session_id IS NOT NULL)
+);
+{_no_update_delete("crew_session_events")}
+
+CREATE TABLE IF NOT EXISTS crew_lease (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    session_id TEXT NOT NULL REFERENCES crew_sessions(session_id),
+    generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1),
+    token_sha256 TEXT NOT NULL CHECK ({_HEX64.format(c="token_sha256")}),
+    acquired_at TEXT NOT NULL CHECK (julianday(acquired_at) IS NOT NULL),
+    heartbeat_at TEXT NOT NULL CHECK (julianday(heartbeat_at) IS NOT NULL),
+    expires_at TEXT NOT NULL CHECK (julianday(expires_at) > julianday(heartbeat_at)),
+    released_at TEXT
+);
+
+CREATE TRIGGER IF NOT EXISTS crew_lease_insert BEFORE INSERT ON crew_lease
+BEGIN
+    SELECT RAISE(ABORT, 'crew_lease: the first lease is generation 1, unreleased, with its ACQUIRED event')
+    WHERE NEW.generation IS NOT 1 OR NEW.released_at IS NOT NULL OR NOT EXISTS
+        (SELECT 1 FROM crew_session_events WHERE event_type = 'ACQUIRED'
+         AND session_id = NEW.session_id AND generation = 1);
+END;
+
+CREATE TRIGGER IF NOT EXISTS crew_lease_update BEFORE UPDATE ON crew_lease
+BEGIN
+    SELECT RAISE(ABORT, 'crew_lease: a new owner needs generation + 1, a released or expired lease, and its event')
+    WHERE NEW.generation IS NOT OLD.generation AND NOT coalesce(
+        NEW.generation = OLD.generation + 1 AND NEW.released_at IS NULL
+        AND (OLD.released_at IS NOT NULL OR julianday(OLD.expires_at) <= julianday(NEW.acquired_at))
+        AND EXISTS (SELECT 1 FROM crew_session_events WHERE event_type IN ('ACQUIRED','TAKEOVER')
+                    AND session_id = NEW.session_id AND generation = NEW.generation), 0);
+    SELECT RAISE(ABORT, 'crew_lease: session, token and acquisition are fixed for a generation')
+    WHERE NEW.generation IS OLD.generation
+      AND (NEW.session_id IS NOT OLD.session_id OR NEW.token_sha256 IS NOT OLD.token_sha256
+           OR NEW.acquired_at IS NOT OLD.acquired_at);
+    SELECT RAISE(ABORT, 'crew_lease: a released lease cannot change')
+    WHERE NEW.generation IS OLD.generation AND OLD.released_at IS NOT NULL;
+    SELECT RAISE(ABORT, 'crew_lease: an expired lease cannot be renewed')
+    WHERE NEW.generation IS OLD.generation AND NEW.heartbeat_at IS NOT OLD.heartbeat_at
+      AND julianday(NEW.heartbeat_at) >= julianday(OLD.expires_at);
+    SELECT RAISE(ABORT, 'crew_lease: release needs its RELEASED event')
+    WHERE NEW.generation IS OLD.generation AND NEW.released_at IS NOT NULL AND NOT EXISTS
+        (SELECT 1 FROM crew_session_events WHERE event_type = 'RELEASED'
+         AND session_id = NEW.session_id AND generation = NEW.generation);
+END;
+
+CREATE TRIGGER IF NOT EXISTS crew_lease_no_delete BEFORE DELETE ON crew_lease
+BEGIN SELECT RAISE(ABORT, 'crew_lease rows cannot be deleted'); END;
+
+CREATE TRIGGER IF NOT EXISTS crew_sessions_update BEFORE UPDATE ON crew_sessions
+BEGIN
+    SELECT RAISE(ABORT, 'crew_sessions: identity columns are immutable')
+    WHERE NEW.session_id IS NOT OLD.session_id OR NEW.market_day IS NOT OLD.market_day
+       OR NEW.started_at IS NOT OLD.started_at OR NEW.generation IS NOT OLD.generation
+       OR NEW.pid IS NOT OLD.pid OR NEW.host IS NOT OLD.host OR NEW.code_rev IS NOT OLD.code_rev;
+    SELECT RAISE(ABORT, 'crew_sessions: an ended session cannot change') WHERE OLD.ended_at IS NOT NULL;
+END;
+
+CREATE TRIGGER IF NOT EXISTS crew_sessions_no_delete BEFORE DELETE ON crew_sessions
+BEGIN SELECT RAISE(ABORT, 'crew_sessions rows cannot be deleted'); END;
+
+UPDATE crew_meta SET value = '3', set_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 3;
 """
 
 
@@ -439,8 +536,8 @@ def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
 def migrate(db_path: Path | str) -> int:
     """Create the crew_* schema additively and idempotently in one transaction. Returns the schema version.
 
-    Only CREATE ... IF NOT EXISTS statements, plus v2's nullable ``crew_outbox.chat_id`` column;
-    existing rows and legacy tables are never rewritten.
+    Only CREATE ... IF NOT EXISTS statements, plus v2's nullable ``crew_outbox.chat_id`` and v3's nullable
+    ``crew_sessions.generation`` columns; existing rows and legacy tables are never rewritten.
     """
     conn = connect(db_path, create=True)
     try:
@@ -450,9 +547,13 @@ def migrate(db_path: Path | str) -> int:
             if row and int(row[0]) > SCHEMA_VERSION:
                 raise RuntimeError(f"crew journal schema {row[0]} is newer than this code ({SCHEMA_VERSION})")
         has_chat = any(r[1] == "chat_id" for r in conn.execute("PRAGMA table_info(crew_outbox)"))
+        has_gen = any(r[1] == "generation" for r in conn.execute("PRAGMA table_info(crew_sessions)"))
         try:
             # A concurrent migrator can win the ALTER; this one then rolls back whole and a rerun is a no-op.
-            conn.executescript(f"BEGIN IMMEDIATE;\n{SCHEMA}\n{'' if has_chat else _V2_ADD_CHAT}\n{SCHEMA_V2}\nCOMMIT;")
+            conn.executescript(
+                f"BEGIN IMMEDIATE;\n{SCHEMA}\n{'' if has_chat else _V2_ADD_CHAT}\n{SCHEMA_V2}\n"
+                f"{'' if has_gen else _V3_ADD_GENERATION}\n{SCHEMA_V3}\nCOMMIT;"
+            )
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -499,6 +600,23 @@ class ConsistencyError(JournalError):
     def __init__(self, findings: list[dict]):
         super().__init__(f"{len(findings)} journal inconsistencies")
         self.findings = findings
+
+
+class LeaseHeld(JournalError):
+    """Another session holds an unexpired lease."""
+
+
+class LeaseLost(JournalError):
+    """This session no longer holds the lease: released, expired, taken over, or the market day ended."""
+
+
+@dataclass(frozen=True)
+class Lease:
+    """Issued only by ``crew_session.acquire``; the journal stores only the token's SHA-256."""
+    session_id: str
+    market_day: str
+    generation: int
+    token: str = dc_field(repr=False)
 
 
 def canonical_signal_fingerprint(
@@ -552,11 +670,12 @@ def connect_readonly(db_path: Path | str) -> sqlite3.Connection:
 
 
 def record_admission(
-    db_path: Path | str, *, session_id: str, admission_class: str, reasons: list[str] | tuple[str, ...],
+    db_path: Path | str, *, lease: Lease, admission_class: str, reasons: list[str] | tuple[str, ...],
     market_day: str, instrument: str, strategy_id: str, strategy_version: str, signal_candle: str,
     direction: str, setup_id: str, inputs: dict | None = None, decided_at: str | None = None,
+    now: datetime | None = None,
 ) -> dict:
-    """Insert one admission, or return it when the same signal is replayed."""
+    """Insert one admission for the lease's session, or return it when the same signal is replayed."""
     if admission_class not in ("ACTIONABLE", "RESEARCH_ONLY", "REJECTED"):
         raise InvalidTransition("admission class is not ACTIONABLE, RESEARCH_ONLY or REJECTED")
     cleaned = _reason_list(reasons)
@@ -574,8 +693,11 @@ def record_admission(
     _reject_forbidden(extra)
     stored = {**extra, **parts}
     aid = f"A_{parts['market_day'].replace('-', '')}_{sid[:12]}"
+    session_id = getattr(lease, "session_id", None)
 
     def op(conn: sqlite3.Connection) -> dict:
+        if parts["market_day"] != lease.market_day:
+            raise InvalidTransition(f"admission market day {parts['market_day']} is not the lease's {lease.market_day}")
         row = conn.execute(
             "SELECT * FROM crew_admissions WHERE signal_id=? AND market_day=?", (sid, parts["market_day"])
         ).fetchone()
@@ -597,15 +719,15 @@ def record_admission(
         saved = conn.execute("SELECT * FROM crew_admissions WHERE admission_id=?", (aid,)).fetchone()
         return {"replayed": False, "admission": _public_admission(saved)}
 
-    return _immediate(db_path, op)
+    return _fenced(db_path, lease, now, op)
 
 
 def open_trade(
-    db_path: Path | str, *, admission_id: str, model_lots: int, entry_spot: float, stop_spot: float,
-    target_spot: float, contract: str | None = None, expiry: str | None = None,
-    lot_size_ref: int | None = None,
+    db_path: Path | str, *, lease: Lease, admission_id: str, model_lots: int, entry_spot: float,
+    stop_spot: float, target_spot: float, contract: str | None = None, expiry: str | None = None,
+    lot_size_ref: int | None = None, now: datetime | None = None,
 ) -> dict:
-    """Open one TRACKING trade and its MODEL_ENTRY, or return the existing trade."""
+    """Open one TRACKING trade and its MODEL_ENTRY from this session's admission, or return the existing trade."""
     lots = _pos_int("model_lots", model_lots)
     entry_spot, stop_spot, target_spot = _number("entry_spot", entry_spot), _number("stop_spot", stop_spot), _number("target_spot", target_spot)
     if lot_size_ref is not None:
@@ -617,6 +739,9 @@ def open_trade(
             raise InvalidTransition(f"unknown admission {admission_id}")
         if admission["class"] not in ("ACTIONABLE", "RESEARCH_ONLY"):
             raise InvalidTransition("a rejected admission is not a trade")
+        if admission["session_id"] != lease.session_id:
+            raise InvalidTransition(f"admission {admission_id} belongs to session {admission['session_id']},"
+                                    f" not {lease.session_id}")
         parts = json.loads(admission["inputs"])
         sid, day = admission["signal_id"], admission["market_day"]
         tid = trade_id_for(day, sid)
@@ -661,12 +786,12 @@ def open_trade(
                       payload=payload)
         return {"replayed": False, "trade": dict(_trade(conn, tid)), "event": _public_event(_event_by_key(conn, key))}
 
-    return _immediate(db_path, op)
+    return _fenced(db_path, lease, now, op)
 
 
 def partial_exit(
-    db_path: Path | str, *, trade_id: str, expected_version: int, reason: str, lots_after: int,
-    signal_candle: str, index_levels: dict, idempotency_key: str | None = None,
+    db_path: Path | str, *, lease: Lease, trade_id: str, expected_version: int, reason: str, lots_after: int,
+    signal_candle: str, index_levels: dict, idempotency_key: str | None = None, now: datetime | None = None,
 ) -> dict:
     """Reduce hypothetical model lots once per idempotency key."""
     version = _version(expected_version)
@@ -684,7 +809,7 @@ def partial_exit(
         if prior is not None:
             return _replay_partial(conn, prior, trade_id=trade_id, reason=why, lots_after=lots_after,
                                    candle=candle, levels=levels)
-        trade = _require_open(conn, trade_id, version)
+        trade = _require_open(conn, trade_id, version, lease)
         before = trade["model_lots_open"]
         if lots_after >= before:
             raise InvalidTransition("partial exit must reduce model lots")
@@ -694,12 +819,13 @@ def partial_exit(
                         occurred_at=candle, payload=payload, lots=lots_after, stop=trade["stop_spot"],
                         target=trade["target_spot"], closed_at=None)
 
-    return _immediate(db_path, op)
+    return _fenced(db_path, lease, now, op)
 
 
 def exit_trade(
-    db_path: Path | str, *, trade_id: str, expected_version: int, reason: str, signal_candle: str,
+    db_path: Path | str, *, lease: Lease, trade_id: str, expected_version: int, reason: str, signal_candle: str,
     index_levels: dict, model_points: float | None = None, model_r: float | None = None,
+    now: datetime | None = None,
 ) -> dict:
     """Close the model once. A second request returns that exit and writes nothing."""
     version = _version(expected_version)
@@ -718,7 +844,7 @@ def exit_trade(
             if prior["trade_id"] != trade_id or prior["event_type"] != "MODEL_EXIT":
                 raise InvalidTransition(f"exit key {key} belongs to another event")
             return {"replayed": True, "trade": dict(_trade(conn, trade_id)), "event": _public_event(prior)}
-        trade = _require_open(conn, trade_id, version)
+        trade = _require_open(conn, trade_id, version, lease)
         payload = {"index_levels": levels, "reason": why, "signal_candle": candle}
         if points is not None:
             payload["model_points"] = points
@@ -728,13 +854,13 @@ def exit_trade(
                         payload=payload, lots=0, stop=trade["stop_spot"], target=trade["target_spot"],
                         closed_at=candle)
 
-    return _immediate(db_path, op)
+    return _fenced(db_path, lease, now, op)
 
 
 def update_levels(
-    db_path: Path | str, *, trade_id: str, expected_version: int, signal_candle: str,
+    db_path: Path | str, *, lease: Lease, trade_id: str, expected_version: int, signal_candle: str,
     stop_spot: float | None = None, target_spot: float | None = None, reason: str | None = None,
-    idempotency_key: str | None = None,
+    idempotency_key: str | None = None, now: datetime | None = None,
 ) -> dict:
     """Record a stop or target move without changing model state or lots."""
     version = _version(expected_version)
@@ -760,6 +886,7 @@ def update_levels(
                     or not _same_number(stored.get("target_spot"), target)):
                 raise InvalidTransition("idempotency key reused with different levels")
             return {"replayed": True, "trade": dict(trade), "event": _public_event(prior)}
+        _owned_by(trade, lease)
         if trade["state"] not in _OPEN_STATES:
             raise InvalidTransition(f"{trade_id} is {trade['state']} and cannot change")
         if trade["version"] != version:
@@ -769,53 +896,52 @@ def update_levels(
                         occurred_at=candle, payload=payload, lots=trade["model_lots_open"], stop=stop,
                         target=target, closed_at=None)
 
-    return _immediate(db_path, op)
+    return _fenced(db_path, lease, now, op)
 
 
-def expire_unresolved(db_path: Path | str, *, as_of_day: str, at: str) -> list[dict]:
-    """Mark prior-day open trades EXPIRED_UNRESOLVED. Does not invent a price or P&L."""
-    day = _market_day(as_of_day)
+def expire_unresolved(db_path: Path | str, *, lease: Lease, at: str, now: datetime | None = None) -> list[dict]:
+    """Mark trades open before the lease's market day EXPIRED_UNRESOLVED. Does not invent a price or P&L."""
     stamp = _candle(at)
-    if stamp[:10] != day:
-        raise InvalidTransition("expiry time must fall on the new market day")
+    if not isinstance(lease, Lease) or stamp[:10] != lease.market_day:
+        raise InvalidTransition("expiry time must fall on the lease's market day")
+    return _fenced(db_path, lease, now, lambda conn: _expire_unresolved(conn, lease.market_day, stamp))
 
-    def op(conn: sqlite3.Connection) -> list[dict]:
-        pending = conn.execute(
-            "SELECT * FROM crew_trades WHERE state IN ('TRACKING','PARTIALLY_EXITED') AND market_day < ?"
-            " ORDER BY trade_id", (day,)
-        ).fetchall()
-        results = []
-        seen = set()
-        for trade in pending:
-            key = f"{trade['trade_id']}:EXPIRED_UNRESOLVED"
-            prior = _event_by_key(conn, key)
-            if prior is not None:
-                if trade["state"] != "EXPIRED_UNRESOLVED":
-                    raise ConsistencyError([{"kind": "projection_mismatch", "trade_id": trade["trade_id"]}])
-                results.append({"replayed": True, "trade": dict(trade), "event": _public_event(prior)})
-            else:
-                payload = {"as_of_day": day, "market_day": trade["market_day"], "reason": "PRIOR_MARKET_DAY"}
-                results.append(_project(
-                    conn, trade, event_type="EXPIRED_UNRESOLVED", to_state="EXPIRED_UNRESOLVED", key=key,
-                    occurred_at=stamp, payload=payload, lots=trade["model_lots_open"], stop=trade["stop_spot"],
-                    target=trade["target_spot"], closed_at=stamp,
-                ))
-            seen.add(trade["trade_id"])
-        already = conn.execute(
-            "SELECT * FROM crew_trades WHERE state='EXPIRED_UNRESOLVED' AND market_day < ? ORDER BY trade_id",
-            (day,),
-        ).fetchall()
-        for trade in already:
-            if trade["trade_id"] in seen:
-                continue
-            event = conn.execute(
-                "SELECT * FROM crew_events WHERE trade_id=? AND event_type='EXPIRED_UNRESOLVED' ORDER BY seq DESC LIMIT 1",
-                (trade["trade_id"],),
-            ).fetchone()
-            results.append({"replayed": True, "trade": dict(trade), "event": _public_event(event)})
-        return results
 
-    return _immediate(db_path, op)
+def _expire_unresolved(conn: sqlite3.Connection, day: str, stamp: str) -> list[dict]:
+    pending = conn.execute(
+        "SELECT * FROM crew_trades WHERE state IN ('TRACKING','PARTIALLY_EXITED') AND market_day < ?"
+        " ORDER BY trade_id", (day,)
+    ).fetchall()
+    results = []
+    seen = set()
+    for trade in pending:
+        key = f"{trade['trade_id']}:EXPIRED_UNRESOLVED"
+        prior = _event_by_key(conn, key)
+        if prior is not None:
+            if trade["state"] != "EXPIRED_UNRESOLVED":
+                raise ConsistencyError([{"kind": "projection_mismatch", "trade_id": trade["trade_id"]}])
+            results.append({"replayed": True, "trade": dict(trade), "event": _public_event(prior)})
+        else:
+            payload = {"as_of_day": day, "market_day": trade["market_day"], "reason": "PRIOR_MARKET_DAY"}
+            results.append(_project(
+                conn, trade, event_type="EXPIRED_UNRESOLVED", to_state="EXPIRED_UNRESOLVED", key=key,
+                occurred_at=stamp, payload=payload, lots=trade["model_lots_open"], stop=trade["stop_spot"],
+                target=trade["target_spot"], closed_at=stamp,
+            ))
+        seen.add(trade["trade_id"])
+    already = conn.execute(
+        "SELECT * FROM crew_trades WHERE state='EXPIRED_UNRESOLVED' AND market_day < ? ORDER BY trade_id",
+        (day,),
+    ).fetchall()
+    for trade in already:
+        if trade["trade_id"] in seen:
+            continue
+        event = conn.execute(
+            "SELECT * FROM crew_events WHERE trade_id=? AND event_type='EXPIRED_UNRESOLVED' ORDER BY seq DESC LIMIT 1",
+            (trade["trade_id"],),
+        ).fetchone()
+        results.append({"replayed": True, "trade": dict(trade), "event": _public_event(event)})
+    return results
 
 
 def quarantine_legacy_reference(db_path: Path | str, source_path: Path | str) -> list[dict]:
@@ -941,16 +1067,89 @@ def check_consistency(db_path: Path | str) -> list[dict]:
 
 
 def _immediate(db_path: Path | str, fn):
+    """Run ``fn`` in one BEGIN IMMEDIATE transaction. A ``JournalError`` that ``fn`` *returns* is a refusal
+    whose audit row must survive: the transaction commits first, then it is raised."""
     conn = connect(db_path)
     try:
         with transaction(conn):
-            return fn(conn)
+            result = fn(conn)
     except sqlite3.IntegrityError as e:
         if "duplicate trade" in str(e):
             raise TradeIdCollision(str(e)) from e
         raise InvalidTransition(str(e)) from e
     finally:
         conn.close()
+    if isinstance(result, JournalError):
+        raise result
+    return result
+
+
+def _fenced(db_path: Path | str, lease: Lease, now: datetime | None, fn):
+    """``_immediate`` for operational writes: the lease is verified inside the same transaction, before ``fn``."""
+    if not isinstance(lease, Lease):
+        raise InvalidTransition("operational writes need the session Lease from crew_session.acquire")
+    stamp = _ist(now)
+    return _immediate(db_path, lambda conn: _fence(conn, lease, stamp) or fn(conn))
+
+
+def _fence(conn, lease: Lease, stamp: datetime, *, allow_expired: bool = False) -> LeaseLost | None:
+    """Return (and audit) why ``lease`` may not act at ``stamp``, or None if it may."""
+    held = _lease_row(conn)
+    if not _mine(held, lease):
+        why = "lease belongs to another generation"
+    elif held["released_at"] is not None:
+        why = "lease was released"
+    elif not allow_expired and datetime.fromisoformat(held["expires_at"]) <= stamp:
+        why = f"lease expired at {held['expires_at']}"
+    elif not allow_expired and stamp.date().isoformat() != lease.market_day:
+        why = f"market day {lease.market_day} has ended"
+    else:
+        return None
+    day = stamp.date().isoformat()
+    if conn.execute("SELECT 1 FROM crew_sessions WHERE session_id=?", (lease.session_id,)).fetchone():
+        _session_event(conn, "FENCED", day=day, at=stamp.isoformat(), session_id=lease.session_id,
+                       generation=lease.generation, prior=held, detail={"reason": why})
+    else:  # a forged session id cannot be a FENCED row (FK), so its refusal is audited anonymously
+        _session_event(conn, "REFUSED", day=day, at=stamp.isoformat(), prior=held,
+                       detail={"reason": why, "claimed_session_id": str(lease.session_id)})
+    return LeaseLost(f"{lease.session_id}: {why}")
+
+
+def _mine(held, lease: Lease) -> bool:
+    return (held is not None and held["generation"] == lease.generation
+            and held["session_id"] == lease.session_id and held["token_sha256"] == _sha(lease.token))
+
+
+def _session_event(conn, event_type, *, day, at, session_id=None, generation=None, prior=None, detail) -> None:
+    conn.execute(
+        "INSERT INTO crew_session_events (event_type, session_id, generation, prior_session_id, prior_generation,"
+        " market_day, at, pid, host, detail) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (event_type, session_id, generation, prior["session_id"] if prior else None,
+         prior["generation"] if prior else None, day, at, os.getpid(), socket.gethostname(),
+         json.dumps(detail, sort_keys=True, separators=(",", ":"))),
+    )
+
+
+def _lease_row(conn):
+    return conn.execute("SELECT * FROM crew_lease WHERE id=1").fetchone()
+
+
+def _sha(token: str) -> str:
+    return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+
+def _ist(now: datetime | None) -> datetime:
+    value = datetime.now(IST) if now is None else now
+    if not isinstance(value, datetime) or value.utcoffset() is None:
+        raise InvalidTransition("timestamps must be timezone-aware")
+    return value.astimezone(IST)
+
+
+def _owned_by(trade, lease: Lease) -> None:
+    # Ownership never transfers: a current-day orphan stays untouched until a later day expires it.
+    if trade["owner_session_id"] != lease.session_id:
+        raise InvalidTransition(f"{trade['trade_id']} belongs to session {trade['owner_session_id']},"
+                                f" not {lease.session_id}")
 
 
 def _project(conn, trade, *, event_type, to_state, key, occurred_at, payload, lots, stop, target, closed_at) -> dict:
@@ -985,10 +1184,11 @@ def _insert_event(conn, *, key, trade_id, seq, event_type, from_state, to_state,
     )
 
 
-def _require_open(conn, trade_id: str, version: int):
+def _require_open(conn, trade_id: str, version: int, lease: Lease):
     trade = _trade(conn, trade_id)
     if trade is None:
         raise InvalidTransition(f"unknown trade {trade_id}")
+    _owned_by(trade, lease)
     if trade["state"] not in _OPEN_STATES:
         raise InvalidTransition(f"{trade_id} is {trade['state']} and cannot change")
     if trade["version"] != version:

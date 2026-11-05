@@ -168,7 +168,7 @@ def _valid_contract(quote: ContractQuote, parts: dict) -> bool:
     )
 
 
-def persist(db_path: Path | str, admission: Admission, *, session_id: str) -> dict | None:
+def persist(db_path: Path | str, admission: Admission, *, lease: cj.Lease, now: datetime | None = None) -> dict | None:
     """Record the admission once per signal and day. The first decision is canonical.
 
     Returns None, and writes nothing, when the identity is invalid or the evaluation is off the market day.
@@ -178,7 +178,7 @@ def persist(db_path: Path | str, admission: Admission, *, session_id: str) -> di
         return None
     try:
         return cj.record_admission(
-            db_path, session_id=session_id, admission_class=admission.admission_class,
+            db_path, lease=lease, now=now, admission_class=admission.admission_class,
             reasons=list(admission.reasons), market_day=admission.market_day,
             instrument=admission.instrument, strategy_id=admission.strategy_id,
             strategy_version=admission.strategy_version, signal_candle=admission.signal_candle,
@@ -199,15 +199,17 @@ def persist(db_path: Path | str, admission: Admission, *, session_id: str) -> di
         return {"replayed": True, "admission": stored}
 
 
-def open_research_trade(db_path: Path | str, persisted: dict, *, model_lots: int, entry_spot: float,
-                        stop_spot: float, target_spot: float) -> dict:
+def open_research_trade(db_path: Path | str, persisted: dict, *, lease: cj.Lease, model_lots: int,
+                        entry_spot: float, stop_spot: float, target_spot: float,
+                        now: datetime | None = None) -> dict:
     """Open a hypothetical model trade from a stored RESEARCH_ONLY admission. Not an order."""
     stored = persisted["admission"]
     if stored["class"] != "RESEARCH_ONLY":
         raise cj.InvalidTransition(f"admission {stored['admission_id']} is {stored['class']}, not RESEARCH_ONLY")
     contract = stored["inputs"]["contract"]
     return cj.open_trade(
-        db_path, admission_id=stored["admission_id"], model_lots=model_lots, entry_spot=entry_spot,
+        db_path, lease=lease, now=now, admission_id=stored["admission_id"], model_lots=model_lots,
+        entry_spot=entry_spot,
         stop_spot=stop_spot, target_spot=target_spot,
         contract=contract["tradingsymbol"] or contract["provider_instrument_id"]
         or f"{contract['underlying']} {contract['expiry']} {contract['strike']:g} {contract['option_type']}",

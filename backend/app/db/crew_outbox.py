@@ -9,6 +9,8 @@ Lifecycle (the P1 triggers enforce every edge):
 
 Nothing here ever moves UNKNOWN back to SENDING, and nothing here places or implies an order.
 Each write is one BEGIN IMMEDIATE transaction: audit row (seq = version + 1) first, then the row update.
+Every write except the operator's ``resolve_unknown`` takes the session ``Lease`` and is fenced in that
+transaction (``crew_journal._fenced``); a stale owner gets ``LeaseLost`` and changes nothing.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ def publication_id_for(*, kind: str, purpose: str, trade_id: str | None = None,
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def enqueue_publication(db_path: Path | str, *, kind: str, purpose: str, body: str, chat_id: str,
+def enqueue_publication(db_path: Path | str, *, lease: cj.Lease, kind: str, purpose: str, body: str, chat_id: str,
                         trade_id: str | None = None, parent_publication_id: str | None = None,
                         now: datetime | None = None) -> dict:
     """Insert a publication once, bound to one destination chat. A replay with the same body and chat
@@ -72,13 +74,16 @@ def enqueue_publication(db_path: Path | str, *, kind: str, purpose: str, body: s
             if trade is None or trade["admission_class"] != "ACTIONABLE" or trade["admitted"] != "ACTIONABLE":
                 raise cj.InvalidTransition(f"{kind} requires an ACTIONABLE trade")
         if kind == "MONITORING":
+            orphan = _orphan(trade, lease)
+            if orphan:
+                raise cj.InvalidTransition(orphan)
             parent = _pub(conn, parent_publication_id) if parent_publication_id else None
             if parent is None or parent["kind"] != "RECOMMENDATION" or parent["state"] not in _DELIVERED_STATES:
                 raise cj.InvalidTransition("MONITORING requires a delivered RECOMMENDATION parent")
             if parent["chat_id"] != chat_id:
                 raise cj.InvalidTransition("MONITORING must go to its parent's chat")
         if kind == "RECOMMENDATION":
-            note = _stale(trade, now=at) or _unknown_block(conn, pid)
+            note = _stale(trade, now=at) or _orphan(trade, lease) or _unknown_block(conn, pid)
             state = "SUPPRESSED" if note else "PENDING"
         conn.execute(
             "INSERT INTO crew_outbox (publication_id, trade_id, parent_publication_id, kind, purpose, body,"
@@ -88,10 +93,10 @@ def enqueue_publication(db_path: Path | str, *, kind: str, purpose: str, body: s
         _audit(conn, pid, 1, None, state, at=at, note=note)
         return {"replayed": False, "publication": dict(_pub(conn, pid))}
 
-    return cj._immediate(db_path, op)
+    return cj._fenced(db_path, lease, _parse(at), op)
 
 
-def claim_publication(db_path: Path | str, publication_id: str, *, session_id: str,
+def claim_publication(db_path: Path | str, publication_id: str, *, lease: cj.Lease,
                       now: datetime | None = None) -> dict:
     """PENDING/due RETRY_WAIT -> SENDING. A stale recommendation is SUPPRESSED instead; check ``state``."""
     at = _stamp(now)
@@ -104,6 +109,10 @@ def claim_publication(db_path: Path | str, publication_id: str, *, session_id: s
             raise cj.InvalidTransition(f"{publication_id} is not due before {row['not_before']}")
         if row["chat_id"] is None:
             raise cj.InvalidTransition(f"{publication_id} predates schema v2 and has no recorded chat; suppress it")
+        if row["kind"] != "OPS":
+            orphan = _orphan(_trade(conn, row["trade_id"]), lease)
+            if orphan:
+                return _transition(conn, row, "SUPPRESSED", at=at, note=orphan)
         if row["kind"] == "RECOMMENDATION":
             stale = _stale(_trade(conn, row["trade_id"]), now=at)
             if stale:
@@ -113,20 +122,20 @@ def claim_publication(db_path: Path | str, publication_id: str, *, session_id: s
                 raise cj.InvalidTransition(blocked)
         if row["attempts"] >= MAX_ATTEMPTS:
             raise cj.InvalidTransition(f"{publication_id} reached {MAX_ATTEMPTS} attempts")
-        return _transition(conn, row, "SENDING", at=at, session_id=session_id)
+        return _transition(conn, row, "SENDING", at=at, session_id=lease.session_id)
 
-    return cj._immediate(db_path, op)
+    return cj._fenced(db_path, lease, _parse(at), op)
 
 
-def acknowledge_publication(db_path: Path | str, publication_id: str, *, session_id: str, message_id: int,
+def acknowledge_publication(db_path: Path | str, publication_id: str, *, lease: cj.Lease, message_id: int,
                             latency_ms: int | None = None, now: datetime | None = None) -> dict:
     """SENDING -> ACKED on HTTP 200, ok:true and a message_id not already used by another publication."""
     return record_outcome(db_path, publication_id, DeliveryOutcome(DELIVERED, 200, True, message_id,
                                                                    latency_ms=latency_ms),
-                          session_id=session_id, now=now)
+                          lease=lease, now=now)
 
 
-def mark_unknown(db_path: Path | str, publication_id: str, *, session_id: str, reason: str,
+def mark_unknown(db_path: Path | str, publication_id: str, *, lease: cj.Lease, reason: str,
                  outcome: DeliveryOutcome | None = None, now: datetime | None = None) -> dict:
     """SENDING -> UNKNOWN. The message may have reached Telegram; only an operator can resolve it."""
     at = _stamp(now)
@@ -135,16 +144,17 @@ def mark_unknown(db_path: Path | str, publication_id: str, *, session_id: str, r
         row = _require(conn, publication_id)
         if row["state"] == "UNKNOWN":
             return dict(row)
-        _owned(row, session_id)
-        return _to_unknown(conn, row, at=at, session_id=session_id, reason=reason, outcome=outcome)
+        _owned(row, lease.session_id)
+        return _to_unknown(conn, row, at=at, session_id=lease.session_id, reason=reason, outcome=outcome)
 
-    return cj._immediate(db_path, op)
+    return cj._fenced(db_path, lease, _parse(at), op)
 
 
-def record_outcome(db_path: Path | str, publication_id: str, outcome: DeliveryOutcome, *, session_id: str,
+def record_outcome(db_path: Path | str, publication_id: str, outcome: DeliveryOutcome, *, lease: cj.Lease,
                    now: datetime | None = None) -> dict:
-    """Apply one transport outcome to a SENDING publication owned by ``session_id``."""
+    """Apply one transport outcome to a SENDING publication claimed by the lease's session."""
     at = _stamp(now)
+    session_id = getattr(lease, "session_id", None)
 
     def op(conn: sqlite3.Connection) -> dict:
         row = _require(conn, publication_id)
@@ -174,10 +184,10 @@ def record_outcome(db_path: Path | str, publication_id: str, outcome: DeliveryOu
         return _to_unknown(conn, row, at=at, session_id=session_id, outcome=outcome,
                            reason=f"UNKNOWN {outcome.exc_class or outcome.http_status}: {outcome.detail or ''}")
 
-    return cj._immediate(db_path, op)
+    return cj._fenced(db_path, lease, _parse(at), op)
 
 
-def suppress_publication(db_path: Path | str, publication_id: str, *, reason: str,
+def suppress_publication(db_path: Path | str, publication_id: str, *, lease: cj.Lease, reason: str,
                          now: datetime | None = None) -> dict:
     """PENDING or RETRY_WAIT -> SUPPRESSED. Never applies to SENDING or UNKNOWN."""
     why = cj._text(reason)
@@ -191,9 +201,9 @@ def suppress_publication(db_path: Path | str, publication_id: str, *, reason: st
             return dict(row)
         if row["state"] not in ("PENDING", "RETRY_WAIT"):
             raise cj.InvalidTransition(f"{publication_id} is {row['state']} and cannot be suppressed")
-        return _transition(conn, row, "SUPPRESSED", at=at, note=why)
+        return _transition(conn, row, "SUPPRESSED", at=at, session_id=lease.session_id, note=why)
 
-    return cj._immediate(db_path, op)
+    return cj._fenced(db_path, lease, _parse(at), op)
 
 
 def resolve_unknown(db_path: Path | str, publication_id: str, *, operator: str, delivered: bool, evidence: str,
@@ -221,18 +231,19 @@ def resolve_unknown(db_path: Path | str, publication_id: str, *, operator: str, 
     return cj._immediate(db_path, op)
 
 
-def recover_inflight_publications(db_path: Path | str, *, session_id: str, now: datetime | None = None) -> list[dict]:
-    """Startup: every SENDING row not claimed by ``session_id`` becomes UNKNOWN. Nothing is resent."""
+def recover_inflight_publications(db_path: Path | str, *, lease: cj.Lease,
+                                  now: datetime | None = None) -> list[dict]:
+    """Startup: every SENDING row not claimed by the lease's session becomes UNKNOWN. Nothing is resent."""
     at = _stamp(now)
+    return cj._fenced(db_path, lease, _parse(at), lambda conn: _recover_inflight(conn, lease.session_id, at))
 
-    def op(conn: sqlite3.Connection) -> list[dict]:
-        rows = conn.execute("SELECT * FROM crew_outbox WHERE state='SENDING' AND claimed_by_session IS NOT ?"
-                            " ORDER BY created_at, publication_id", (session_id,)).fetchall()
-        return [_to_unknown(conn, row, at=at, session_id=session_id,
-                            reason=f"RECOVERED_INFLIGHT claimed by {row['claimed_by_session']} at {row['claimed_at']}")
-                for row in rows]
 
-    return cj._immediate(db_path, op)
+def _recover_inflight(conn, session_id: str, at: str) -> list[dict]:
+    rows = conn.execute("SELECT * FROM crew_outbox WHERE state='SENDING' AND claimed_by_session IS NOT ?"
+                        " ORDER BY created_at, publication_id", (session_id,)).fetchall()
+    return [_to_unknown(conn, row, at=at, session_id=session_id,
+                        reason=f"RECOVERED_INFLIGHT claimed by {row['claimed_by_session']} at {row['claimed_at']}")
+            for row in rows]
 
 
 def list_pending_publications(db_path: Path | str, *, now: datetime | None = None) -> list[dict]:
@@ -259,17 +270,21 @@ def inspect_publication(db_path: Path | str, publication_id: str) -> dict:
 
 
 def deliver_publication(db_path: Path | str, publication_id: str, *, transport: Transport,
-                        session_id: str, clock: Callable[[], datetime] | None = None) -> dict:
-    """Claim, send once to the publication's own chat, record the outcome. Not scheduled by anything in P4."""
+                        lease: cj.Lease, clock: Callable[[], datetime] | None = None) -> dict:
+    """Claim, send once to the publication's own chat, record the outcome. Not scheduled by anything in P4.
+
+    If the lease is lost during the send, recording raises ``LeaseLost`` and the row stays SENDING until the
+    next owner's recovery marks it UNKNOWN; it is never resent.
+    """
     clock = clock or (lambda: datetime.now(IST))
-    claimed = claim_publication(db_path, publication_id, session_id=session_id, now=clock())
+    claimed = claim_publication(db_path, publication_id, lease=lease, now=clock())
     if claimed["state"] != "SENDING":
         return claimed
     try:
         outcome = transport.send(claimed["chat_id"], claimed["body"])
     except Exception as exc:  # noqa: BLE001 - a raising transport is an unknown outcome, never a resend
         outcome = classify_exception(exc)
-    return record_outcome(db_path, publication_id, outcome, session_id=session_id, now=clock())
+    return record_outcome(db_path, publication_id, outcome, lease=lease, now=clock())
 
 
 def _transition(conn, row, to, *, at, session_id=None, message_id=None, http_status=None, telegram_ok=None,
@@ -330,6 +345,13 @@ def _stale(trade, *, now: str) -> str | None:
         return "STALE: admission decided_at has no timezone"
     if (_parse(now) - decided).total_seconds() > RECOMMENDATION_MAX_AGE_SECONDS:
         return f"STALE: older than {RECOMMENDATION_MAX_AGE_SECONDS}s since admission"
+    return None
+
+
+def _orphan(trade, lease: cj.Lease) -> str | None:
+    """Trade publications speak only for the session that owns the trade; ownership never transfers."""
+    if trade["owner_session_id"] != lease.session_id:
+        return f"ORPHAN: trade belongs to session {trade['owner_session_id']}, not {lease.session_id}"
     return None
 
 

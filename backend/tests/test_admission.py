@@ -18,6 +18,7 @@ import pytest
 
 from app.config import get_settings
 from app.db import crew_journal as cj
+from app.db import crew_session as cs
 from app.db import trade_store
 from app.trading import admission as adm
 from app.trading.option_quote import IST, ContractQuote
@@ -39,6 +40,7 @@ OCT30 = trade_store.ROOT_DIR / "trades" / ".active_trades_2026-10-30.json"
 OCT30_HASH = hashlib.sha256(OCT30.read_bytes()).hexdigest()
 MODULE = Path(adm.__file__)
 RISK = [adm.CAPITAL_UNAVAILABLE, adm.CASH_UNAVAILABLE, adm.MAX_LOSS_UNVERIFIED]
+LEASES: dict[Path, cs.Lease] = {}
 
 
 def run(quote=QUOTE, candidate=CANDIDATE, now=NOW):
@@ -48,11 +50,13 @@ def run(quote=QUOTE, candidate=CANDIDATE, now=NOW):
 def ready(tmp_path):
     path = tmp_path / "journal.db"
     cj.migrate(path)
-    conn = cj.connect(path)
-    conn.execute("INSERT INTO crew_sessions (session_id, market_day, started_at) VALUES ('S1', ?, ?)",
-                 (DAY, NOW.isoformat()))
-    conn.close()
+    LEASES[path] = cs.acquire(path, now=NOW, ttl_seconds=3600)
     return path
+
+
+def own(path):
+    """The session lease and an injected clock inside it."""
+    return {"lease": LEASES[path], "now": NOW}
 
 
 def counts(path):
@@ -65,8 +69,8 @@ def counts(path):
 
 
 def track(path, admission):
-    persisted = adm.persist(path, admission, session_id="S1")
-    return persisted, adm.open_research_trade(path, persisted, model_lots=3, entry_spot=23100,
+    persisted = adm.persist(path, admission, **own(path))
+    return persisted, adm.open_research_trade(path, persisted, **own(path), model_lots=3, entry_spot=23100,
                                               stop_spot=23080, target_spot=23160)
 
 
@@ -128,7 +132,7 @@ def test_10_reference_quote_with_incomplete_execution_evidence_is_research_only(
     path = ready(tmp_path)
     for setup, quote in (("ref", QUOTE), ("exe", EXECUTABLE)):
         result = run(quote=quote, candidate=replace(CANDIDATE, setup_id=setup))
-        stored = adm.persist(path, result, session_id="S1")["admission"]
+        stored = adm.persist(path, result, **own(path))["admission"]
         assert stored["class"] == "RESEARCH_ONLY" and stored["reasons"] == list(result.reasons)
         assert stored["inputs"]["quote"]["grade"] == result.quote["grade"]
     conn = cj.connect(path)
@@ -138,10 +142,10 @@ def test_10_reference_quote_with_incomplete_execution_evidence_is_research_only(
 
 def test_11_duplicate_signal_keeps_one_admission(tmp_path):
     path = ready(tmp_path)
-    first = adm.persist(path, run(), session_id="S1")
-    same = adm.persist(path, run(), session_id="S1")
+    first = adm.persist(path, run(), **own(path))
+    same = adm.persist(path, run(), **own(path))
     later = adm.persist(path, run(quote=replace(QUOTE, ltp=None), now=NOW + timedelta(seconds=1)),
-                        session_id="S1")
+                        **own(path))
     assert first["replayed"] is False and same["replayed"] is True and later["replayed"] is True
     assert later["admission"]["class"] == "RESEARCH_ONLY"
     assert later["admission"]["admission_id"] == first["admission"]["admission_id"]
@@ -184,16 +188,17 @@ def test_13_research_only_trade_has_no_recommendation(tmp_path):
 def test_14_rejected_candidate_cannot_become_a_trade(tmp_path):
     path = ready(tmp_path)
     rejected = run(quote=replace(QUOTE, fetched_at=NOW - timedelta(seconds=30)))
-    persisted = adm.persist(path, rejected, session_id="S1")
+    persisted = adm.persist(path, rejected, **own(path))
     assert persisted["admission"]["class"] == "REJECTED"
     assert persisted["admission"]["reasons"] == [adm.QUOTE_STALE]
     with pytest.raises(cj.InvalidTransition, match="REJECTED"):
-        adm.open_research_trade(path, persisted, model_lots=3, entry_spot=1, stop_spot=1, target_spot=1)
+        adm.open_research_trade(path, persisted, **own(path), model_lots=3, entry_spot=1, stop_spot=1,
+                                target_spot=1)
     with pytest.raises(cj.InvalidTransition, match="rejected"):
-        cj.open_trade(path, admission_id=persisted["admission"]["admission_id"], model_lots=3,
+        cj.open_trade(path, **own(path), admission_id=persisted["admission"]["admission_id"], model_lots=3,
                       entry_spot=1, stop_spot=1, target_spot=1)
     assert counts(path) == (1, 0, 0, 0)
-    assert adm.persist(path, run(candidate=replace(CANDIDATE, direction="LONG")), session_id="S1") is None
+    assert adm.persist(path, run(candidate=replace(CANDIDATE, direction="LONG")), **own(path)) is None
     assert counts(path) == (1, 0, 0, 0)
 
 
@@ -226,7 +231,7 @@ def test_16_admission_persistence_failure_opens_no_trade(tmp_path, monkeypatch):
     assert counts(path) == (0, 0, 0, 0)
     monkeypatch.undo()
     with pytest.raises(cj.InvalidTransition, match="unknown admission"):
-        cj.open_trade(path, admission_id=f"A_20261106_{run().signal_id[:12]}", model_lots=3,
+        cj.open_trade(path, **own(path), admission_id=f"A_20261106_{run().signal_id[:12]}", model_lots=3,
                       entry_spot=1, stop_spot=1, target_spot=1)
     assert counts(path) == (0, 0, 0, 0)
 
@@ -235,9 +240,9 @@ def test_17_unsupported_research_reason_is_refused_by_schema(tmp_path):
     path = ready(tmp_path)
     bogus = replace(run(), reasons=("LOOKS_GOOD",))
     with pytest.raises(cj.InvalidTransition, match="RESEARCH_ONLY allows only"):
-        adm.persist(path, bogus, session_id="S1")
+        adm.persist(path, bogus, **own(path))
     with pytest.raises(cj.InvalidTransition):
-        adm.persist(path, replace(run(), admission_class="ACTIONABLE", reasons=("LOOKS_GOOD",)), session_id="S1")
+        adm.persist(path, replace(run(), admission_class="ACTIONABLE", reasons=("LOOKS_GOOD",)), **own(path))
     assert counts(path)[0] == 0
 
 
@@ -263,7 +268,7 @@ def test_19_production_files_are_unchanged(production_db_opens):
     assert hashlib.sha256(PROD_DB.read_bytes()).hexdigest() == PROD_HASH
     assert hashlib.sha256(OCT30.read_bytes()).hexdigest() == OCT30_HASH
     with pytest.raises(RuntimeError, match="production database"):
-        adm.persist(PROD_DB, run(), session_id="S1")
+        adm.persist(PROD_DB, run(), lease=cs.Lease("S1", DAY, 1, "unused"), now=NOW)
     production_db_opens.clear()
 
 

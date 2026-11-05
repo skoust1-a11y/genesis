@@ -7,15 +7,19 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from app.db import crew_journal as cj
+from app.db import crew_session as cs
 from app.db import trade_store
 
 DAY = "2026-11-06"
 CANDLE = "2026-11-06T10:15:00+05:30"
+NOW = datetime.fromisoformat(CANDLE)
+LEASES: dict[Path, cs.Lease] = {}
 LEVELS = {"spot": 23120.0, "stop": 23080.0, "target": 23160.0}
 ROOT = trade_store.ROOT_DIR
 PROD_DB = trade_store.DEFAULT_DB_PATH.resolve()
@@ -36,22 +40,23 @@ def identity(**over):
 def ready(tmp_path):
     path = tmp_path / "journal.db"
     cj.migrate(path)
-    conn = cj.connect(path)
-    conn.execute(
-        "INSERT INTO crew_sessions (session_id, market_day, started_at) VALUES ('S1', ?, ?)", (DAY, CANDLE)
-    )
-    conn.close()
+    LEASES[path] = cs.acquire(path, now=NOW, ttl_seconds=3600)
     return path
 
 
+def own(path):
+    """The session lease and an injected clock inside it."""
+    return {"lease": LEASES[path], "now": NOW}
+
+
 def admit(path, **over):
-    return cj.record_admission(path, session_id="S1", admission_class="ACTIONABLE", reasons=[], **identity(**over))
+    return cj.record_admission(path, **own(path), admission_class="ACTIONABLE", reasons=[], **identity(**over))
 
 
 def open_model(path, **over):
     admission = admit(path, **over)
     opened = cj.open_trade(
-        path, admission_id=admission["admission"]["admission_id"], model_lots=3,
+        path, **own(path), admission_id=admission["admission"]["admission_id"], model_lots=3,
         entry_spot=23100, stop_spot=23080, target_spot=23160,
     )
     return admission, opened
@@ -83,7 +88,7 @@ def test_01_duplicate_signal_replay_after_restart(tmp_path):
     assert first["trade"]["trade_id"] == second["trade"]["trade_id"]
     assert counts(path) == (1, 1, 1)
     with pytest.raises(cj.InvalidTransition, match="does not match"):
-        cj.open_trade(path, admission_id=first["trade"]["admission_id"], model_lots=1,
+        cj.open_trade(path, **own(path), admission_id=first["trade"]["admission_id"], model_lots=1,
                       entry_spot=23100, stop_spot=23080, target_spot=23160)
     assert counts(path) == (1, 1, 1)
 
@@ -123,7 +128,7 @@ def test_03_signal_identity_collision_is_refused(tmp_path):
     conn.close()
     admission = admit(path)
     with pytest.raises(cj.TradeIdCollision):
-        cj.open_trade(path, admission_id=admission["admission"]["admission_id"], model_lots=3,
+        cj.open_trade(path, **own(path), admission_id=admission["admission"]["admission_id"], model_lots=3,
                       entry_spot=23100, stop_spot=23080, target_spot=23160)
     conn = cj.connect(path)
     assert conn.execute("SELECT count(*) FROM crew_trades WHERE signal_id=?", (sid,)).fetchone()[0] == 0
@@ -137,7 +142,7 @@ def test_04_duplicate_admission_returns_the_original(tmp_path):
     assert second["replayed"] is True
     assert second["admission"]["admission_id"] == first["admission"]["admission_id"]
     with pytest.raises(cj.AdmissionConflict):
-        cj.record_admission(path, session_id="S1", admission_class="RESEARCH_ONLY",
+        cj.record_admission(path, **own(path), admission_class="RESEARCH_ONLY",
                             reasons=["CAPITAL_UNAVAILABLE"], **identity())
     assert counts(path)[2] == 1
 
@@ -157,7 +162,7 @@ def test_05_model_entry_commits_trade_and_event_together(tmp_path):
 def test_06_partial_exit_is_atomic(tmp_path):
     path = ready(tmp_path)
     trade_id = open_model(path)[1]["trade"]["trade_id"]
-    result = cj.partial_exit(path, trade_id=trade_id, expected_version=1, reason="2R", lots_after=2,
+    result = cj.partial_exit(path, **own(path), trade_id=trade_id, expected_version=1, reason="2R", lots_after=2,
                              signal_candle="2026-11-06T10:20:00+05:30", index_levels=LEVELS)
     payload = result["event"]["payload"]
     assert result["trade"]["state"] == "PARTIALLY_EXITED"
@@ -173,20 +178,20 @@ def test_07_repeated_partial_exit_does_not_reduce_twice(tmp_path):
     trade_id = open_model(path)[1]["trade"]["trade_id"]
     args = {"trade_id": trade_id, "expected_version": 1, "reason": "2R", "lots_after": 2,
             "signal_candle": "2026-11-06T10:20:00+05:30", "index_levels": LEVELS, "idempotency_key": "partial-1"}
-    first = cj.partial_exit(path, **args)
-    second = cj.partial_exit(path, **args)
+    first = cj.partial_exit(path, **own(path), **args)
+    second = cj.partial_exit(path, **own(path), **args)
     assert first["replayed"] is False and second["replayed"] is True
     assert second["trade"]["model_lots_open"] == 2 and second["trade"]["version"] == 2
     assert counts(path)[1] == 2
     with pytest.raises(cj.InvalidTransition, match="different partial"):
-        cj.partial_exit(path, **{**args, "lots_after": 1})
+        cj.partial_exit(path, **own(path), **{**args, "lots_after": 1})
     assert counts(path)[1] == 2
 
 
 def test_08_full_exit_is_atomic(tmp_path):
     path = ready(tmp_path)
     trade_id = open_model(path)[1]["trade"]["trade_id"]
-    result = cj.exit_trade(path, trade_id=trade_id, expected_version=1, reason="stop",
+    result = cj.exit_trade(path, **own(path), trade_id=trade_id, expected_version=1, reason="stop",
                            signal_candle="2026-11-06T11:00:00+05:30", index_levels={"spot": 23080.0})
     assert result["trade"]["state"] == "CLOSED" and result["trade"]["model_lots_open"] == 0
     assert result["trade"]["execution_state"] == "NONE"
@@ -200,8 +205,8 @@ def test_09_repeated_full_exit_returns_the_existing_close(tmp_path):
     trade_id = open_model(path)[1]["trade"]["trade_id"]
     args = {"trade_id": trade_id, "reason": "stop", "signal_candle": "2026-11-06T11:00:00+05:30",
             "index_levels": {"spot": 23080.0}}
-    first = cj.exit_trade(path, expected_version=1, **args)
-    second = cj.exit_trade(path, expected_version=1, reason="other", **{k: v for k, v in args.items() if k != "reason"})
+    first = cj.exit_trade(path, **own(path), expected_version=1, **args)
+    second = cj.exit_trade(path, **own(path), expected_version=1, reason="other", **{k: v for k, v in args.items() if k != "reason"})
     assert first["replayed"] is False and second["replayed"] is True
     assert second["event"]["event_id"] == first["event"]["event_id"]
     assert second["trade"]["state"] == "CLOSED" and counts(path)[1] == 2
@@ -211,7 +216,7 @@ def test_10_version_conflict_writes_nothing(tmp_path):
     path = ready(tmp_path)
     trade_id = open_model(path)[1]["trade"]["trade_id"]
     with pytest.raises(cj.VersionConflict):
-        cj.partial_exit(path, trade_id=trade_id, expected_version=9, reason="2R", lots_after=2,
+        cj.partial_exit(path, **own(path), trade_id=trade_id, expected_version=9, reason="2R", lots_after=2,
                         signal_candle="2026-11-06T10:20:00+05:30", index_levels=LEVELS)
     conn = cj.connect(path)
     row = conn.execute("SELECT state, model_lots_open, version FROM crew_trades").fetchone()
@@ -223,10 +228,10 @@ def test_10_version_conflict_writes_nothing(tmp_path):
 def test_11_invalid_transition_does_not_reopen(tmp_path):
     path = ready(tmp_path)
     trade_id = open_model(path)[1]["trade"]["trade_id"]
-    cj.exit_trade(path, trade_id=trade_id, expected_version=1, reason="stop",
+    cj.exit_trade(path, **own(path), trade_id=trade_id, expected_version=1, reason="stop",
                   signal_candle="2026-11-06T11:00:00+05:30", index_levels={"spot": 23080.0})
     with pytest.raises(cj.InvalidTransition):
-        cj.partial_exit(path, trade_id=trade_id, expected_version=2, reason="2R", lots_after=1,
+        cj.partial_exit(path, **own(path), trade_id=trade_id, expected_version=2, reason="2R", lots_after=1,
                         signal_candle="2026-11-06T11:05:00+05:30", index_levels=LEVELS)
     conn = cj.connect(path)
     assert conn.execute("SELECT state, model_lots_open FROM crew_trades").fetchone()[:] == ("CLOSED", 0)
@@ -268,9 +273,9 @@ def test_13_orphan_event_is_detected_and_not_repaired(tmp_path):
 def test_14_sequence_gap_is_detected_and_not_repaired(tmp_path):
     path = ready(tmp_path)
     trade_id = open_model(path)[1]["trade"]["trade_id"]
-    cj.update_levels(path, trade_id=trade_id, expected_version=1, signal_candle="2026-11-06T10:20:00+05:30",
+    cj.update_levels(path, **own(path), trade_id=trade_id, expected_version=1, signal_candle="2026-11-06T10:20:00+05:30",
                      stop_spot=23090)
-    cj.update_levels(path, trade_id=trade_id, expected_version=2, signal_candle="2026-11-06T10:25:00+05:30",
+    cj.update_levels(path, **own(path), trade_id=trade_id, expected_version=2, signal_candle="2026-11-06T10:25:00+05:30",
                      stop_spot=23100)
     conn = cj.connect(path)
     conn.execute("DROP TRIGGER IF EXISTS crew_events_no_delete")
@@ -286,7 +291,7 @@ def test_15_projection_and_version_mismatches_are_not_repaired(tmp_path):
     path = ready(tmp_path)
     version_id = open_model(path, setup_id="version")[1]["trade"]["trade_id"]
     lots_id = open_model(path, setup_id="lots")[1]["trade"]["trade_id"]
-    cj.partial_exit(path, trade_id=lots_id, expected_version=1, reason="2R", lots_after=2,
+    cj.partial_exit(path, **own(path), trade_id=lots_id, expected_version=1, reason="2R", lots_after=2,
                     signal_candle="2026-11-06T10:20:00+05:30", index_levels=LEVELS)
     conn = cj.connect(path)
     conn.execute("DROP TRIGGER IF EXISTS crew_trades_update")
@@ -338,12 +343,12 @@ def test_17_transaction_rollback_removes_the_trade(tmp_path):
     cj._failpoint = "event"
     try:
         with pytest.raises(cj.InvalidTransition, match="injected event failure"):
-            cj.open_trade(path, admission_id=admission["admission"]["admission_id"], model_lots=3,
+            cj.open_trade(path, **own(path), admission_id=admission["admission"]["admission_id"], model_lots=3,
                           entry_spot=23100, stop_spot=23080, target_spot=23160)
     finally:
         cj._failpoint = None
     assert counts(path) == (0, 0, 1)
-    opened = cj.open_trade(path, admission_id=admission["admission"]["admission_id"], model_lots=3,
+    opened = cj.open_trade(path, **own(path), admission_id=admission["admission"]["admission_id"], model_lots=3,
                            entry_spot=23100, stop_spot=23080, target_spot=23160)
     assert opened["replayed"] is False and counts(path) == (1, 1, 1)
 
@@ -368,28 +373,36 @@ def test_18_process_kill_during_a_transaction_leaves_no_partial_rows(tmp_path):
     conn = cj.connect(path)
     sessions = [row[0] for row in conn.execute("SELECT session_id FROM crew_sessions ORDER BY session_id")]
     conn.close()
-    assert sessions == ["S1"]
+    assert sessions == [LEASES[path].session_id]
 
 
 def test_19_prior_day_trades_expire_without_a_price(tmp_path):
-    path = ready(tmp_path)
-    open_model(path, market_day="2026-11-05", signal_candle="2026-11-05T14:00:00+05:30", setup_id="yesterday")
-    closed = open_model(path, market_day="2026-11-05", signal_candle="2026-11-05T11:00:00+05:30", setup_id="done")
-    cj.exit_trade(path, trade_id=closed[1]["trade"]["trade_id"], expected_version=1, reason="target",
+    path = tmp_path / "journal.db"
+    cj.migrate(path)
+    day1 = datetime.fromisoformat("2026-11-05T14:00:00+05:30")
+    LEASES[path] = cs.acquire(path, now=day1, ttl_seconds=3600)
+    yesterday = {"lease": LEASES[path], "now": day1}
+    for candle, setup in (("2026-11-05T14:00:00+05:30", "yesterday"), ("2026-11-05T11:00:00+05:30", "done")):
+        a = cj.record_admission(path, **yesterday, admission_class="ACTIONABLE", reasons=[],
+                                **identity(market_day="2026-11-05", signal_candle=candle, setup_id=setup))
+        closed = cj.open_trade(path, **yesterday, admission_id=a["admission"]["admission_id"], model_lots=3,
+                               entry_spot=23100, stop_spot=23080, target_spot=23160)
+    cj.exit_trade(path, **yesterday, trade_id=closed["trade"]["trade_id"], expected_version=1, reason="target",
                   signal_candle="2026-11-05T13:00:00+05:30", index_levels={"spot": 23200.0})
+    LEASES[path] = cs.acquire(path, now=NOW, ttl_seconds=3600)
     open_model(path)
-    first = cj.expire_unresolved(path, as_of_day=DAY, at="2026-11-06T09:16:00+05:30")
+    first = cj.expire_unresolved(path, **own(path), at="2026-11-06T09:16:00+05:30")
     assert len(first) == 1 and first[0]["replayed"] is False
     assert first[0]["trade"]["state"] == "EXPIRED_UNRESOLVED" and first[0]["trade"]["model_lots_open"] == 3
     assert set(first[0]["event"]["payload"]) == {"as_of_day", "market_day", "reason"}
     no_money(first[0]["event"]["payload"])
-    again = cj.expire_unresolved(path, as_of_day=DAY, at="2026-11-06T09:16:00+05:30")
+    again = cj.expire_unresolved(path, **own(path), at="2026-11-06T09:16:00+05:30")
     assert len(again) == 1 and again[0]["replayed"] is True
     open_rows = cj.load_open_trades(path)
     assert [row["market_day"] for row in open_rows] == [DAY]
     conn = cj.connect(path)
     closed_row = conn.execute("SELECT state, model_lots_open FROM crew_trades WHERE trade_id=?",
-                              (closed[1]["trade"]["trade_id"],)).fetchone()
+                              (closed["trade"]["trade_id"],)).fetchone()
     assert tuple(closed_row) == ("CLOSED", 0)
     assert conn.execute("SELECT count(*) FROM crew_events WHERE event_type='EXPIRED_UNRESOLVED'").fetchone()[0] == 1
     conn.close()
@@ -427,7 +440,7 @@ def test_21_open_trade_loading_is_read_only(tmp_path):
     path = ready(tmp_path)
     live = open_model(path)[1]["trade"]["trade_id"]
     closed = open_model(path, setup_id="closed")[1]["trade"]["trade_id"]
-    cj.exit_trade(path, trade_id=closed, expected_version=1, reason="stop",
+    cj.exit_trade(path, **own(path), trade_id=closed, expected_version=1, reason="stop",
                   signal_candle="2026-11-06T11:00:00+05:30", index_levels={"spot": 23080.0})
     main = hashlib.sha256(path.read_bytes()).hexdigest()
     rows = _journal_rows(path)
