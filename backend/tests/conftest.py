@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import sqlite3
+import sqlite3.dbapi2
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote, urlparse
 
 import pytest
 from alembic import command
@@ -12,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from app.audit import audit_context
 from app.config import get_settings
+from app.db import trade_store
 from app.db.models import StrategyVersion
 from app.db.session import engine_for, get_live_sessionmaker, get_sessionmaker
 from app.live.store import LiveStore
@@ -54,6 +59,40 @@ Sell an iron condor on NIFTY when implied volatility is rich.
 
 ## Gaps
 """
+
+
+PROD_TRADES_DB = trade_store.DEFAULT_DB_PATH.resolve()
+PROTECTED_DB_FILES = {Path(f"{PROD_TRADES_DB}{s}") for s in ("", "-wal", "-shm", "-journal")}
+_real_connect = sqlite3.connect
+
+
+def _prod_fingerprint() -> dict[str, str]:
+    files = (PROD_TRADES_DB, Path(f"{PROD_TRADES_DB}-wal"))
+    return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in files if p.exists()}
+
+
+def _guarded_connect(database, *args, **kwargs):
+    target = str(database)
+    if target.startswith("file:"):
+        target = unquote(urlparse(target).path)
+    if target and target != ":memory:" and Path(target).resolve() in PROTECTED_DB_FILES:
+        raise RuntimeError(f"Test attempted to open the production trade database: {target}")
+    return _real_connect(database, *args, **kwargs)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _production_trades_db_unchanged():
+    before = _prod_fingerprint()
+    yield
+    assert _prod_fingerprint() == before, f"{PROD_TRADES_DB} changed during the test session"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_trade_store(tmp_path, monkeypatch):
+    """Every test gets a temporary trade store; opening the production file raises."""
+    monkeypatch.setattr(trade_store, "DEFAULT_DB_PATH", tmp_path / "trades.db")
+    monkeypatch.setattr(sqlite3, "connect", _guarded_connect)
+    monkeypatch.setattr(sqlite3.dbapi2, "connect", _guarded_connect)
 
 
 def alembic_config(url: str, live: bool = False) -> Config:

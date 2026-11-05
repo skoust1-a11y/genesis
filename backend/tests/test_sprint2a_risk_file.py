@@ -114,7 +114,7 @@ def _manager(tmp_path: Path, risk: bytes | None) -> tuple[TradeManager, Path]:
 
 
 def _silence_store(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("app.db.trade_store.upsert_trade", lambda trade: "T1")
+    monkeypatch.setattr("app.db.trade_store.upsert_trade", lambda trade, db_path=None: "T1")
 
 
 def _id_in_document(document: dict, trade_id: str) -> bool:

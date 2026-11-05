@@ -16,13 +16,19 @@ from pathlib import Path
 from typing import Any
 
 ROOT_DIR = Path(__file__).resolve().parents[3]
-DB_PATH = ROOT_DIR / "data" / "trades.db"
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+DEFAULT_DB_PATH = ROOT_DIR / "data" / "trades.db"
 
 
-def get_connection() -> sqlite3.Connection:
+def _resolve(db_path: Path | str | None) -> Path:
+    # Read DEFAULT_DB_PATH at call time so tests can redirect it.
+    return Path(db_path) if db_path is not None else DEFAULT_DB_PATH
+
+
+def get_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
     """Returns a SQLite connection configured for concurrent WAL access."""
-    conn = sqlite3.connect(str(DB_PATH), timeout=30.0)
+    path = _resolve(db_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path), timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL;")
     conn.execute("PRAGMA synchronous = NORMAL;")
@@ -30,17 +36,16 @@ def get_connection() -> sqlite3.Connection:
     return conn
 
 
-def init_db():
-    """Initialize the trade store database schema and indices."""
-    with get_connection() as conn:
-        # Check if table exists with old restrictive CHECK constraint
-        schema_row = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='table' AND name='live_and_forward_trades'"
-        ).fetchone()
-        if schema_row and "CHECK(strategy IN" in schema_row[0]:
-            # Migrate to unrestricted strategy column
-            conn.execute("DROP TABLE IF EXISTS live_and_forward_trades;")
+def get_readonly_connection(db_path: Path | str | None = None) -> sqlite3.Connection:
+    """Read-only connection: no schema init, no PRAGMA writes, fails if the file is missing."""
+    conn = sqlite3.connect(f"{_resolve(db_path).resolve().as_uri()}?mode=ro", uri=True, timeout=30.0)
+    conn.row_factory = sqlite3.Row
+    return conn
 
+
+def init_db(db_path: Path | str | None = None):
+    """Initialize the trade store database schema and indices. Never drops data."""
+    with get_connection(db_path) as conn:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS live_and_forward_trades (
                 trade_id TEXT PRIMARY KEY,
@@ -108,9 +113,9 @@ def make_trade_id(date_str: str, time_str: str, strategy: str) -> str:
     return f"{date_str.replace('-', '')}_{time_str.replace(':', '')}_{clean_strat}"
 
 
-def upsert_trade(trade: dict[str, Any]) -> str:
+def upsert_trade(trade: dict[str, Any], db_path: Path | str | None = None) -> str:
     """Upsert a single trade into SQLite."""
-    init_db()
+    init_db(db_path)
     d_str = str(trade.get("Date") or trade.get("date") or "")[:10]
     t_str = str(trade.get("Time") or trade.get("time") or "")
     strat = str(trade.get("Strategy") or trade.get("strategy") or "").strip()
@@ -199,7 +204,7 @@ def upsert_trade(trade: dict[str, Any]) -> str:
     lookout_stat = str(trade.get("Lookout Status") or trade.get("lookout_status") or "TRIGGERED")
     thesis_val = json.dumps(trade.get("thesis")) if isinstance(trade.get("thesis"), dict) else str(trade.get("thesis") or "")
 
-    with get_connection() as conn:
+    with get_connection(db_path) as conn:
         conn.execute("""
             INSERT INTO live_and_forward_trades (
                 trade_id, date, time, strategy, setup, side, status,
@@ -252,10 +257,12 @@ def upsert_trade(trade: dict[str, Any]) -> str:
     return trade_id
 
 
-def get_all_trades(since: str = "2026-10-15") -> list[dict[str, Any]]:
-    """Retrieve trades filtered chronologically with frontend and API compatible keys."""
-    init_db()
-    with get_connection() as conn:
+def get_all_trades(since: str = "2026-10-15", db_path: Path | str | None = None) -> list[dict[str, Any]]:
+    """Retrieve trades filtered chronologically with frontend and API compatible keys. Read-only."""
+    if not _resolve(db_path).exists():
+        return []
+    conn = get_readonly_connection(db_path)
+    try:
         cursor = conn.execute("""
             SELECT * FROM live_and_forward_trades
             WHERE date >= ?
@@ -273,6 +280,8 @@ def get_all_trades(since: str = "2026-10-15") -> list[dict[str, Any]]:
             d["option"] = d.get("option_contract", "")
             formatted.append(d)
         return formatted
+    finally:
+        conn.close()
 
 
 def compute_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
@@ -343,9 +352,9 @@ def compute_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def sync_from_existing_sources():
+def sync_from_existing_sources(db_path: Path | str | None = None):
     """Migrate all historical forward trades and live executions into SQLite."""
-    init_db()
+    init_db(db_path)
     import openpyxl
 
     excel_file = ROOT_DIR / "trades" / "live_and_forward_trades.xlsx"
@@ -359,7 +368,7 @@ def sync_from_existing_sources():
             for r in rows[1:]:
                 if any(r):
                     t = dict(zip(header, r))
-                    upsert_trade(t)
+                    upsert_trade(t, db_path)
                     count += 1
 
     # Also merge live executed trades file
@@ -368,12 +377,12 @@ def sync_from_existing_sources():
         try:
             live_list = json.loads(json_file.read_text())
             for t in live_list:
-                upsert_trade(t)
+                upsert_trade(t, db_path)
                 count += 1
         except Exception as e:
             print(f"⚠️ Error reading live_executed_trades.json: {e}")
 
-    print(f"✅ SQLite Trade Store synchronized: {count} entries indexed into {DB_PATH}")
+    print(f"✅ SQLite Trade Store synchronized: {count} entries indexed into {_resolve(db_path)}")
 
 
 if __name__ == "__main__":

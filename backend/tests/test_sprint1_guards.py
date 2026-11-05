@@ -29,7 +29,7 @@ def _exit(points: float = 20.0, r: float = 0.8) -> ExitDecision:
 
 
 def test_unpriced_exit_leaves_rupees_null_and_reserve_unchanged(tmp_path, monkeypatch):
-    monkeypatch.setattr("app.db.trade_store.upsert_trade", lambda trade: "T1")
+    monkeypatch.setattr("app.db.trade_store.upsert_trade", lambda trade, db_path=None: "T1")
     ja = JournalAgent(trades_dir=tmp_path / "trades", db_path=tmp_path / "trades.db")
     ja.save_active_trades({
         "T1": {"trade_id": "T1", "lots": 2, "status": "OPEN", "milestones_hit": []},

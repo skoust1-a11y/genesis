@@ -32,7 +32,8 @@ class JournalAgent:
     ) -> None:
         self.trades_dir = trades_dir or Path("trades")
         self.trades_dir.mkdir(parents=True, exist_ok=True)
-        self.db_path = db_path or Path("data/trades.db")
+        # None means trade_store.DEFAULT_DB_PATH (repo-root data/trades.db), independent of CWD.
+        self.db_path = db_path
         self.load_failed = False
 
     def _get_active_file(self, date_str: str | None = None) -> Path:
@@ -147,7 +148,7 @@ class JournalAgent:
         # Persist open trade to SQLite SSOT
         try:
             from app.db import trade_store
-            trade_store.upsert_trade(trade_data)
+            trade_store.upsert_trade(trade_data, self.db_path)
         except Exception as se:
             logger.debug(f"SQLite trade_store entry upsert notice: {se}")
 
@@ -207,7 +208,7 @@ class JournalAgent:
         # Upsert directly to SQLite SSOT
         try:
             from app.db import trade_store
-            trade_store.upsert_trade(trade_to_save)
+            trade_store.upsert_trade(trade_to_save, self.db_path)
         except Exception as e:
             logger.debug(f"SQLite trade_store upsert notice: {e}")
 

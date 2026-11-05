@@ -47,7 +47,7 @@ def main() -> None:
     if not db.exists():
         print("No trades database. The veto is not wired.")
         return
-    conn = sqlite3.connect(db)
+    conn = sqlite3.connect(f"{db.resolve().as_uri()}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     if "live_and_forward_trades" not in tables:
