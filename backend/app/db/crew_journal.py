@@ -725,7 +725,7 @@ def record_admission(
 def open_trade(
     db_path: Path | str, *, lease: Lease, admission_id: str, model_lots: int, entry_spot: float,
     stop_spot: float, target_spot: float, contract: str | None = None, expiry: str | None = None,
-    lot_size_ref: int | None = None, now: datetime | None = None,
+    lot_size_ref: int | None = None, execution_policy: str | None = None, now: datetime | None = None,
 ) -> dict:
     """Open one TRACKING trade and its MODEL_ENTRY from this session's admission, or return the existing trade."""
     lots = _pos_int("model_lots", model_lots)
@@ -769,6 +769,8 @@ def open_trade(
             payload["contract"] = contract
         if expiry is not None:
             payload["expiry"] = expiry
+        if execution_policy is not None:
+            payload["execution_policy"] = _text(execution_policy)
         _reject_forbidden(payload)
         conn.execute(
             "INSERT INTO crew_trades (trade_id, signal_id, admission_id, admission_class, market_day,"
@@ -1036,10 +1038,14 @@ def check_consistency(db_path: Path | str) -> list[dict]:
     """
     conn = connect_readonly(db_path)
     try:
-        trades = [dict(row) for row in conn.execute("SELECT * FROM crew_trades ORDER BY trade_id")]
-        events = [dict(row) for row in conn.execute("SELECT * FROM crew_events ORDER BY trade_id, seq")]
+        return _consistency_findings(conn)
     finally:
         conn.close()
+
+
+def _consistency_findings(conn: sqlite3.Connection) -> list[dict]:
+    trades = [dict(row) for row in conn.execute("SELECT * FROM crew_trades ORDER BY trade_id")]
+    events = [dict(row) for row in conn.execute("SELECT * FROM crew_events ORDER BY trade_id, seq")]
     trade_ids = {trade["trade_id"] for trade in trades}
     grouped: dict[str, list[dict]] = {}
     findings = []

@@ -201,7 +201,7 @@ def persist(db_path: Path | str, admission: Admission, *, lease: cj.Lease, now: 
 
 def open_research_trade(db_path: Path | str, persisted: dict, *, lease: cj.Lease, model_lots: int,
                         entry_spot: float, stop_spot: float, target_spot: float,
-                        now: datetime | None = None) -> dict:
+                        execution_policy: str | None = None, now: datetime | None = None) -> dict:
     """Open a hypothetical model trade from a stored RESEARCH_ONLY admission. Not an order."""
     stored = persisted["admission"]
     if stored["class"] != "RESEARCH_ONLY":
@@ -213,7 +213,7 @@ def open_research_trade(db_path: Path | str, persisted: dict, *, lease: cj.Lease
         stop_spot=stop_spot, target_spot=target_spot,
         contract=contract["tradingsymbol"] or contract["provider_instrument_id"]
         or f"{contract['underlying']} {contract['expiry']} {contract['strike']:g} {contract['option_type']}",
-        expiry=contract["expiry"], lot_size_ref=contract["lot_size"],
+        expiry=contract["expiry"], lot_size_ref=contract["lot_size"], execution_policy=execution_policy,
     )
 
 

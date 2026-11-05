@@ -117,20 +117,21 @@ def release(db_path: Path | str, lease: Lease, *, reason: str = "RELEASED", now:
 
 
 def recover(db_path: Path | str, lease: Lease, *, now: datetime | None = None) -> dict:
-    """Startup recovery, run by the lease holder in one transaction after a journal consistency check.
+    """Startup recovery, run by the lease holder in one transaction that begins with the consistency check.
 
     Prior-day open trades become EXPIRED_UNRESOLVED (no price). SENDING publications of other sessions become
     UNKNOWN (never resent). Today's open trades owned by another session are reported in ``orphaned_open`` and
     left untouched: the journal cannot transfer a trade's owner, and no price may be invented.
-    Raises ``ConsistencyError`` before writing anything if the journal is inconsistent.
+    Raises ``ConsistencyError`` and writes nothing if the journal is inconsistent. The check holds the write
+    lock, so no writer (fenced or not) can commit between the check and the recovery.
     """
     stamp = cj._ist(now)
     at = stamp.isoformat()
-    findings = cj.check_consistency(db_path)
-    if findings:
-        raise cj.ConsistencyError(findings)
 
     def op(conn):
+        findings = cj._consistency_findings(conn)
+        if findings:
+            raise cj.ConsistencyError(findings)
         expired = cj._expire_unresolved(conn, lease.market_day, cj._candle(at))
         inflight = ob._recover_inflight(conn, lease.session_id, at)
         orphaned = conn.execute(
