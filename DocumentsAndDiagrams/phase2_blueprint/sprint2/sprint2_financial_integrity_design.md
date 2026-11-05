@@ -1,6 +1,6 @@
 # Sprint 2 financial integrity design
 
-Date: 5 Nov 2026. Design only. Nothing here is implemented. Automated live trading stays off. No second order manager. No new broker adapter. Historical journal rows are not rewritten. `trades/daily_risk_config.json` is not edited by this design pass.
+Date: 5 Nov 2026. Corrected the same day for reserve ownership, the loss-count rule, the S2-V3 checklist, and the `insufficient_data` token. Corrected again the same day for loss-count lifetime and atomic reserve posting. Design only. Nothing here is implemented. Automated live trading stays off. No second order manager. No new broker adapter. Historical journal rows are not rewritten. `trades/daily_risk_config.json` is not edited by this design pass.
 
 The 4 Nov draft of this file treated an LTP as a fill and kept three lots of a ₹10 option under a ₹1,000 premium budget. Both are wrong. This file replaces that draft.
 
@@ -50,11 +50,12 @@ A `.env` override of any rate changes the result. The test builds the profile th
 2. Broker-realized gross and net exist only when every contributing execution has `price_kind="broker"`, a broker execution id, a positive quantity, and a positive price. If any of those is missing, broker-realized fields stay null. That is fail-closed.
 3. Paper-realized fields exist only for executions with `price_kind="paper"` and `simulated=true`. They do not move the reserve.
 4. Estimated unrealized P&L uses a market reference on open quantity. It is not realized. It does not move the reserve or `base_capital`.
-5. `safety_wall_reserve` changes only inside `RiskAgent.record_trade_outcome`, and only when `pnl_method=="broker_premium_net"` and the trade id has not already been applied. The number 213954.1 is not recomputed and not deleted.
+5. `safety_wall_reserve` changes only inside `RiskAgent.record_trade_outcome`, and only when `pnl_method=="broker_premium_net"`, the broker-confirmed net is strictly positive, and that `trade_id` is not already in `reserve_posted_for`. The new balance and that id are one atomic replace of the risk file. A credit without the id, or the id without the credit, is not a successful post. A second call for the same `trade_id` does not credit the reserve. A negative net does not reduce it and does not increase it. A zero net does not change it. Paper, simulated, estimated, and unpriced outcomes do not change it. `SafetyWallAgent.process_daily_pnl` is not a reserve writer: the Safety Wall state file `trades/safety_wall_state.json` stays unchanged for unpriced rows, paper nets, and a `broker_premium_net` row. Passing `broker_premium_net` through any path other than `record_trade_outcome` does not update the reserve. The number 213954.1 is not recomputed and not deleted.
 6. `effective_capital` is not an input. New saves omit it. Readers that still find it on an old file ignore it. Nothing replaces it with `base + reserve` under another name.
 7. A failed read of the risk file, the active journal, or the executed log does not write a replacement.
 8. Old rows keep their bytes. A missing `pnl_method` with a numeric `pnl_rupees` is labeled `index_points_x_0.5` in memory only and is not added to the reserve.
-9. Derived P&L is a pure function of the immutable execution list. It is not a second source of truth. Recomputing it must not post the reserve twice.
+9. Derived P&L is a pure function of the immutable execution list. It is not a second source of truth. Recomputing it must not post the reserve or the loss count. Posting is the risk-file marker, not the execution list.
+10. `daily_losses_count` increments only for a broker-confirmed net strictly below zero, once per `trade_id`, in the same atomic replace as `loss_counted_trade_ids`. A win, a positive `realized_r`, `is_win`, a zero net, and paper, simulated, estimated, and unpriced outcomes do not change it. It resets only when `begin_session` successfully writes a new `session_date`. The marker set survives that reset. `max_daily_losses` is the count threshold. The rupee risk budget and the −2.0R breaker are other controls.
 
 ## Price categories
 
@@ -112,7 +113,7 @@ Worked partial. One order book, slippage ignored in the gross line:
 
 Charges for the matched pair are one `leg_costs` call on the matched slices, not on the still-open quantity. The open slice has entry charges only, and those stay in the cost of the open lot until it closes. Estimated unrealized on the remainder uses a reference price and is not added to the closed gross.
 
-Restart: load the execution list and recompute. The reserve moves only on a transition into `broker_matched` for that `trade_id`, recorded as `reserve_posted_for`. A second boot sees the marker and does not add the net again.
+Restart: load the execution list and recompute derived P&L. Recomputing P&L is daily P&L accounting, not a reserve posting and not a loss-count posting. The reserve moves only when `record_trade_outcome` commits a new positive `broker_premium_net` for that `trade_id` into `reserve_posted_for` in the same atomic replace as the new `safety_wall_reserve`. The loss count moves only when that function commits a new negative broker-confirmed net into `loss_counted_trade_ids` in the same atomic replace as the new `daily_losses_count`. A second boot loads those markers and does not apply either effect again. `process_daily_pnl` does not set either marker and does not move either reserve.
 
 `record_exit` today always marks the whole trade `CLOSED` and never stores a partial premium. Liquidity-hop partials stay index points and stay unpriced. Do not invent a premium for booked lots. A hop that has no execution remains `index_points_not_priced`.
 
@@ -144,7 +145,38 @@ All five can be null. Null is not zero.
 
 Paper net is paper gross minus paper charges. It is stored and never passed to the reserve.
 
-Index `realized_points` and `realized_r` stay beside the option figures. They remain the inputs to the existing daily R circuit breaker. They are not rupees.
+Index `realized_points` and `realized_r` stay beside the option figures. They remain the inputs to the existing daily R circuit breaker. They are not rupees and they do not increment `daily_losses_count`.
+
+## Losing trades, the loss count, and rupee loss limits
+
+Four different controls. This specification removes the ₹500 loss stand-in. A loss is not "₹500 or worse," and the loss count is not a rupee limit and not the cumulative R breaker.
+
+1. A losing trade is one broker-confirmed realized net strictly below zero. Magnitude does not matter. A positive net is not a losing trade. A zero net is not a losing trade. A paper net, a simulated outcome, an estimated unrealized figure, and an unpriced row are not losing trades. `realized_r <= -0.5` does not make a trade a losing trade. A rupee floor, including −500, does not make a trade a losing trade.
+2. `daily_losses_count` is the daily loss count: how many unique losing trades have been durably counted in the current session. It increments by one only when the net is strictly below zero, the trade's journal `date_str` equals the current `session_date`, and `trade_id` is not already in `loss_counted_trade_ids`. It does not decrement. A later winning trade does not clear it. A positive `realized_r` does not clear it. `is_win` does not clear it and does not decide the increment. A positive or zero broker-confirmed net does not change it. Paper, simulated, estimated, and unpriced outcomes do not change it.
+3. The daily loss-count threshold is the existing `max_daily_losses` (source default 2). At that count, `evaluate_order` rejects. The threshold counts losing trades. It is not a rupee amount. It is not `daily_cumulative_r`.
+4. The rupee-denominated daily loss limit is the risk budget `base_capital * risk_fraction`. At the documented defaults that is 1,000, and it caps planned loss on a new entry. It does not read or write `daily_losses_count`. `daily_cumulative_r` at or below −2.0R is the index-point circuit breaker. It still accumulates `realized_r`. It does not decide a losing trade, it does not increment the loss count, and it does not reset the loss count.
+
+`daily_losses_count` resets to 0 only when `begin_session` successfully establishes a `session_date` that was not already stored. A missing `session_date` on a readable file is that case: the first successful save of the new date resets the count once. A failed `begin_session` does not reset the count and does not write. It leaves the previous `session_date` in place, so a trade dated today does not increment that previous count. A repeated `begin_session` for the same `session_date` does not reset the count. `reset_daily_counters` stays deleted. It is not a second reset.
+
+`is_win` and `realized_r` do not change `safety_wall_reserve`. A mixed outcome is split: a negative broker net increments the count once and does not credit the reserve; its `realized_r` still adds into `daily_cumulative_r`. A positive broker net credits the reserve once and does not change the count.
+
+### Sprint 1 test this specification supersedes
+
+Sprint 1 source zeros `daily_losses_count` when `is_win` or `realized_r > 0` (`risk_agent.py` `record_trade_outcome`). `backend/tests/test_sprint1_guards.py` `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` asserts that clear. After `record_trade_outcome(is_win=False, pnl_rupees=None, realized_r=-1.0)` it calls `record_trade_outcome(is_win=True, pnl_rupees=None, realized_r=0.4)` and expects `daily_losses_count == 0`. The same test then expects two unpriced `realized_r=-0.8` calls to drive the count to the lock. Those expectations are Sprint 1 source. The corrected specification supersedes them. S2-02 updates the outcome assertions in that test. This design pass does not edit the test. The same test's successful date change (count becomes 0), same-date keep, and failed-save restore remain required.
+
+## Durable loss-count marker
+
+`loss_counted_trade_ids` is the set of `trade_id` values whose negative broker-confirmed net has been committed. It is stored in `trades/daily_risk_config.json` in the same document as `daily_losses_count`. `record_trade_outcome` is the only function that adds an id.
+
+The new count and the new id are committed by one atomic replace. If the replace does not finish, the id is not durable and the count is not incremented, on disk or in memory. The call returns false. There is no successful posting acknowledgement. A retry while `date_str` still equals `session_date` applies once. A second delivery, a replay after process restart, a replay of a historical id already in the set, or an overlapping call does not increment again.
+
+The set lives for the life of the risk file. Sprint 2 does not prune it. `begin_session` does not remove ids when it resets the count. The count is not the length of the set. After a rollover the set still holds earlier sessions, and the count is 0 until a new losing trade in the new session commits.
+
+An id already in the set is not eligible in a later session, even if the caller passes the new `session_date`. An id that was never committed is not eligible once `session_date` has moved on: the journal `date_str` no longer matches, so the call does not increment and does not write a marker without a count. A failed post must be retried before the next successful new `session_date` if it is to count. Sprint 2 does not add an outbox to post it back into the old session.
+
+Duplicate delivery, restart, historical replay, and two overlapping calls use one check. `begin_session` and `record_trade_outcome` take an exclusive `fcntl` lock on `trades/daily_risk_config.json.lock` for the re-read, the decision, and the replace. The lock file is not a ledger. The replaced JSON is the ledger. The lock is local to this host.
+
+`record_trade_outcome` takes the existing `trade_id` and the journal `date_str` the manager already has. It does not invent a second trade identity.
 
 Worked broker check, to be asserted by calling `leg_costs`: buy 65 at 100, sell 65 at 110, `trade_date` set, slippage 0. Gross 650. Net equals `650 - leg_costs(...).total` within one paisa. With code-default schedules on 2026-11-05 that illustration is 589.7966 before paise rounding. The test compares to the function, not to 589.80 typed by hand.
 
@@ -155,7 +187,7 @@ One model. Conflicting definitions today:
 | Name | Today | After Sprint 2 |
 |---|---|---|
 | `base_capital` | 50000 in the risk file. Also the `RiskAgent` default. | Operator capital assumption. Not broker cash. |
-| `safety_wall_reserve` | 213954.1, built from the old unpriced ratchet. | Frozen historical balance. Not cash. Not deployable. Not a lot-tier input. Moves only on a new `broker_premium_net` win, by the existing 50% of that net, once per `trade_id`. Losses do not reduce it in this sprint. The safety-wall loss-absorption branch is removed from the risk-file writer so a paper or estimated number cannot drain it. |
+| `safety_wall_reserve` | 213954.1, built from the old unpriced ratchet. | Frozen historical balance. Not cash. Not deployable. Not a lot-tier input. Changes only inside `RiskAgent.record_trade_outcome`, by `round(net * 0.50, 2)` of a new positive `broker_premium_net`, once per `trade_id`, in the same atomic replace as `reserve_posted_for`. A duplicate outcome does not credit it again. A loss does not reduce it or increase it. A zero net does not change it. `process_daily_pnl` does not credit, debit, or rewrite it, and does not rewrite `trades/safety_wall_state.json`. |
 | `effective_capital` | `base + reserve` (263954.1). | Omitted on the next legitimate save. Ignored if still present. |
 | `cash_inr` | Absent. | Null until a broker cash figure exists. Broker-realized sizing refuses to run while it is null. |
 | `margin_inr` | Absent. | Null. Long option buying has premium exposure, not SPAN, until a broker margin figure exists. |
@@ -163,11 +195,13 @@ One model. Conflicting definitions today:
 | Available funds for a new buy | Not computed. | `assumed_cash_inr` minus open premium exposure minus entry charges, when `cash_inr` is null. When `cash_inr` is present, use that instead and do not use the assumption. |
 | Deployable capital | The milestone walk treats reserve as deployable. | `assumed_cash_inr` or `cash_inr`. Estimated P&L is not added. Closed historical `pnl_rupees` is not added. |
 
-`save_config` writes `base_capital`, `safety_wall_reserve`, `reserve_basis`, `session_date`, the counters, the locks, `cash_inr: null`, `margin_inr: null`, `risk_fraction: 0.02` if absent, and `premium_exposure_budget_inr` only when the file already has it or the operator set it. It does not write `effective_capital`. It does not default `premium_exposure_budget_inr` to 1000. The ₹1,000 figure in the sizing example is an explicit budget, not a hidden default.
+`save_config` is the persistence helper. It does not decide a credit, a debit, or a loss-count change. It writes `base_capital`, `safety_wall_reserve`, `reserve_posted_for`, `reserve_basis`, `session_date`, `daily_losses_count`, `loss_counted_trade_ids`, the other counters, the locks, `cash_inr: null`, `margin_inr: null`, `risk_fraction: 0.02` if absent, and `premium_exposure_budget_inr` only when the file already has it or the operator set it. A file that lacks the two id lists gains empty lists. Ids already present are copied through. Session rollover does not empty them. It does not write `effective_capital`. It does not default `premium_exposure_budget_inr` to 1000. The ₹1,000 figure in the sizing example is an explicit budget, not a hidden default.
+
+The write is one atomic replace. `save_config` writes a temporary file in the same directory, fsyncs it, and `os.replace`s it onto the risk file. Until replace returns, the previous complete document is authoritative. A torn temp file is not the risk file. The balance and its marker are in that one document, so a durable file cannot contain one without the other.
 
 The first good save after a readable load drops `effective_capital`. The reserve number is copied through. A corrupt file is not saved, so this shape change cannot be the thing that destroys a bad file.
 
-Migration: do not recompute 213954.1. Do not replay October trades into it. The missing `session_date` still clears `daily_cumulative_r` 9.65 on the first readable `begin_session`, which is Sprint 1 behaviour, not a second clearing.
+Migration: do not recompute 213954.1. Do not replay October trades into it, into `reserve_posted_for`, or into `loss_counted_trade_ids`. The missing `session_date` still clears `daily_cumulative_r` 9.65 and `daily_losses_count` on the first readable successful `begin_session`, which is the one allowed reset for a new date, not a second clearing. That save does not drop ids that were already in either list.
 
 ## Centralized rupee gate
 
@@ -225,7 +259,7 @@ Index-point R circuit breakers stay. They are not a substitute for this gate.
 
 `on_market_tick` must observe a false `begin_session`. Exits of an already-open trade can still be journaled. They must not be the write that replaces a corrupt risk file. `record_trade_outcome` does not call `save_config` while `config_unreadable`.
 
-`reset_daily_counters` has no caller. Delete it. A second reset that does not set `session_date` is how a lock comes back the wrong way.
+`reset_daily_counters` has no caller. Delete it. A second reset that does not set `session_date` is how a lock comes back the wrong way. `begin_session` resets `daily_losses_count` only inside the successful save that establishes a new `session_date`. The save failure path restores the previous count. Neither path removes `loss_counted_trade_ids` or `reserve_posted_for`.
 
 `JournalAgent.load_failed` becomes a set of paths, not one flag. A good load of another date does not clear a failed path. `save_active_trades` refuses a path that failed.
 
@@ -233,7 +267,25 @@ Index-point R circuit breakers stay. They are not a substitute for this gate.
 
 SQLite upsert runs only after the JSON write that owns the row has succeeded. A SQLite failure does not roll back a JSON row that was written. The JSON row remains the source. The next upsert may retry. A JSON failure does not leave SQLite as the only copy of a new trade.
 
-`SafetyWallAgent.process_daily_pnl` may read. It must not write `daily_risk_config.json`. Reserve movement lives only in `RiskAgent.record_trade_outcome`.
+## Daily P&L reporting and atomic reserve posting
+
+Daily P&L reporting is what the booked trades made or lost. `SafetyWallAgent.process_daily_pnl` may compute that figure and return it. The return is a report. `added_to_reserve` on that report is 0. The reserve balance in the report is the balance it read. The function does not credit, debit, or rewrite reserve ownership. That holds for unpriced rows, for paper nets, for simulated outcomes, and for a `broker_premium_net` row. It does not write `daily_risk_config.json` or `trades/safety_wall_state.json`. It does not add to `reserve_posted_for` or `loss_counted_trade_ids`.
+
+`RiskAgent.record_trade_outcome` is the sole logical owner of reserve accounting and of a loss-count increment. `save_config` only replaces the risk document. It is not an independent accounting owner.
+
+The authoritative persistent representation is that one document. Recovery reads `safety_wall_reserve`, `reserve_posted_for`, `daily_losses_count`, and `loss_counted_trade_ids` from it before another outcome is applied. An id in `reserve_posted_for` means that trade's credit is inside the balance. An absent id was not posted. There is no durable pending flag and no second reserve file.
+
+A positive broker-confirmed net credits `round(net * 0.50, 2)` once per `trade_id`. A zero or negative broker-confirmed net does not credit. Paper, simulated, estimated, and unpriced outcomes do not credit. A loss does not reduce the reserve and does not increase it.
+
+The new balance and the new id are staged together and committed by one atomic replace under the lock in "Durable loss-count marker". One call updates at most one pair. A negative net updates the count and `loss_counted_trade_ids`. A positive net updates the reserve and `reserve_posted_for`. It is forbidden to commit a credit without its id, an id without its credit, a count without its id, or an id without its count.
+
+If the replace fails, the call returns false. Memory is restored from the last complete document. The caller must not treat the outcome as posted. A retry re-reads under the lock. If the first replace had succeeded, the id is present and the retry does not credit or count again. If it had not, the retry commits once. An in-memory addition is not durable.
+
+A crash after the new numbers are computed and before replace leaves the previous document. The next process loads that document and the replay commits once. A crash after replace leaves the new document, marker included. The replay does not commit again. Two overlapping calls take the same lock, so only one of them observes the id as absent.
+
+`reserve_posted_for` is not cleared on session rollover. A committed credit cannot be applied twice after restart or in a later session. The balance is cumulative, so a positive net that has never committed can still commit once later. That later commit is the first credit, not a second one.
+
+`record_trade_outcome` changes `safety_wall_reserve` on the risk file only. It does not gain a write to `trades/safety_wall_state.json`. That state file is not a second reserve ledger. Its reserve stays unchanged for unpriced trades, paper trades, simulated trades, and `broker_premium_net` on every path, including the canonical one. If the risk file is unreadable, the call returns false and writes nothing.
 
 ## Readers
 
@@ -255,7 +307,13 @@ Catalog literals in `app/strategies/analyzer.py` are not journal P&L. Leave them
 - Treat the 213954.1 reserve as cash or recompute it.
 - Backfill old rows with Black-76 or with today's LTP.
 - Change sweep, waterfall, holding, or exit thresholds.
-- Let recency evidence change this gate. The gate does not read conviction.
+- Let recency evidence change this gate. The gate does not read conviction. S2-V3 does not create a journal veto and does not read a shadow label into the journal, the size, or an order.
+- Credit, debit, or rewrite the reserve from `SafetyWallAgent.process_daily_pnl`.
+- Use a ₹500 floor, or `realized_r <= -0.5`, to increment `daily_losses_count`.
+- Clear `daily_losses_count` because a later trade won, because `is_win` is true, or because `realized_r > 0`.
+- Reset `daily_losses_count` when `begin_session` fails or when it is called again for the same `session_date`.
+- Commit a reserve credit or a loss-count increment without its marker in the same atomic replace.
+- Treat `trades/safety_wall_state.json` as the reserve ledger or as the loss-count ledger.
 
 ## Order of work
 

@@ -1,6 +1,6 @@
 # Recency intelligence architecture
 
-Date: 5 Nov 2026. Design only. Not implemented. Shadow mode only. No order path. The PDC Zone + 15 EMA V0 entry, stop, target, window, and re-entry rules are not inputs this layer may edit.
+Date: 5 Nov 2026. Corrected the same day so S2-V3 stays a non-code checklist and the missing-data token is `insufficient_data`. Corrected again the same day so the checklist names the B-26 loss-count and reserve subcases. Design only. Not implemented. Shadow mode only. No order path. The PDC Zone + 15 EMA V0 entry, stop, target, window, and re-entry rules are not inputs this layer may edit.
 
 Financial integrity and this layer are separate. Recency may rank, explain, and recommend WAIT or NO TRADE in a shadow record. It must not change a strategy condition, relax a stop, size a position, or override `RiskAgent.evaluate_order`. A recency failure leaves the existing decision unchanged.
 
@@ -35,8 +35,10 @@ It must not:
 - Relax a stop or close a position.
 - Bypass `RiskAgent`.
 - Call `BrokerBridgeAgent.place_order`, `ExecutionManager`, or `trading/orders.py`.
+- Read a shadow recommendation to alter a journal record.
+- Block trade entry, change position sizing, or send or suppress a broker order.
 
-Activation is a later gate (S2-V3). It is not part of building the shadow log. Even then, activation may only attach the hypothetical label as an additional veto in front of the journal, and only after the financial gate has already approved. It still cannot change the strategy's entry rules or the risk gate's arithmetic.
+S2-V3 is a non-code activation checklist. It is not part of building the shadow log, and it is not a code change. The checklist does not create a journal veto, does not read shadow recommendations to alter journal records, does not block trade entry, does not change position sizing, and does not send or suppress broker orders. Recency outputs stay observational and shadow-only. The checklist names the tests required before any later implementation or activation approval, and it does not stop at B-25: B-01 through B-26 and R-01 through R-14, including B-26 with subcases B-26a through B-26w and the reserve-idempotency rows B-05, B-08, B-09, B-11, B-12, B-14, B-15, B-22, B-26, and R-13. The same list is in the task register. The checklist does not grant the later approval. It does not own loss-count or reserve posting. Those rules stay in the financial design: a win does not clear `daily_losses_count`, and the reserve commits with its marker. `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` still asserts the Sprint 1 win-clear. That assertion is superseded and is updated in S2-02. This layer does not edit the test and does not read or write the risk file.
 
 ## D1 Price-action evidence
 
@@ -71,7 +73,7 @@ Each event record:
 | `severity` | `low`, `medium`, `high`. Scheduled items already named in `SCHEDULED_HIGH_IMPACT_EVENTS` start as high. A headline with no other mark starts as low. |
 | `lifecycle` | `upcoming`, `active`, `decaying`, `expired`. |
 | `confidence` | Band, not a percentage. |
-| `data_quality` | 0 when timestamp or source is missing. Otherwise the reliability band mapped only for ordering inside the shadow log. |
+| `data_quality` | `insufficient_data` when timestamp or source is missing. Otherwise the reliability band, used only for ordering inside the shadow log. Not a numeric score. |
 
 Dedup key: normalized title, source, and a time bucket of 15 minutes. A repeated poll of the same headline is one event. The second copy does not add conviction. A later headline that is a different title is a different event even when the words overlap; correlated-evidence handling down-weights it. It does not delete it.
 
@@ -137,11 +139,11 @@ From the independent evidence visible at `decision_time`:
 - Bullish mass = sum of positive products.
 - Bearish mass = sum of absolute negative products.
 - Conflict = the smaller of the two masses divided by the larger, or null when both are zero.
-- Neutral is the result when both masses are near zero or data quality is insufficient. It is not a third invented score.
+- Neutral is the result when both masses are near zero and data quality is not `insufficient_data`. It is not a third invented score. When data quality is `insufficient_data`, directional classification is `insufficient_data`.
 - Freshness is the freshness of the single strongest piece, plus a count of pieces newer than one half-life.
 - Agreement is "one side holds at least twice the other, and at least two independent pieces". Otherwise the band is `conflicted` or `thin`.
-- Data quality is `insufficient` when any required input timestamp is missing, the newest bar is older than its class half-life by a factor of four, or the function threw.
-- Confidence bands: `low`, `medium`, `high`. Do not emit 73% or any other percentage. `high` requires agreement, data quality not insufficient, and the strongest piece inside one half-life. Otherwise `medium` or `low`.
+- Data quality is `insufficient_data` when any required input timestamp is missing, the newest bar is older than its class half-life by a factor of four, or the function threw. The same token is the directional classification, the position-monitoring state, and the exception-log value.
+- Confidence bands: `low`, `medium`, `high`. Do not emit 73% or any other percentage. `high` requires agreement, data quality is not `insufficient_data`, and the strongest piece inside one half-life. Otherwise `medium` or `low`.
 
 The shadow text answers, in words:
 
@@ -159,7 +161,7 @@ After `TradeManager` has already accepted or rejected a candidate with the exist
 - Record whether 15-minute structure agrees.
 - Record whether a deduped event inside its window agrees, conflicts, or is absent.
 - Record reliability and conflict.
-- Set the hypothetical label. `WOULD_NO_TRADE` when data quality is insufficient is not allowed. Insufficient data sets `WOULD_WAIT` only as a hypothesis. The strategy decision is stored unchanged.
+- Set the hypothetical label. `WOULD_NO_TRADE` when data quality is `insufficient_data` is not allowed. Data quality `insufficient_data` sets `WOULD_WAIT` only as a hypothesis. Directional classification on that record is `insufficient_data`. The strategy decision is stored unchanged.
 
 The hypothetical label is not read by `record_entry`.
 
@@ -173,7 +175,7 @@ On each tick, after `HoldingAgent.evaluate_holding` returns, classify the thesis
 | `stable` | No new independent evidence inside one short half-life. Older structure still present. |
 | `weakening` | Fresh evidence opposes, or momentum slope has deteriorated, and the opposing mass is material. |
 | `invalidated` | A closed bar has broken the swing the thesis named, or a scheduled event in the `active` window contradicts it with severity high and reliability not low. |
-| `insufficient_data` | Timestamps or bars missing. |
+| `insufficient_data` | Timestamps or bars missing. Same token as data quality, directional classification, and the exception log. |
 
 `invalidated` in the shadow log is not an exit. `ExitAgent` and the existing stop remain the only close paths. One new observation cannot close the position. A classification change is recorded. It does not call `record_exit`.
 
@@ -191,16 +193,16 @@ Thesis deterioration and stop-loss execution are different fields in the log. A 
 | Missing price observation | Price-action mass is empty. Class `insufficient_data` if nothing else is usable. |
 | Wrong category | Unknown category contributes 0 directional mass. The raw event stays in the log. |
 | Feed interruption | Last good evidence ages out. No carry-forward of a fresh flag. |
-| Exception in `recency.py` | Catch at the `TradeManager` hook. Log `insufficient_data`. Do not fail the tick. Do not skip the risk gate. |
+| Exception in `recency.py` | Catch at the `TradeManager` hook. Data quality, directional classification, and the exception log are `insufficient_data`. Do not fail the tick. Do not skip the risk gate. |
 
-If freshness cannot be computed, conviction is `low` and data quality is `insufficient`. Never fill a missing age with \(W=1\).
+If freshness cannot be computed, conviction is `low`, data quality is `insufficient_data`, and directional classification is `insufficient_data`. Never fill a missing age with \(W=1\).
 
 ## D8 Validation
 
 Four configurations, same frozen strategy, same costs from `leg_costs`, same bars:
 
 1. Strategy alone. Recency output discarded.
-2. Strategy plus price-action recency as a shadow veto (`WOULD_NO_TRADE` and `WOULD_WAIT` remove the trade in the research book only).
+2. Strategy plus price-action recency scored as a research-book hypothetical (`WOULD_NO_TRADE` and `WOULD_WAIT` are counted as skipped only inside that research report). The report does not alter journal records, block entries, change size, or send or suppress orders.
 3. Strategy plus event recency, same way.
 4. Both.
 
@@ -234,8 +236,8 @@ One JSON object per decision, appended to `trades/recency_shadow.jsonl`:
 
 A test that the hook calls `place_order` fails the sprint. The module does not import `BrokerBridgeAgent` or `ExecutionManager`.
 
-Compare shadow hypotheticals with the frozen strategy on the outcome fields. Do not enable the hypothetical as a veto until that comparison is written down and explicitly approved. Approval is not a document this design can grant to itself.
+Compare shadow hypotheticals with the frozen strategy on the outcome fields. The comparison stays in the research report. S2-V3 does not enable the hypothetical as a veto, does not read it back into the journal, and does not block, resize, send, or suppress. Recency stays observational and shadow-only. Approval is not a document this design can grant to itself.
 
 ## Regression tests the module needs
 
-Named in the acceptance matrix as R-01 through R-12. They are pure-function tests plus one manager test that a shadow exception does not change the action list except for an added log failure field, and does not call a broker.
+Named in the acceptance matrix as R-01 through R-14. They are pure-function tests plus one manager test that a shadow exception does not change the action list except for an added log failure field, and does not call a broker. R-14 checks the non-code S2-V3 checklist, including B-26 with subcases B-26a through B-26w, and checks that no path reads the hypothetical label into the journal, the size, or an order. Recency stays observational and shadow-only. The frozen PDC Zone + 15 EMA V0 rules are not inputs this layer may edit.

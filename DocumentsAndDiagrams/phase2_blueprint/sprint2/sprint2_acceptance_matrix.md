@@ -1,6 +1,6 @@
 # Sprint 2 acceptance matrix
 
-Date: 5 Nov 2026. A row is accepted only when the test exists and passes. A design sentence is not a pass. Sprint 1 tests were not re-run for this document and close none of these rows.
+Date: 5 Nov 2026. Corrected the same day for reserve ownership, the loss-count rule, the S2-V3 checklist, and the `insufficient_data` token. Corrected again the same day for loss-count lifetime and atomic reserve posting. A row is accepted only when the test exists and passes. A design sentence is not a pass. Sprint 1 tests were not re-run for this document and close none of these rows.
 
 Live trading stays disabled in every fixture. No test calls a real broker. Risk and journal fixtures use `tmp_path`. None of these tests open `trades/daily_risk_config.json` or `trades/live_executed_trades.json` from the repo.
 
@@ -11,31 +11,61 @@ Charge rows call `leg_costs`. They do not paste a rupee total as the expected va
 | ID | Task | Setup | Pass |
 |---|---|---|---|
 | B-01 | S2-04 | Risk file bytes are `{`. Construct `RiskAgent` on that path and call `begin_session`, then the manager tick path that would exit. | File bytes unchanged. `begin_session` is false. `evaluate_order` is not approved. `record_trade_outcome` is not called. In-memory reserve is not written back. |
-| B-02 | S2-04, S2-07 | Readable file: reserve 213954.1, `daily_cumulative_r` 9.65, no `session_date`, no `manual_lock`. `begin_session` for a later date. | Reserve is 213954.1. R is 0. `session_date` is the new date. `effective_capital` is absent. `cash_inr` and `margin_inr` are null. `risk_fraction` is 0.02. `premium_exposure_budget_inr` is absent. `reserve_basis` still says the reserve is frozen index-points. |
+| B-02 | S2-04, S2-07 | Readable file: reserve 213954.1, `daily_cumulative_r` 9.65, no `session_date`, no `manual_lock`. `begin_session` for a later date. | Reserve is 213954.1. R is 0. `daily_losses_count` is 0. `session_date` is the new date. Ids already in `loss_counted_trade_ids` or `reserve_posted_for` are still there. `effective_capital` is absent. `cash_inr` and `margin_inr` are null. `risk_fraction` is 0.02. `premium_exposure_budget_inr` is absent. `reserve_basis` still says the reserve is frozen index-points. |
 | B-03 | S2-04 | Same file with `manual_lock` true and `is_safety_wall_locked` true. | Lock stays. Entry rejected. Reserve unchanged. |
-| B-04 | S2-04 | `begin_session` save raises. | Counters restored. Later `evaluate_order` rejected. File from the last good save is unchanged. |
-| B-05 | S2-07 | `SafetyWallAgent.process_daily_pnl` with unpriced rows, with one paper net, and with one `broker_premium_net` row, against a temp risk file that has `session_date`. | Risk file bytes unchanged in all three cases. State-file reserve unchanged on the unpriced and paper calls. |
+| B-04 | S2-04 | `begin_session` save raises. | Counters restored, including `daily_losses_count`. Marker lists unchanged. Later `evaluate_order` rejected. File from the last good save is unchanged. The failed call is not a new session. |
+| B-05 | S2-07 | `SafetyWallAgent.process_daily_pnl` with unpriced rows, with one paper net, and with one `broker_premium_net` row (include a negative net), against a temp risk file that has `session_date`, `loss_counted_trade_ids`, `reserve_posted_for`, and a temp `trades/safety_wall_state.json`. | Risk-file bytes unchanged in all three cases, including both marker lists and `safety_wall_reserve`. State-file reserve unchanged for unpriced rows, for the paper net, and for `broker_premium_net` on this path. `process_daily_pnl` does not credit, debit, or rewrite reserve ownership. It may report daily P&L. `added_to_reserve` is 0. It does not perform reserve accounting. Reserve updates occur only through `RiskAgent.record_trade_outcome`, once per `trade_id` (B-26). A duplicate outcome does not credit the reserve again. A loss does not reduce or increase the reserve. |
 | B-06 | S2-06 | `live_executed_trades.json` bytes are `{`. Close a temp active trade through `record_exit`. | Executed-file bytes unchanged. Function returns `None`. Active trade still present. |
 | B-07 | S2-06 | Load a malformed active file for date A, then a valid file for date B, then save date A. | Date A bytes unchanged. |
-| B-08 | S2-06 | Manager full-close path where `record_exit` returns `None`. | `record_trade_outcome` not called. Open row remains. Reserve unchanged. |
+| B-08 | S2-06 | Manager full-close path where `record_exit` returns `None`. | `record_trade_outcome` not called. Open row remains. Reserve unchanged. `daily_losses_count` unchanged. |
 | B-09 | S2-01 | Append a broker execution, then append it again with the same broker execution id. | One execution stored. Derived gross unchanged by the duplicate. |
 | B-10 | S2-01 | Buy 65 at 10, buy 65 at 12, sell 65 at 11, all `price_kind=broker` with ids. | FIFO closed gross is `(11-10)*65 = 65`. Remainder 65 at 12. Status `PARTIAL`. A replay of the sell id does not change the gross. |
-| B-11 | S2-01, S2-02 | Store `contract_quote` LTP 100 as a reference on an open trade. No execution. | `reference_kind` is `ltp`. No execution is created. Estimated unrealized may be computed. Broker gross, broker net, and reserve are unchanged. `pnl_method` is not `broker_premium_net`. |
-| B-12 | S2-02 | Paper executions, `simulated=true`, buy 65 at 100, sell 65 at 110, dated. | Paper gross is 650. Paper net equals `650 - leg_costs` with settings slippage. `pnl_method` is `paper_premium_net`. Reserve unchanged. |
+| B-11 | S2-01, S2-02 | Store `contract_quote` LTP 100 as a reference on an open trade. No execution. | `reference_kind` is `ltp`. No execution is created. Estimated unrealized may be computed. Broker gross, broker net, and reserve are unchanged. `daily_losses_count` unchanged. `pnl_method` is not `broker_premium_net`. |
+| B-12 | S2-02 | Paper executions, `simulated=true`, buy 65 at 100, sell 65 at 110, dated. | Paper gross is 650. Paper net equals `650 - leg_costs` with settings slippage. `pnl_method` is `paper_premium_net`. Reserve unchanged. `daily_losses_count` unchanged. |
 | B-13 | S2-02 | Same prices as B-12 with `price_kind=broker`, slippage 0, broker execution ids, same date. | Broker gross is 650. Broker net equals `650 - leg_costs` at slippage 0 within 0.01. Charge keys match that `CostBreakdown`. `realized_points` still stored. |
-| B-14 | S2-02 | Broker-shaped execution missing `broker_execution_id`. | Broker gross and broker net are null. Reserve unchanged. |
-| B-15 | S2-02 | `leg_costs` patched to raise on a complete broker round trip. | Net is null. Points kept. Reserve unchanged. |
+| B-14 | S2-02 | Broker-shaped execution missing `broker_execution_id`. | Broker gross and broker net are null. Reserve unchanged. `daily_losses_count` unchanged. |
+| B-15 | S2-02 | `leg_costs` patched to raise on a complete broker round trip. | Net is null. Points kept. Reserve unchanged. `daily_losses_count` unchanged. |
 | B-16 | S2-03 | Normalizer given null `pnl_rupees` and a method. `compute_metrics` given one legacy float and one null broker net. `get_forward_tested_trades` given a crew-shaped active row with no `plan`. Trailing text with no reference premium. | Null stays null and the method is copied. Metrics do not raise. `pnl_status` is `incomplete`. `net_pnl_inr` is null. Response has no 78.67. Trailing body says not priced and has no `risk_points * 4.5` premium. Active parameter file bytes unchanged. |
 | B-17 | S2-05 | `evaluate_order` with explicit `premium_exposure_budget_inr=1000`, entry premium 10, stop premium 8, lot 65, base 50000, `risk_fraction` 0.02, `default_lots` 3, not super-trend. | Approved lots are 1, not 3 and not 0. Quantity 65. Premium exposure 650. `max_loss_rupees` is 650. `planned_loss_rupees` equals 130 plus `leg_costs` of one buy at 10 and one sell at 8 for quantity 65, using the settings profile (slippage included and reported as its own component). Two lots are not returned. |
 | B-18 | S2-05 | Same as B-17 but the candidate is forced to 2 lots before the step-down (budget check on quantity 130). | Not approved at 2 lots. Exposure 1300 is above 1000. |
 | B-19 | S2-05 | Premium budget unset, so available funds are base 50000. Entry 10, stop 8, lot 65, frozen 3, one order. | Approved lots 3. Exposure 1950. Planned gross 390. Planned charges are one `leg_costs` call on quantity 195, not three times the one-lot charge. Planned loss is under 1000. `max_loss_rupees` is 1950 and is not compared with 1000 as if it were the stop. Reserve is not an input. |
 | B-20 | S2-05 | Entry premium 100, stop premium 80, lot 65, base 50000, risk budget 1000, premium budget unset. | Not approved. One lot exposure is 6500, which fits in 50000, and planned gross is `(100-80)*65 = 1300`, which is above 1000 before charges. The rejection reason is the risk budget, not a missing quote. |
 | B-21 | S2-05 | Premium omitted, or stop premium omitted, stop distance 30 index points, `default_lots` 3, reserve large. | Not approved. Lots are not 3. `max_loss_rupees` is null. Lots are not increased by the reserve. |
-| B-22 | S2-02, S2-07 | Estimated unrealized positive, and a paper net positive, start reserve 213954.1. | Reserve unchanged. `assumed_cash` used by the gate is still `base_capital`. It does not rise. |
+| B-22 | S2-02, S2-07 | Estimated unrealized positive, and a paper net positive, start reserve 213954.1. | Reserve unchanged. `daily_losses_count` unchanged. `assumed_cash` used by the gate is still `base_capital`. It does not rise. |
 | B-23 | S2-05 | Search the sizing expression. | `safety_wall_reserve` and `effective_capital` do not appear. `risk_points * 0.5` does not appear in `RiskApproval` construction. |
 | B-24 | S2-07 | Readable save after S2-04. | Document has no `effective_capital`. Lots with a huge reserve and frozen `default_lots` 3 stay 3 before the premium step-down. |
 | B-25 | S2-05 | Source check plus the existing bridge tests. | `live_scanner.py` has no `ExecutionManager`. Live bridge flag is `REJECTED` / `UNSENT`. Shadow module is not required for this row. |
-| B-26 | S2-02 | Positive broker net posted once for a `trade_id`, then `record_trade_outcome` called again for the same id. A second trade id with a negative broker net. | Reserve increases by half the net once. The second call does not add again. The loss increments `daily_losses_count` and does not reduce `safety_wall_reserve`. |
+| B-26 | S2-02, S2-04, S2-07 | The subcases B-26a through B-26w. Each uses a temp risk file. None opens the repo risk file. | B-26 is accepted only when every subcase below passes. A positive broker net credits `round(net * 0.50, 2)` once. A negative broker net increments `daily_losses_count` once. Neither effect is durable without its marker in the same replace. A win does not clear the count. Only a successful new `session_date` resets it. |
+
+### B-26 subcases
+
+`record_trade_outcome` returns false when the replace does not finish. A true return means this `trade_id`'s effect is already durable and this call did not apply it a second time. The credit amount is `round(net * 0.50, 2)`, computed in the test, not typed by hand.
+
+| ID | Task | Setup | Pass |
+|---|---|---|---|
+| B-26a | S2-02 | One `trade_id`, `broker_premium_net` strictly negative, including a loss smaller than 500 and a `realized_r` greater than −0.5. Journal `date_str` equals `session_date`. | `daily_losses_count` increases by 1. Reserve unchanged. The id is in `loss_counted_trade_ids` in that same document. No ₹500 test and no `realized_r` test decided the increment. |
+| B-26b | S2-02 | Deliver the B-26a outcome again in-process. | Count unchanged. Reserve unchanged. The id is listed once. |
+| B-26c | S2-02 | After B-26a, construct a new `RiskAgent` on the same file and deliver the same id. | Count does not increase. Reserve unchanged. |
+| B-26d | S2-02 | After one counted loss, a different `trade_id` with a positive broker net, then a call with `realized_r > 0` that is not a new negative broker net. `is_win=True` on that second call. | Count stays at 1. The positive broker net credits its own id once. `realized_r > 0` and `is_win` do not clear the count. |
+| B-26e | S2-02 | Count is already 1. A new `trade_id` with broker net exactly 0. Another new `trade_id` with broker net strictly positive. | Count stays 1. Zero does not credit the reserve and does not enter `reserve_posted_for`. The positive net does not change the count. |
+| B-26f | S2-02 | Count is already 1. A negative paper net, a negative simulated outcome, a negative estimated unrealized figure, and a negative unpriced row. Include `realized_r <= -0.5` and `pnl_rupees <= -500` with no broker method. | Count stays 1. Reserve unchanged. No new loss-count id. |
+| B-26g | S2-04 | Count is 2 on yesterday's `session_date`. `begin_session` for today succeeds. One new negative broker net for today. `begin_session` for today again. | The first successful new date sets the count to 0 once and leaves both marker lists intact. The new loss makes the count 1. The second `begin_session` does not set it back to 0. |
+| B-26h | S2-04 | `session_date` is already today. Count is 2. `begin_session` for today. | Returns true. Count stays 2. Marker lists unchanged. |
+| B-26i | S2-04 | Count is 2, `session_date` is yesterday, and the save raises. Separately, the risk file is unreadable and `begin_session` returns false. | On the save failure the count stays 2, `session_date` is unchanged, and the file is the last good document. The unreadable file is not replaced and a 0 count is not written. |
+| B-26j | S2-02, S2-04 | A `trade_id` already in `loss_counted_trade_ids`. A successful new `session_date` sets the count to 0. The same id is delivered again, including with the new `session_date` passed in. Also deliver a different id whose journal `date_str` is the old session. | Count stays 0. The rollover did not remove the old id. The old unmarked id is not counted and no loss marker is written for it. |
+| B-26k | S2-02 | One `trade_id`, positive `broker_premium_net`. | Reserve increases by `round(net * 0.50, 2)` once. The id is in `reserve_posted_for` in that same document. Count unchanged. |
+| B-26l | S2-02 | The same positive id again. | Reserve unchanged from B-26k. The id is listed once. |
+| B-26m | S2-02 | New `RiskAgent` on that file, same positive id. | Reserve unchanged. |
+| B-26n | S2-02 | Two overlapping `record_trade_outcome` calls for one new positive `trade_id`. | Reserve increases by half once. The id appears once. |
+| B-26o | S2-02 | A new id with broker net 0, and a new id with broker net negative. | Reserve unchanged. Neither zero nor the loss is in `reserve_posted_for`. The loss id is in `loss_counted_trade_ids` and the count increases by 1. |
+| B-26p | S2-02 | Positive paper, positive simulated, positive estimated, and positive unpriced outcomes. | Reserve unchanged. No reserve marker. Count unchanged. |
+| B-26q | S2-02 | Positive broker net, and the replace fails. Then the same id after replace works, then once more. | The failed call returns false. In-memory reserve equals the last complete document. The id is not durable. The retry credits half once. The further call does not. |
+| B-26r | S2-02 | The new reserve is computed and the object is discarded before replace. A new `RiskAgent` loads the file and the same id is delivered twice. | Loaded reserve is the pre-attempt balance. The first replay credits half once. The second does not. |
+| B-26s | S2-02 | Read the risk file after a successful credit, after a successful loss increment, and after a failed replace. | Each successful document contains the balance and its marker together. No durable file has the new reserve without the id, or the id without that credit. A failed replace leaves the previous complete document. The marker is not in a second file. |
+| B-26t | S2-07 | The B-05 fixtures. | `process_daily_pnl` does not change risk-file bytes, state-file reserve, `safety_wall_reserve`, `reserve_posted_for`, or `loss_counted_trade_ids`. `added_to_reserve` is 0. |
+| B-26u | S2-02 | Two overlapping calls for one new negative `trade_id` whose `date_str` equals `session_date`. | Count increases by 1, not by 2. The id is listed once. Reserve unchanged. |
+| B-26v | S2-02 | Negative broker net, replace fails, then the same id after replace works, then once more. | The failed call returns false and does not leave the count incremented in memory or on disk. The retry increments once. The third delivery does not. |
+| B-26w | S2-02 | The new count is computed and the object is discarded before replace. A new `RiskAgent` loads the file and the same negative id is delivered twice. | Loaded count is the pre-attempt count. The first replay increments once. The second does not. |
 
 ## P1 and P2
 
@@ -46,15 +76,15 @@ Charge rows call `leg_costs`. They do not paste a rupee total as the expected va
 | R-03 | S2-R2 | Two headlines, same normalized title, same source, 10 minutes apart. | One event. Bullish mass does not double. |
 | R-04 | S2-R3 | Previous-day high older than several short half-lives. | Structural weight is at least the configured floor. It is not 0. |
 | R-05 | S2-R3 | Two observations with the same `cluster_id`. | Only the larger absolute piece enters the mass. |
-| R-06 | S2-R4 | A case with agreement and a case with both sides present. | Bands are `low`, `medium`, or `high` only. The payload has no percentage field. |
+| R-06 | S2-R4 | A case with agreement, a case with both sides present, and a case with a required input missing. | Bands are `low`, `medium`, or `high` only. The payload has no percentage field. The missing-input case uses directional classification `insufficient_data`. |
 | R-07 | S2-R5 | Manager candidate the current rules would journal. Shadow label `WOULD_NO_TRADE`. | Journal row still follows the strategy and the rupee gate. Signal entry, stop, and target bytes unchanged by recency. |
 | R-08 | S2-R5, S2-R7 | Import graph of `recency.py`, and a tick with the hook installed. | Module does not import `BrokerBridgeAgent`, `ExecutionManager`, or `trading.orders`. Tick result `orders_sent` is false. |
 | R-09 | S2-R6 | One new opposing observation on an open trade whose stop is not hit. | Exit action is the `ExitAgent` or `HoldingAgent` action already chosen. Recency class does not call `record_exit`. |
 | R-10 | S2-R6 | Fixtures for each class. | Labels are only `strengthening`, `stable`, `weakening`, `invalidated`, `insufficient_data`. `invalidated` does not set `is_fully_closed`. |
-| R-11 | S2-R7 | `assess_entry` raises. | Tick does not raise. Strategy action unchanged. Data quality on the shadow note is `insufficient`. Risk gate result unchanged. |
+| R-11 | S2-R7 | `assess_entry` raises. | Tick does not raise. Strategy action unchanged. Data quality, directional classification, and the exception log on the shadow note are `insufficient_data`. Risk gate result unchanged. |
 | R-12 | S2-R2, S2-V1 | Decision time T. One bar closing after T. One event with `first_observed_at` after T. | Both excluded. A duplicate of an included event adds no weight. |
 | R-13 | S2-V2 | Temp shadow jsonl row and an execution list. Run the outcome job twice. | Outcome fields filled. Second run does not duplicate them. Execution list and reserve file bytes unchanged. |
-| R-14 | S2-V3 | Default settings and the daemon source after the checklist task. | `LIVE_TRADING_ENABLED` default is false. No code path reads the hypothetical label to journal, size, or send an order. |
+| R-14 | S2-V3 | Read the S2-V3 checklist in the task register, the same description in the recency architecture, and the daemon source. This task adds no application code. | The checklist is non-code. It names B-01 through B-26 and R-01 through R-14, including B-26 with subcases B-26a through B-26w, and reserve idempotency B-05, B-08, B-09, B-11, B-12, B-14, B-15, B-22, B-26, and R-13. It does not stop at B-25. `LIVE_TRADING_ENABLED` default is false. No code path reads the hypothetical label to alter a journal record, block an entry, change size, or send or suppress an order. Recency stays observational and shadow-only. |
 
 ## Sprint 1 tests that must still pass
 
@@ -69,12 +99,28 @@ Charge rows call `leg_costs`. They do not paste a rupee total as the expected va
 
 `test_trading_and_post_market_crews.py` expectations that a raw `pnl_rupees` moves nothing must stay, unless the call passes `pnl_method="broker_premium_net"` and a `trade_id` that has not been posted. Updating those tests is part of S2-02, not a silent edit.
 
+### Sprint 1 expectation this specification supersedes
+
+`backend/tests/test_sprint1_guards.py` `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` is not edited by this design pass. Its date-change reset, same-date keep, and failed-save block stay required (B-26g, B-26h, B-26i, B-04).
+
+The outcome assertions in the middle of that test do not stay. After `realized_r=-1.0` it calls `is_win=True, realized_r=0.4` and expects `daily_losses_count == 0`. That is the Sprint 1 win-clear. The corrected specification supersedes it: a later win and a positive `realized_r` do not clear the count (B-26d). The same test's unpriced `realized_r=-0.8` increments are the Sprint 1 count rule, not B-26a. S2-02 updates those outcome expectations. It does not weaken the session assertions.
+
 ## Not acceptance
 
 - The earlier 47-test run.
 - A pytest process that was killed with no summary.
 - A dashboard that shows ₹0 for a null.
 - A reserve that changed because estimated or paper P&L was positive.
+- A state-file reserve or risk-file reserve that `process_daily_pnl` changed after seeing `broker_premium_net`.
+- A second reserve credit for the same `trade_id`.
+- A loss that reduced or increased `safety_wall_reserve`.
+- A `daily_losses_count` move caused by a paper, simulated, estimated, unpriced, zero, or positive net, or by a ₹500 floor, or by `realized_r <= -0.5`.
+- A `daily_losses_count` cleared by a winning trade, by `is_win`, or by `realized_r > 0`.
+- A session rollover that deletes `loss_counted_trade_ids` or `reserve_posted_for`.
+- A loss counted again after restart, after a duplicate, or after session rollover.
+- An acknowledged post whose risk file does not contain the matching marker.
+- An in-memory reserve or count treated as posted when the replace failed.
+- An S2-V3 change that reads the hypothetical label into the journal, blocks an entry, changes size, or sends or suppresses an order.
 - Three lots of a ₹10 option described as inside a ₹1,000 premium-exposure budget.
 - An LTP stored as a broker fill.
 - A recency score that changed an entry, a stop, or a lot count.
@@ -82,4 +128,4 @@ Charge rows call `leg_costs`. They do not paste a rupee total as the expected va
 
 ## Stop
 
-Sprint 2 is not approved to start until this matrix is accepted. After implementation, B-01 through B-26 are the P0 close-out. R-01 through R-14 are the recency and validation close-out. The full `backend/tests` suite is then run once, with `MPLCONFIGDIR` set, from `backend/`, under the safety rules in `sprint1_test_coverage_gaps.md`. The result is quoted only if it finishes. The production risk file mtime must be unchanged.
+Sprint 2 is not approved to start until this matrix is accepted. After implementation, B-01 through B-26 are the P0 close-out. B-26 is closed only when B-26a through B-26w pass. R-01 through R-14 are the recency and validation close-out. S2-V3 names those same ids, including B-26 with subcases B-26a through B-26w and the reserve-idempotency rows, and does not stop at B-25. The full `backend/tests` suite is then run once, with `MPLCONFIGDIR` set, from `backend/`, under the safety rules in `sprint1_test_coverage_gaps.md`. The result is quoted only if it finishes. The production risk file mtime must be unchanged.

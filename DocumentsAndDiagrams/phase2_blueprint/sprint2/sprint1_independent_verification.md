@@ -1,6 +1,6 @@
 # Sprint 1 independent verification
 
-Date: 5 Nov 2026. Authority is the worktree at commit `33706ebad1f6d07921803e559953a70d68ad1194` (`main`, 2026-11-04 23:35:22 +0530, `feat(trading): supervise open positions and fail closed when live inputs are missing`). No application file was edited. No broker order was sent. `trades/daily_risk_config.json` was read and not written.
+Date: 5 Nov 2026. Corrected the same day so this source note does not contradict the Sprint 2 specification. Corrected again the same day for loss-count lifetime. Source verdicts are unchanged. Authority is the worktree at commit `33706ebad1f6d07921803e559953a70d68ad1194` (`main`, 2026-11-04 23:35:22 +0530, `feat(trading): supervise open positions and fail closed when live inputs are missing`). No application file was edited. No broker order was sent. `trades/daily_risk_config.json` was read and not written.
 
 Dirty state at review: untracked `backend/genesis.db`, `backend/live.db`, and `trades/trades.db` only. Those files were not opened. They are not the crew journal. Sprint 1 source and the five earlier Sprint 2 notes are inside that commit, not an uncommitted overlay.
 
@@ -56,6 +56,8 @@ Residual, not on the daemon path: `ExecutionManager.execute_entry` adds `1.0` to
 
 `TradeManager` passes the closed row's `pnl_rupees` and `pnl_method` through. Exit alert text says the option premium is not priced (`alert_agent.py`). `SafetyWallAgent.process_daily_pnl` returns before reserve math when no row has a premium method, and in that branch it does not write `daily_risk_config.json`.
 
+That early return is why the reserve does not move while `PREMIUM_PNL_METHODS` is empty. It is not permission for `process_daily_pnl` to credit, debit, or rewrite the reserve once a premium method exists. Sprint 2 keeps daily P&L accounting in that function and reserve ownership in `RiskAgent.record_trade_outcome` only, including for a `broker_premium_net` row. The state file `trades/safety_wall_state.json` stays unchanged on that path. See B-05. This paragraph records the source.
+
 The formula is still computed. `evaluate_order` sets `max_loss_rupees` to `round(risk_points * 0.5 * quantity, 2)` on approval and to `0.0` on rejection. Nothing compares that field with capital.
 
 ### Readers that still turn a missing rupee into a number
@@ -86,7 +88,11 @@ On a date change, or when `session_date` is missing:
 - `safety_wall_reserve` is not recalculated.
 - The next successful `save_config` writes `session_date` and `reserve_basis`.
 
-A win, or any `realized_r > 0`, zeros the loss count. A loss increments the count only when `realized_r <= -0.5`, or when a priced rupee loss is at or below −500. Two such losses reject the next `evaluate_order`. The same date does not reset. `reset_daily_counters` still has no caller. It would reset without setting `session_date`, and it still calls `save_config`.
+In the audited source, a win, or any `realized_r > 0`, zeros the loss count. A loss increments the count only when `realized_r <= -0.5`, or when a priced rupee loss is at or below −500. Two such losses reject the next `evaluate_order`. The same date does not reset. `reset_daily_counters` still has no caller. It would reset without setting `session_date`, and it still calls `save_config`. That source clear is not the Sprint 2 rule.
+
+The −500 comparison, the `realized_r <= -0.5` increment, and the clear on `is_win` or `realized_r > 0` are Sprint 1 source behavior at this commit. They are not the Sprint 2 specification. A losing trade is a broker-confirmed net strictly below zero. That trade increments `daily_losses_count` once per `trade_id`, together with `loss_counted_trade_ids`, and only while its journal `date_str` equals the current `session_date`. A positive or zero broker-confirmed net does not change the count. Paper, simulated, estimated, and unpriced trades do not. A later win does not clear the count. A positive `realized_r` does not clear it. The count resets only when `begin_session` successfully establishes a new `session_date`. A failed or repeated initialization does not reset it. The marker set is not cleared on that reset, so an old committed id cannot increment a later session. `max_daily_losses` is the count threshold. It is not the rupee risk budget and it is not the −2.0R breaker. The reserve credit is `round(net * 0.50, 2)` once per `trade_id`, committed with `reserve_posted_for` in the same atomic replace of the risk file. `save_config` persists that document and does not decide the credit. `process_daily_pnl` does not. See `sprint2_financial_integrity_design.md`.
+
+`backend/tests/test_sprint1_guards.py` `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` asserts the Sprint 1 clear: after `realized_r=-1.0`, `is_win=True, realized_r=0.4` expects `daily_losses_count == 0`. The corrected specification supersedes that assertion. S2-02 updates the test expectation. This note does not edit the test and does not reclassify T-03. The same test's date-change reset, same-date keep, and failed-save restore match the session rule above.
 
 `trades/daily_risk_config.json` as read on 5 Nov 2026 has no `session_date` and no `manual_lock`. It has `base_capital` 50000, `safety_wall_reserve` 213954.1, `effective_capital` 263954.1, `daily_losses_count` 0, `daily_cumulative_r` 9.65, `is_safety_wall_locked` false, `default_lots` 3. The next daemon tick that reaches `begin_session` will zero 9.65, write today's Kolkata date, and leave 213954.1 in place. The file cannot say whether 9.65 belongs to today. This review did not start the daemon.
 
@@ -148,7 +154,7 @@ The number in the file is `base_capital + safety_wall_reserve` (263954.1 on the 
 |---|---|
 | `RiskAgent.save_config` | Writes the sum on every outcome and session save. |
 | `RiskAgent.evaluate_order` | Uses the sum to walk `LOT_CAPITAL_MILESTONES` only when `frozen_baseline` is false or `default_lots` is null. |
-| `SafetyWallAgent.process_daily_pnl` | Uses its own `base_capital + reserve_balance` the same way and rewrites `daily_risk_config.json`, dropping `session_date`, `manual_lock`, `reserve_basis`, and `daily_cumulative_r`. This write does not run while the premium set is empty. |
+| `SafetyWallAgent.process_daily_pnl` | Uses its own `base_capital + reserve_balance` the same way and rewrites `daily_risk_config.json`, dropping `session_date`, `manual_lock`, `reserve_basis`, and `daily_cumulative_r`. This write does not run while the premium set is empty. Sprint 2 does not let a non-empty set make this function the reserve writer. Daily P&L and reserve ownership stay separate (B-05). |
 | `PreMarketManager` | Does not read `effective_capital`. It reads `default_lots` and `tomorrow_approved_lots`. |
 
 The daemon's `RiskAgent` is `frozen_baseline=True` with `default_lots=3` and `max_super_lots=4`. Lot count on that object is 3, or 4 when the caller passes `is_super_trend`. `effective_capital` does not change that count. A `RiskAgent` built without `default_lots`, and without a file that supplies it, still sizes from the sum. The daemon injects the frozen agent. `EntryAgent`'s fallback `RiskAgent()` is the unfrozen shape if nobody injects the manager's agent.

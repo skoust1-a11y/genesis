@@ -1,6 +1,6 @@
 # Sprint 2 task register
 
-Date: 5 Nov 2026. Do not start until this register is approved. No task places an order, edits `active_strategy_params.json`, rewrites a historical trade, changes a PDC Zone or 15 EMA rule, or enables `LIVE_TRADING_ENABLED`.
+Date: 5 Nov 2026. Corrected the same day for reserve ownership, the loss-count rule, the S2-V3 checklist, and the `insufficient_data` token. Corrected again the same day for loss-count lifetime and atomic reserve posting. Do not start until this register is approved. No task places an order, edits `active_strategy_params.json`, rewrites a historical trade, changes a PDC Zone or 15 EMA rule, or enables `LIVE_TRADING_ENABLED`.
 
 Detail is in `sprint2_financial_integrity_design.md` and `recency_intelligence_architecture.md`. Acceptance ids are in `sprint2_acceptance_matrix.md`.
 
@@ -13,12 +13,12 @@ Complexity: S under a day, M a few days.
 ### S2-04 Risk file fail-closed
 
 - **Now:** A risk file that does not parse is replaced on the next `begin_session`. `save_config` has no `config_unreadable` guard. `on_market_tick` ignores the boolean from `begin_session`. `reset_daily_counters` is unused and would save without `session_date`.
-- **Change:** On a load exception, set `config_unreadable` and `session_blocked`. `save_config` returns without writing. `begin_session` returns false and does not write. `on_market_tick` does not let an exit call `record_trade_outcome` while the flag is set. Delete `reset_daily_counters`.
+- **Change:** On a load exception, set `config_unreadable` and `session_blocked`. `save_config` returns without writing. `begin_session` returns false and does not write. `on_market_tick` does not let an exit call `record_trade_outcome` while the flag is set. Delete `reset_daily_counters`. `save_config` replaces the risk file atomically (temp file, fsync, `os.replace`) and does not decide a credit or a loss count. `begin_session` resets `daily_losses_count` only when that replace successfully establishes a new `session_date`. A failed save restores the count. The same `session_date` does not reset it. Neither path clears `loss_counted_trade_ids` or `reserve_posted_for`. `begin_session` and `record_trade_outcome` share the exclusive lock on `trades/daily_risk_config.json.lock`.
 - **Files:** `backend/app/trading/crew/risk_agent.py` (`_load_config`, `save_config`, `begin_session`, `reset_daily_counters`). `backend/app/trading/crew/manager.py` (`on_market_tick` session branch).
 - **Depends:** none.
 - **Sequence:** first.
-- **Failure:** truncated file bytes unchanged. A save error on a readable rollover restores counters and stays blocked.
-- **Tests:** B-01, B-02, B-03, B-04.
+- **Failure:** truncated file bytes unchanged. A save error on a readable rollover restores counters, including `daily_losses_count`, and stays blocked. Marker lists stay.
+- **Tests:** B-01, B-02, B-03, B-04, B-26g, B-26h, B-26i.
 - **Accept:** unreadable risk file is still unreadable after a tick. Reserve number identical. Entries blocked.
 
 ### S2-06 Journal fail-closed on every save path
@@ -35,13 +35,13 @@ Complexity: S under a day, M a few days.
 ### S2-07 Capital model
 
 - **Now:** `effective_capital = base + reserve`. `evaluate_order` walks milestones with that sum when not frozen. `SafetyWallAgent.process_daily_pnl` rewrites the risk file once a premium method exists, and can drain the reserve on a loss.
-- **Change:** Stop writing `effective_capital`. Ignore it on old files. Add `cash_inr: null`, `margin_inr: null`, `risk_fraction: 0.02` only on a save of a file that loaded. Copy `safety_wall_reserve` through. Delete the milestone walk. `process_daily_pnl` does not open the risk file for writing and does not subtract losses from the reserve. Deployable cash is `base_capital` until `cash_inr` exists. Estimated P&L is not added.
+- **Change:** Stop writing `effective_capital`. Ignore it on old files. Add `cash_inr: null`, `margin_inr: null`, `risk_fraction: 0.02` only on a save of a file that loaded. Copy `safety_wall_reserve` through. Copy `loss_counted_trade_ids` and `reserve_posted_for` through. A file that lacks them gains empty lists. Do not replay historical trades into them. Delete the milestone walk. `process_daily_pnl` may report daily P&L and must not credit, debit, or rewrite reserve ownership. It does not write `daily_risk_config.json` or `trades/safety_wall_state.json` for unpriced rows, paper nets, simulated outcomes, or a `broker_premium_net` row. It does not write either marker list. Reserve updates occur only in `RiskAgent.record_trade_outcome`. Deployable cash is `base_capital` until `cash_inr` exists. Estimated P&L is not added.
 - **Files:** `risk_agent.py` `save_config`, `evaluate_order`. `safety_wall_agent.py` `process_daily_pnl`.
 - **Depends:** S2-04.
 - **Sequence:** after S2-04.
 - **History:** 213954.1 is not recomputed. Open trades keep their lots.
-- **Failure:** unpriced day does not change the reserve. A priced paper result does not change it either (that method is not `broker_premium_net`).
-- **Tests:** B-02, B-05, B-22, B-24.
+- **Failure:** an unpriced day, a paper net, and a `broker_premium_net` row passed only through `process_daily_pnl` leave the state-file reserve and the risk-file reserve unchanged. A loss on that path does not reduce or increase either reserve.
+- **Tests:** B-02, B-05, B-22, B-24, B-26t.
 - **Accept:** reserve is not in the sizing inequality. `effective_capital` is absent from a new save.
 
 ### S2-01 Canonical execution ledger
@@ -52,20 +52,21 @@ Complexity: S under a day, M a few days.
 - **Depends:** S2-04 and S2-06.
 - **Sequence:** after the fail-closed saves.
 - **History:** rows without `executions` stay as they are.
-- **Failure:** duplicate execution does not change derived gross. Restart recomputes from the list and does not post the reserve twice.
+- **Failure:** duplicate execution does not change derived gross. Restart recomputes from the list and does not post the reserve or the loss count. Those posts are the risk-file markers, not the execution list.
 - **Tests:** B-09, B-10, B-11.
 - **Accept:** active JSON and the SQLite summary agree on null versus a real execution. No model premium is written.
 
 ### S2-02 Five P&L books via `leg_costs`
 
 - **Now:** exit always sets `pnl_rupees` null and `index_points_not_priced`.
-- **Change:** Derive estimated unrealized, paper gross, broker gross, charges, and broker net as specified. Broker charges use slippage 0. Paper charges use the settings slippage and store it separately. `broker_premium_net` is the only new member of `PREMIUM_PNL_METHODS`. `record_trade_outcome` may add half of a positive broker net once per `trade_id`. A negative broker net may increment the loss count. The −500 rupee stand-in is not used for this method. `leg_costs` raising leaves net null and does not move the reserve. Points and R stay.
-- **Files:** `journal_agent.py` derivation next to `record_exit`. `engine/costs.py` call only. `risk_agent.py` `record_trade_outcome`. `manager.py` passes the method through and skips the call when the exit did not persist.
+- **Change:** Derive estimated unrealized, paper gross, broker gross, charges, and broker net as specified. Broker charges use slippage 0. Paper charges use the settings slippage and store it separately. `broker_premium_net` is the only new member of `PREMIUM_PNL_METHODS`. `record_trade_outcome` is the logical owner. It credits `round(net * 0.50, 2)` of a positive broker net once per `trade_id`, and it increments `daily_losses_count` once per unique negative broker-confirmed net whose journal `date_str` equals the current `session_date`. The balance and `reserve_posted_for`, or the count and `loss_counted_trade_ids`, commit together in one `save_config` replace under the lock from S2-04. A failed replace returns false, restores memory from the last complete document, and is not a successful post. A retry of an uncommitted same-session outcome commits once. A duplicate, a restart, an overlapping call, or a replay after rollover does not apply a committed id again. A win, `is_win`, and `realized_r > 0` do not clear the count. A zero net does not change it. Paper, simulated, estimated, and unpriced outcomes do not change the count or the reserve. A loss does not reduce or increase `safety_wall_reserve`. The ₹500 loss stand-in is removed. `realized_r <= -0.5` does not increment the count. `leg_costs` raising leaves net null and does not move the reserve. Points and R stay on the R circuit breaker, which is not the loss count and is not `max_daily_losses`. The manager passes the existing `trade_id` and journal `date_str`. It does not treat a false return as posted.
+- **Files:** `journal_agent.py` derivation next to `record_exit`. `engine/costs.py` call only. `risk_agent.py` `record_trade_outcome`. `manager.py` passes the method, `trade_id`, and `date_str` through and skips the call when the exit did not persist.
+- **Test conflict:** `backend/tests/test_sprint1_guards.py` `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` expects a later win (`is_win=True`, `realized_r=0.4`) to clear `daily_losses_count`, and expects unpriced `realized_r=-0.8` calls to increment it. Those outcome assertions are superseded. Update them in this task so a broker-confirmed loss stays counted after a later win, and so an unpriced R does not increment the count. Do not edit that test in the documentation pass. Do not weaken its date-change, same-date, or failed-save assertions.
 - **Depends:** S2-01.
 - **Sequence:** same change as S2-01, or the next commit.
 - **History:** numeric `pnl_rupees` without a method stays on disk and is not a broker method.
-- **Tests:** B-11, B-12, B-13, B-14, B-15, B-22, B-26.
-- **Accept:** the 100 to 110 broker example matches `leg_costs` with slippage 0. An LTP does not.
+- **Tests:** B-11, B-12, B-13, B-14, B-15, B-22, B-26, B-26a, B-26b, B-26c, B-26d, B-26e, B-26f, B-26j, B-26k, B-26l, B-26m, B-26n, B-26o, B-26p, B-26q, B-26r, B-26s, B-26u, B-26v, B-26w.
+- **Accept:** the 100 to 110 broker example matches `leg_costs` with slippage 0. An LTP does not. A negative broker net increments `daily_losses_count` once, with its marker in the same replace, and does not move the reserve. A later win does not clear that count.
 
 ### S2-03 Readers treat null as unknown
 
@@ -129,7 +130,7 @@ Shadow only. These tasks do not change `evaluate_order`, `record_entry` conditio
 - **Files:** `recency.py`.
 - **Depends:** S2-R3.
 - **Tests:** R-06.
-- **Accept:** output has no confidence percentage.
+- **Accept:** output has no confidence percentage. Missing inputs use directional classification `insufficient_data`.
 
 ### S2-R5 Entry shadow
 
@@ -152,7 +153,7 @@ Shadow only. These tasks do not change `evaluate_order`, `record_entry` conditio
 ### S2-R7 Shadow log and failures
 
 - **Now:** no log.
-- **Change:** Append `trades/recency_shadow.jsonl` with the fields in the architecture, including `orders_sent: false`. Exceptions become `insufficient_data` and do not fail the tick.
+- **Change:** Append `trades/recency_shadow.jsonl` with the fields in the architecture, including `orders_sent: false`. On an exception, data quality, directional classification, and the exception log are `insufficient_data`. The tick does not fail.
 - **Files:** `manager.py`, `recency.py`.
 - **Depends:** S2-R5, S2-R6.
 - **Tests:** R-08, R-11.
@@ -176,13 +177,22 @@ Shadow only. These tasks do not change `evaluate_order`, `record_entry` conditio
 - **Tests:** R-13.
 - **Accept:** scoring is idempotent.
 
-### S2-V3 Activation gate
+### S2-V3 Activation checklist
+
+Non-code checklist. It does not create a journal veto, read shadow recommendations to alter journal records, block trade entry, change position sizing, or send or suppress broker orders. Recency outputs stay observational and shadow-only. The checklist names the tests required before any later implementation or activation approval. It does not grant that approval.
 
 - **Now:** nothing reads the hypothetical label.
-- **Change:** This task is a checklist in the readiness note, not a code change that turns the label into a veto. Implementation of a veto waits for a separate approval after S2-V1 and S2-V2. The checklist says: financial tests B-01 through B-25 green, shadow produced no orders, out-of-sample expectancy improved after costs, drawdown not worse, half-life stable, and a person approved the change.
+- **Change:** No application change. Record the checklist below. Do not stop at B-25.
+- **Checklist:**
+  - P0: B-01, B-02, B-03, B-04, B-05, B-06, B-07, B-08, B-09, B-10, B-11, B-12, B-13, B-14, B-15, B-16, B-17, B-18, B-19, B-20, B-21, B-22, B-23, B-24, B-25, B-26.
+  - Reserve idempotency, each required by id: B-05 (state-file reserve unchanged for unpriced, paper, and `broker_premium_net` through `process_daily_pnl`; that function does not credit, debit, or rewrite reserve ownership), B-08, B-09, B-11, B-12, B-14, B-15, B-22, B-26 (once per `trade_id`; subcases B-26a through B-26w; a duplicate does not credit the reserve again; a loss does not reduce or increase the reserve; a win does not clear `daily_losses_count`; the count and the reserve each commit with their marker), R-13.
+  - Recency and validation: R-01, R-02, R-03, R-04, R-05, R-06, R-07, R-08, R-09, R-10, R-11, R-12, R-13, R-14.
+  - Sprint 1 tests that must still pass: `test_broker_bridge_live_flag_is_rejected`, `test_broker_bridge_simulated_fill`, `test_unpriced_exit_leaves_rupees_null_and_reserve_unchanged`, `test_daily_review_does_not_rewrite_active_parameters`, `test_journal_malformed_file_is_not_replaced`, `test_live_scanner_does_not_construct_an_execution_manager`.
+  - `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` keeps its date-change reset, same-date keep, and failed-save block. Its win-clear assertion (`daily_losses_count == 0` after `is_win=True, realized_r=0.4`) is superseded and is updated in S2-02, not by this checklist. This checklist does not edit the test.
+  - Shadow log produced no orders. Out-of-sample expectancy after costs improved. Drawdown not worse. Half-life stable.
 - **Depends:** S2-V1, S2-V2, all P0 tests.
 - **Tests:** R-14.
-- **Accept:** the daemon still cannot send an order. Recency still cannot override the rupee gate.
+- **Accept:** the daemon still cannot send an order. Recency still cannot override the rupee gate, alter a journal record, block an entry, change size, or suppress an order.
 
 ## Not in this register
 

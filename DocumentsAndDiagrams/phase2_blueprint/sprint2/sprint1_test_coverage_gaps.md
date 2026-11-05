@@ -1,6 +1,6 @@
 # Sprint 1 test coverage gaps
 
-Date: 5 Nov 2026. Commit `33706ebad1f6d07921803e559953a70d68ad1194`. The tests named here were not executed in this review. A source reading is not a green suite.
+Date: 5 Nov 2026. Corrected the same day so the named gaps match the Sprint 2 acceptance ids. Corrected again the same day for the loss-count test conflict. Commit `33706ebad1f6d07921803e559953a70d68ad1194`. The tests named here were not executed in this review. A source reading is not a green suite.
 
 ## What was timed, and what was not run
 
@@ -92,7 +92,7 @@ The production risk file and journals stay untouched if every risk and journal t
 
 - Live bridge flag is `REJECTED` / `UNSENT`. Paper flag stays `SIMULATED_FILLED`.
 - Unpriced exit stores null rupees and `index_points_not_priced`. A reserve fixture does not move. The test exists; this review did not run it.
-- Date rollover clears counters and keeps the reserve. The same date does not. Two losses block. A failed `save_config` on rollover blocks. `manual_lock` survives the new date.
+- Date rollover clears counters and keeps the reserve. The same date does not. Two losses block. A failed `save_config` on rollover blocks. `manual_lock` survives the new date. The win-clear inside `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` is Sprint 1 source and is superseded by the Sprint 2 loss-count rule.
 - `run_daily_review` leaves `active_strategy_params.json` byte-identical and writes `approval_status` pending.
 - Missing journal is empty. Malformed and unreadable active journals are not replaced. The manager will not open a trade on a bad journal.
 - `live_scanner.py` source does not contain `ExecutionManager`.
@@ -115,5 +115,9 @@ The production risk file and journals stay untouched if every risk and journal t
 | Premium 100 to 110 against `leg_costs` | Not a Sprint 1 booking. No test. |
 | `ExecutionManager` slippage increment on a rejected live entry | The live test checks status only. |
 | Full API suite, including tests that enable `LIVE_TRADING_ENABLED` for the sandbox | Not run. |
+| `process_daily_pnl` given `broker_premium_net` | No test that `trades/safety_wall_state.json` and the risk file stay unchanged. Sprint 2 acceptance is B-05. The empty premium set only hides the writer. |
+| Loss count uses `realized_r <= -0.5` or `pnl_rupees <= -500`, and a later win clears it | Sprint 1 source. The Sprint 2 specification removes the ₹500 stand-in and the win-clear. No test that a negative broker net increments `daily_losses_count` once per `trade_id` with `loss_counted_trade_ids` in the same replace, or that a duplicate, a restart, a zero, a positive, a paper, a simulated, an estimated, or an unpriced row does not change it, or that a new `session_date` resets it once without dropping the marker. Sprint 2 acceptance is B-26, subcases B-26a through B-26w. |
 
-`test_trading_and_post_market_crews.py` calls `record_trade_outcome` with raw rupee numbers and no premium method and expects the reserve to stay still. That locks the empty `PREMIUM_PNL_METHODS` behaviour. It does not prove a real premium would be booked correctly. When Sprint 2 names a premium method, those tests must be updated in the same change or they will forbid the only legal reserve movement.
+`test_trading_and_post_market_crews.py` calls `record_trade_outcome` with raw rupee numbers and no premium method and expects the reserve to stay still. That locks the empty `PREMIUM_PNL_METHODS` behaviour. It does not prove a real premium would be booked correctly. When Sprint 2 names a premium method, those tests must be updated in the same change or they will forbid the only legal reserve movement. That movement is `round(net * 0.50, 2)` of a new positive `broker_premium_net`, once per `trade_id`, inside `record_trade_outcome` only, in the same atomic replace as `reserve_posted_for`. B-05 forbids `process_daily_pnl` from posting it or rewriting either marker. B-26, including B-26a through B-26w, is the idempotency, loss-count lifetime, and atomic-posting row. The ₹500 comparison in source is not that rule.
+
+`backend/tests/test_sprint1_guards.py` `test_ist_session_resets_on_date_change_and_blocks_when_save_fails` asserts that a subsequent win clears `daily_losses_count`. The calls are `record_trade_outcome(is_win=False, pnl_rupees=None, realized_r=-1.0)` and then `record_trade_outcome(is_win=True, pnl_rupees=None, realized_r=0.4)`, and the test expects `daily_losses_count == 0`. The corrected specification supersedes that assertion. A later win and a positive `realized_r` do not clear the count. The same test also expects unpriced `realized_r=-0.8` calls to increment the count. That is the Sprint 1 increment, not a broker-confirmed loss. S2-02 must update those outcome expectations. This documentation pass does not modify the test. The test's successful new date, same-date keep, and failed-save restore stay.

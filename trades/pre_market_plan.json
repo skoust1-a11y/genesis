@@ -16,14 +16,14 @@
   "otm_steps": 2,
   "dispatch_timestamp": "2026-11-03 02:20:13",
   "latest_directional_thesis": {
-    "primary_bet": "Bearish SSL_EXPANSION to 23,847.5",
-    "targeted_pool": "Trendline Reversal (1M) (23,889.8) & Wall (23,650.0)",
-    "invalidation_price": 23906.65,
-    "invalidation_condition": "5M candle body close above 23,906.7 kills thesis",
+    "primary_bet": "Bearish SSL_EXPANSION to 24,424.8",
+    "targeted_pool": "Breakout & Retest (OR-30) [1M] (24,512.8) & Wall (24,250.0)",
+    "invalidation_price": 24534.8,
+    "invalidation_condition": "5M candle body close above 24,534.8 kills thesis",
     "stagnation_timeout_bars": 6,
-    "gamma_wall_clearance_pts": 239.8,
+    "gamma_wall_clearance_pts": 262.8,
     "thesis_conviction": "SUPER_TREND"
   },
-  "active_trade_id": "TRADE_NIFTY_1793781173800_a3dbdf",
-  "thesis_updated_at": "2026-11-04T14:02:53.803315"
+  "active_trade_id": "TRADE_NIFTY_1793869157232_b15c2d",
+  "thesis_updated_at": "2026-11-05T14:29:17.242219"
 }
