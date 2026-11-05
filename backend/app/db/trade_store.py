@@ -284,50 +284,67 @@ def get_all_trades(since: str = "2026-10-15", db_path: Path | str | None = None)
         conn.close()
 
 
+METRIC_FIELDS = ("r_multiple", "points", "est_pnl_inr", "capital_deployed", "exit_value")
+
+
+def _total(rows: list[dict[str, Any]], key: str, digits: int) -> float | None:
+    """The sum, or None when any row lacks the value: a missing value is unknown, never zero."""
+    values = [t.get(key) for t in rows]
+    return None if any(v is None for v in values) else round(sum(values), digits)
+
+
+def _ratio_pct(num: float | None, den: float | None) -> float | None:
+    return None if num is None or not den else round(num / den * 100, 1)
+
+
 def compute_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compute aggregate KPIs and strategy breakdowns directly from database rows."""
+    """Aggregate KPIs and strategy breakdowns. A total is None when any of its rows lacks the value.
+
+    Win/loss counts use only rows with an r_multiple; ``missing_values`` counts the rows lacking each field.
+    """
     if not trades:
         return {"metrics": {}, "strategy_metrics": {}, "trades": []}
 
-    wins = [t for t in trades if t["r_multiple"] > 0.05]
-    losses = [t for t in trades if t["r_multiple"] < -0.05]
-    be = [t for t in trades if abs(t["r_multiple"]) <= 0.05]
+    scored = [t for t in trades if t.get("r_multiple") is not None]
+    wins = [t for t in scored if t["r_multiple"] > 0.05]
+    losses = [t for t in scored if t["r_multiple"] < -0.05]
+    be = [t for t in scored if abs(t["r_multiple"]) <= 0.05]
 
     tot_trades = len(trades)
-    win_rate = (len(wins) / tot_trades * 100) if tot_trades > 0 else 0.0
+    win_rate = (len(wins) / len(scored) * 100) if scored else 0.0
     win_rate_ex_be = (len(wins) / (len(wins) + len(losses)) * 100) if (len(wins) + len(losses)) > 0 else 0.0
-    tot_r = sum(t["r_multiple"] for t in trades)
-    tot_pts = sum(t["points"] for t in trades)
-    tot_pnl = sum(t["est_pnl_inr"] for t in trades)
-    tot_cap = sum(t["capital_deployed"] for t in trades)
-    tot_exit = sum(t["exit_value"] for t in trades)
-    avg_cap = round(tot_cap / tot_trades, 0) if tot_trades > 0 else 0.0
-    tot_roi = round((tot_pnl / tot_cap) * 100, 1) if tot_cap > 0 else 0.0
+    tot_pnl = _total(trades, "est_pnl_inr", 0)
+    tot_cap = _total(trades, "capital_deployed", 0)
+    avg_cap = round(tot_cap / tot_trades, 0) if tot_cap is not None else None
 
-    gross_profit = sum(t["est_pnl_inr"] for t in wins)
-    gross_loss = abs(sum(t["est_pnl_inr"] for t in losses))
-    pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.9 if gross_profit > 0 else 1.0)
+    gross_profit = _total(wins, "est_pnl_inr", 2)
+    gross_loss = _total(losses, "est_pnl_inr", 2)
+    if tot_pnl is None or gross_profit is None or gross_loss is None:
+        pf = None
+    else:
+        gross_loss = abs(gross_loss)
+        pf = round(gross_profit / gross_loss, 2) if gross_loss > 0 else (99.9 if gross_profit > 0 else 1.0)
 
     strat_metrics: dict[str, Any] = {}
     strategies = sorted(set(t["strategy"] for t in trades))
     for s_name in strategies:
         s_trades = [t for t in trades if t["strategy"] == s_name]
-        s_wins = [t for t in s_trades if t["r_multiple"] > 0.05]
-        s_losses = [t for t in s_trades if t["r_multiple"] < -0.05]
-        s_be = [t for t in s_trades if abs(t["r_multiple"]) <= 0.05]
-        s_pnl = sum(t["est_pnl_inr"] for t in s_trades)
-        s_r = sum(t["r_multiple"] for t in s_trades)
-        s_cap = sum(t["capital_deployed"] for t in s_trades)
+        s_scored = [t for t in s_trades if t.get("r_multiple") is not None]
+        s_wins = [t for t in s_scored if t["r_multiple"] > 0.05]
+        s_losses = [t for t in s_scored if t["r_multiple"] < -0.05]
+        s_be = [t for t in s_scored if abs(t["r_multiple"]) <= 0.05]
+        s_pnl = _total(s_trades, "est_pnl_inr", 0)
+        s_cap = _total(s_trades, "capital_deployed", 0)
         strat_metrics[s_name] = {
             "trades": len(s_trades),
             "wins": len(s_wins),
             "losses": len(s_losses),
             "be": len(s_be),
-            "win_rate": round(len(s_wins) / len(s_trades) * 100, 1) if s_trades else 0.0,
-            "total_r": round(s_r, 2),
-            "capital_deployed": round(s_cap, 0),
-            "net_pnl_inr": round(s_pnl, 0),
-            "roi_pct": round((s_pnl / s_cap) * 100, 1) if s_cap > 0 else 0.0,
+            "win_rate": round(len(s_wins) / len(s_scored) * 100, 1) if s_scored else 0.0,
+            "total_r": _total(s_trades, "r_multiple", 2),
+            "capital_deployed": s_cap,
+            "net_pnl_inr": s_pnl,
+            "roi_pct": _ratio_pct(s_pnl, s_cap),
         }
 
     return {
@@ -338,14 +355,15 @@ def compute_metrics(trades: list[dict[str, Any]]) -> dict[str, Any]:
             "breakevens": len(be),
             "win_rate": round(win_rate, 1),
             "win_rate_ex_be": round(win_rate_ex_be, 1),
-            "total_r": round(tot_r, 2),
-            "total_points": round(tot_pts, 1),
-            "net_pnl_inr": round(tot_pnl, 0),
+            "total_r": _total(trades, "r_multiple", 2),
+            "total_points": _total(trades, "points", 1),
+            "net_pnl_inr": tot_pnl,
             "profit_factor": pf,
-            "total_capital_deployed": round(tot_cap, 0),
-            "total_exit_value": round(tot_exit, 0),
+            "total_capital_deployed": tot_cap,
+            "total_exit_value": _total(trades, "exit_value", 0),
             "avg_trade_capital": avg_cap,
-            "total_roi_pct": tot_roi,
+            "total_roi_pct": _ratio_pct(tot_pnl, tot_cap),
+            "missing_values": {k: n for k in METRIC_FIELDS if (n := sum(t.get(k) is None for t in trades))},
         },
         "strategy_metrics": strat_metrics,
         "trades": trades,

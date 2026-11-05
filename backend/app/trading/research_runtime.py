@@ -370,14 +370,16 @@ def missing_model_entries(path: Path | str) -> list[dict]:
 
 
 def finalized_results(path: Path | str, *, execution_policy: str = EXECUTION_POLICY) -> dict:
-    """Index-point and R totals over CLOSED scanner-v0 model trades of one execution policy, with no premium P&L.
+    """Index-point and R totals per strategy_id over CLOSED scanner-v0 model trades of one execution policy.
 
-    Open, orphaned, expired, quarantined, other-strategy-version and other-policy trades, and admissions with no
-    model entry, are listed and never counted. There is no reconciliation path yet, so they stay excluded.
+    scanner-v0 spans several scanner strategies, so there is no combined total: each strategy_id is its own
+    group. No premium P&L. Open, orphaned, expired, quarantined, other-strategy-version and other-policy trades,
+    and admissions with no model entry, are listed and never counted. There is no reconciliation path yet.
     """
     conn = cj.connect_readonly(path)
     try:
-        trades = [dict(r) for r in conn.execute("SELECT trade_id, state FROM crew_trades ORDER BY trade_id")]
+        trades = [dict(r) for r in conn.execute(
+            "SELECT trade_id, state, strategy FROM crew_trades ORDER BY trade_id")]
         payloads = {(r["trade_id"], r["event_type"]): json.loads(r["payload"]) for r in conn.execute(
             "SELECT trade_id, event_type, payload FROM crew_events WHERE event_type IN ('MODEL_ENTRY', 'MODEL_EXIT')")}
     finally:
@@ -393,14 +395,19 @@ def finalized_results(path: Path | str, *, execution_policy: str = EXECUTION_POL
         elif payloads.get((tid, "MODEL_ENTRY"), {}).get("execution_policy") != execution_policy:
             excluded[tid] = "OTHER_EXECUTION_POLICY"
         else:
-            finalized.append({"trade_id": tid, "model_points": exit_["model_points"], "model_r": exit_["model_r"]})
+            finalized.append({"trade_id": tid, "strategy_id": trade["strategy"],
+                              "model_points": exit_["model_points"], "model_r": exit_["model_r"]})
+    groups = {}
+    for t in finalized:
+        groups.setdefault(t["strategy_id"], []).append(t)
     return {
         "strategy_version": STRATEGY_VERSION, "execution_policy": execution_policy,
         "eligibility": "CLOSED with model_points and model_r; MODEL_ENTRY strategy_version and execution_policy match",
-        "units": "index points and R only", "trades": len(finalized),
-        "model_points": round(sum(t["model_points"] for t in finalized), 2),
-        "model_r": round(sum(t["model_r"] for t in finalized), 2),
-        "finalized": finalized, "excluded": excluded, "missing_model_entries": missing_model_entries(path),
+        "units": "index points and R only",
+        "groups": {sid: {"trades": len(rows), "model_points": round(sum(t["model_points"] for t in rows), 2),
+                         "model_r": round(sum(t["model_r"] for t in rows), 2), "finalized": rows}
+                   for sid, rows in sorted(groups.items())},
+        "excluded": excluded, "missing_model_entries": missing_model_entries(path),
     }
 
 

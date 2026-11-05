@@ -30,10 +30,8 @@ export default function Dashboard() {
   const [forwardMetrics, setForwardMetrics] = useState<{
     total_trades: number;
     win_rate: number;
-    net_pnl_inr: number;
-    total_roi_pct: number;
-    total_capital_deployed: number;
-    total_exit_value: number;
+    net_pnl_inr: number | null;
+    total_roi_pct: number | null;
   } | null>(null);
 
   useEffect(() => {
@@ -43,7 +41,7 @@ export default function Dashboard() {
       Promise.all([
         api<{ positions: Position[]; net_pnl: number; charges: number }>("/api/paper/positions"),
         api<{ orders: Order[] }>("/api/paper/orders"),
-        api<{ metrics: { total_trades: number; win_rate: number; net_pnl_inr: number; total_roi_pct: number; total_capital_deployed: number; total_exit_value: number } }>("/api/trades/forward-tested"),
+        api<{ metrics: { total_trades: number; win_rate: number; net_pnl_inr: number | null; total_roi_pct: number | null } }>("/api/trades/forward-tested"),
       ])
         .then(([p, o, f]) => {
           setPositions(p.positions);
@@ -115,6 +113,10 @@ export default function Dashboard() {
             <p className="text-xs text-zinc-600 max-w-2xl">
               Continuously scanned across 1m, 5m, and 15m timeframes. All setups are valued with true Black-76 option pricing, statutory charges, and dynamic breakeven stops — serving as the automated execution blueprint for future live trading.
             </p>
+            <p role="alert" className="max-w-2xl rounded-md border-2 border-amber-400 bg-amber-50 px-2.5 py-1.5 text-xs font-semibold text-amber-950">
+              ⚠ Legacy ₹ P&amp;L, ROI and capital figures may be estimated or unverified. They are not broker fills or
+              realized returns.
+            </p>
           </div>
 
           <div className="flex flex-wrap items-center gap-3">
@@ -130,13 +132,16 @@ export default function Dashboard() {
                 </div>
                 <div className="px-1">
                   <div className="text-[10px] text-zinc-500 font-medium">Net P&L</div>
-                  <div className={`font-bold text-sm ${forwardMetrics.net_pnl_inr >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
-                    {forwardMetrics.net_pnl_inr >= 0 ? `+${inr(forwardMetrics.net_pnl_inr)}` : inr(forwardMetrics.net_pnl_inr)}
+                  <div className={`font-bold text-sm ${signed(forwardMetrics.net_pnl_inr)}`}>
+                    {forwardMetrics.net_pnl_inr != null && forwardMetrics.net_pnl_inr >= 0 ? "+" : ""}
+                    {inr(forwardMetrics.net_pnl_inr)}
                   </div>
                 </div>
                 <div className="px-1">
-                  <div className="text-[10px] text-zinc-500 font-medium">Option ROI</div>
-                  <div className="font-bold text-emerald-700 text-sm">+{forwardMetrics.total_roi_pct}%</div>
+                  <div className="text-[10px] text-zinc-500 font-medium">Option ROI (est.)</div>
+                  <div className="font-bold text-emerald-700 text-sm">
+                    {forwardMetrics.total_roi_pct == null ? "—" : `${forwardMetrics.total_roi_pct}%`}
+                  </div>
                 </div>
               </div>
             )}

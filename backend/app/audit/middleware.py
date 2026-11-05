@@ -10,6 +10,8 @@ from app.config import get_settings
 
 _SAFE = re.compile(r"[^A-Za-z0-9_.:@\-]")
 MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
+# Trade, journal and report reads: legacy money estimates and research results.
+TOKEN_READS = ("/api/live", "/api/trades/forward-tested", "/api/journal", "/api/reports")
 
 
 def _header(scope, name: bytes) -> str | None:
@@ -27,11 +29,11 @@ def _clean(value: str | None, limit: int) -> str | None:
 
 
 def _needs_token(scope) -> bool:
-    """Once auth is enabled: every mutating request except login, and every /api/live read."""
+    """Once auth is enabled: every mutating request except login, and every TOKEN_READS read."""
     method, path = scope.get("method", "GET"), scope.get("path", "")
     if path == "/api/auth/login":
         return False
-    return method in MUTATING or (method != "OPTIONS" and path.startswith("/api/live"))
+    return method in MUTATING or (method != "OPTIONS" and path.startswith(TOKEN_READS))
 
 
 async def _reject(send, request_id: str, status: int, detail: str) -> None:

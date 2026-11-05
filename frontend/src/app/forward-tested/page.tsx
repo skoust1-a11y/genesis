@@ -18,18 +18,18 @@ type ForwardTrade = {
   exit_spot: number;
   exit_time: string;
   exit_reason: string;
-  points: number;
-  r_multiple: number;
+  points: number | null;
+  r_multiple: number | null;
   option: string;
   expiry: string;
-  entry_premium: number;
-  exit_premium: number;
-  capital_deployed: number;
-  exit_value: number;
-  roi_pct: number;
-  est_pnl_inr: number;
-  lots: number;
-  qty: number;
+  entry_premium: number | null;
+  exit_premium: number | null;
+  capital_deployed: number | null;
+  exit_value: number | null;
+  roi_pct: number | null;
+  est_pnl_inr: number | null;
+  lots: number | null;
+  qty: number | null;
   rationale: string;
   liquidity_pool?: string;
   entry_reason?: string;
@@ -45,14 +45,15 @@ type AggregateMetrics = {
   breakevens: number;
   win_rate: number;
   win_rate_ex_be: number;
-  total_r: number;
-  total_points: number;
-  net_pnl_inr: number;
-  profit_factor: number;
-  total_capital_deployed: number;
-  total_exit_value: number;
-  avg_trade_capital: number;
-  total_roi_pct: number;
+  total_r: number | null;
+  total_points: number | null;
+  net_pnl_inr: number | null;
+  profit_factor: number | null;
+  total_capital_deployed: number | null;
+  total_exit_value: number | null;
+  avg_trade_capital: number | null;
+  total_roi_pct: number | null;
+  missing_values?: Record<string, number>;
 };
 
 type StrategyMetric = {
@@ -61,17 +62,26 @@ type StrategyMetric = {
   losses: number;
   be: number;
   win_rate: number;
-  total_r: number;
-  capital_deployed: number;
-  net_pnl_inr: number;
-  roi_pct: number;
+  total_r: number | null;
+  capital_deployed: number | null;
+  net_pnl_inr: number | null;
+  roi_pct: number | null;
 };
 
 type ApiResponse = {
   metrics: AggregateMetrics;
   strategy_metrics: Record<string, StrategyMetric>;
   trades: ForwardTrade[];
+  warning?: string;
+  data_source?: "sqlite" | "excel_fallback" | "none" | "unavailable";
+  source_warnings?: string[];
 };
+
+/** Signed number, or "—" when the source lacks it (never shown as zero). */
+const signed = (v: number | null | undefined, digits: number, suffix = "") =>
+  v === null || v === undefined ? "—" : `${v >= 0 ? "+" : ""}${v.toFixed(digits)}${suffix}`;
+const tone = (v: number | null | undefined) =>
+  v === null || v === undefined ? "text-zinc-500" : v >= 0 ? "text-emerald-700" : "text-rose-700";
 
 export default function ForwardTestedPage() {
   const [data, setData] = useState<ApiResponse | null>(null);
@@ -111,9 +121,11 @@ export default function ForwardTestedPage() {
     return data.trades.filter((t) => {
       if (selectedStrategy !== "all" && t.strategy !== selectedStrategy) return false;
       if (selectedSide !== "all" && t.side !== selectedSide) return false;
-      if (selectedOutcome === "wins" && t.r_multiple <= 0.05) return false;
-      if (selectedOutcome === "losses" && t.r_multiple >= -0.05) return false;
-      if (selectedOutcome === "be" && Math.abs(t.r_multiple) > 0.05) return false;
+      const r = t.r_multiple;
+      if (selectedOutcome !== "all" && r === null) return false;
+      if (selectedOutcome === "wins" && r !== null && r <= 0.05) return false;
+      if (selectedOutcome === "losses" && r !== null && r >= -0.05) return false;
+      if (selectedOutcome === "be" && r !== null && Math.abs(r) > 0.05) return false;
       return true;
     });
   }, [data, selectedStrategy, selectedOutcome, selectedSide]);
@@ -155,17 +167,34 @@ export default function ForwardTestedPage() {
             <span className="inline-flex items-center rounded-full bg-emerald-100 px-2.5 py-0.5 text-xs font-semibold text-emerald-800">
               ● Forward-Tested (Oct 15 – Present)
             </span>
-            <span className="inline-flex items-center rounded-full bg-blue-100 px-2.5 py-0.5 text-xs font-semibold text-blue-800">
-              Option Value & Capital Deployed Active
+            <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-0.5 text-xs font-semibold text-amber-900">
+              ₹ values estimated · unverified
             </span>
           </div>
           <h1 className="mt-2 text-2xl font-bold tracking-tight text-zinc-900 md:text-3xl">
             NIFTY Forward-Tested Performance & Option Ledger
           </h1>
           <p className="mt-1 text-sm text-zinc-600">
-            Real-time journal of suggested institutional setups with exact option premiums, capital deployed,
-            exit values, and net returns since October 15.
+            Legacy journal of suggested setups since October 15, with estimated option premiums, capital,
+            exit values and returns. These are not broker fills or realized P&amp;L.
           </p>
+          <div role="alert" className="mt-3 rounded-lg border-2 border-amber-400 bg-amber-50 px-4 py-3 text-sm text-amber-950">
+            <p className="font-bold">⚠ Legacy ₹ P&amp;L, ROI and capital figures may be estimated or unverified.</p>
+            <p className="mt-1 text-xs">
+              {data.warning ?? "They are not broker fills or realized returns."} Source:{" "}
+              <span className="font-mono">{data.data_source ?? "unknown"}</span>.{" "}
+              <Link href="/crew-research" className="font-semibold underline">Crew Research</Link>
+            </p>
+            {(data.source_warnings ?? []).map((w) => (
+              <p key={w} className="mt-1 text-xs font-semibold text-rose-800">{w}</p>
+            ))}
+            {metrics.missing_values && Object.keys(metrics.missing_values).length > 0 && (
+              <p className="mt-1 text-xs">
+                Rows missing a value (totals using that field are shown as —):{" "}
+                {Object.entries(metrics.missing_values).map(([k, n]) => `${k} ${n}`).join(", ")}
+              </p>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center gap-3">
@@ -207,14 +236,14 @@ export default function ForwardTestedPage() {
         <div className="rounded-xl border border-zinc-200 bg-white p-3.5 shadow-sm">
           <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Realized R-Gain</div>
           <div className="mt-1.5 flex items-baseline gap-1">
-            <span className="text-xl font-bold text-emerald-600">+{metrics.total_r}R</span>
+            <span className={`text-xl font-bold ${tone(metrics.total_r)}`}>{signed(metrics.total_r, 2, "R")}</span>
           </div>
         </div>
 
         <div className="rounded-xl border border-zinc-200 bg-white p-3.5 shadow-sm">
           <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Index Points</div>
           <div className="mt-1.5 flex items-baseline gap-1">
-            <span className="text-xl font-bold text-zinc-900">+{metrics.total_points}</span>
+            <span className="text-xl font-bold text-zinc-900">{signed(metrics.total_points, 1)}</span>
             <span className="text-[10px] text-zinc-500">pts</span>
           </div>
         </div>
@@ -236,7 +265,7 @@ export default function ForwardTestedPage() {
         <div className="rounded-xl border border-zinc-200 bg-white p-3.5 shadow-sm">
           <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Net Option P&L</div>
           <div className="mt-1.5 flex items-baseline gap-1">
-            <span className={`text-xl font-bold ${metrics.net_pnl_inr >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+            <span className={`text-xl font-bold ${tone(metrics.net_pnl_inr)}`}>
               {inr(metrics.net_pnl_inr)}
             </span>
           </div>
@@ -245,8 +274,8 @@ export default function ForwardTestedPage() {
         <div className="rounded-xl border border-zinc-200 bg-white p-3.5 shadow-sm">
           <div className="text-[11px] font-medium uppercase tracking-wider text-zinc-500">Option ROI / PF</div>
           <div className="mt-1.5 flex items-baseline gap-1">
-            <span className="text-xl font-bold text-emerald-700">+{metrics.total_roi_pct}%</span>
-            <span className="text-[10px] font-semibold text-purple-700">({metrics.profit_factor} PF)</span>
+            <span className={`text-xl font-bold ${tone(metrics.total_roi_pct)}`}>{signed(metrics.total_roi_pct, 1, "%")}</span>
+            <span className="text-[10px] font-semibold text-purple-700">({metrics.profit_factor ?? "—"} PF)</span>
           </div>
         </div>
       </div>
@@ -280,9 +309,7 @@ export default function ForwardTestedPage() {
                 </div>
                 <div>
                   <span className="text-zinc-500">Total R</span>
-                  <div className={`font-semibold ${m.total_r >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
-                    {m.total_r >= 0 ? `+${m.total_r}R` : `${m.total_r}R`}
-                  </div>
+                  <div className={`font-semibold ${tone(m.total_r)}`}>{signed(m.total_r, 2, "R")}</div>
                 </div>
                 <div>
                   <span className="text-zinc-500">Capital</span>
@@ -290,11 +317,9 @@ export default function ForwardTestedPage() {
                 </div>
                 <div>
                   <span className="text-zinc-500">Net Return</span>
-                  <div className={`font-bold ${m.net_pnl_inr >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
+                  <div className={`font-bold ${tone(m.net_pnl_inr)}`}>
                     {inr(m.net_pnl_inr)}
-                    <span className="block text-[10px] font-normal text-zinc-500">
-                      ({m.roi_pct >= 0 ? `+${m.roi_pct}%` : `${m.roi_pct}%`})
-                    </span>
+                    <span className="block text-[10px] font-normal text-zinc-500">({signed(m.roi_pct, 1, "%")})</span>
                   </div>
                 </div>
               </div>
@@ -386,8 +411,8 @@ export default function ForwardTestedPage() {
             </thead>
             <tbody className="divide-y divide-zinc-100 font-mono">
               {filteredTrades.map((t, idx) => {
-                const isWin = t.r_multiple > 0.05;
-                const isLoss = t.r_multiple < -0.05;
+                const isWin = t.r_multiple !== null && t.r_multiple > 0.05;
+                const isLoss = t.r_multiple !== null && t.r_multiple < -0.05;
                 const isExpanded = expandedRow === idx;
 
                 return (
@@ -468,13 +493,13 @@ export default function ForwardTestedPage() {
                     <td className="px-3 py-3 whitespace-nowrap font-sans text-zinc-800">
                       <div className="font-semibold text-zinc-900">{t.option}</div>
                       <div className="text-[10px] text-zinc-500">
-                        {t.lots} Lots ({t.qty} Qty) | Exp: {t.expiry}
+                        {t.lots ?? "—"} Lots ({t.qty ?? "—"} Qty) | Exp: {t.expiry}
                       </div>
                     </td>
 
                     {/* Entry Premium & Capital Deployed */}
                     <td className="px-3 py-3 text-right whitespace-nowrap font-sans">
-                      <div className="font-bold text-zinc-900">₹{t.entry_premium.toFixed(2)}</div>
+                      <div className="font-bold text-zinc-900">{inr(t.entry_premium, 2)}</div>
                       <div className="text-[10px] font-semibold text-zinc-600">
                         Cap: {inr(t.capital_deployed)}
                       </div>
@@ -482,7 +507,7 @@ export default function ForwardTestedPage() {
 
                     {/* Exit Premium & Value */}
                     <td className="px-3 py-3 text-right whitespace-nowrap font-sans">
-                      <div className="font-bold text-zinc-900">₹{t.exit_premium.toFixed(2)}</div>
+                      <div className="font-bold text-zinc-900">{inr(t.exit_premium, 2)}</div>
                       <div className="text-[10px] font-semibold text-blue-800">
                         Val: {inr(t.exit_value)}
                       </div>
@@ -491,21 +516,17 @@ export default function ForwardTestedPage() {
                     {/* Net P&L & Option ROI */}
                     <td className="px-3 py-3 text-right whitespace-nowrap font-sans">
                       <div className={`font-bold ${isWin ? "text-emerald-700" : isLoss ? "text-rose-700" : "text-zinc-600"}`}>
-                        {t.est_pnl_inr >= 0 ? `+${inr(t.est_pnl_inr)}` : inr(t.est_pnl_inr)}
+                        {t.est_pnl_inr !== null && t.est_pnl_inr >= 0 ? `+${inr(t.est_pnl_inr)}` : inr(t.est_pnl_inr)}
                       </div>
-                      <div className={`text-[10px] font-semibold ${t.roi_pct >= 0 ? "text-emerald-700" : "text-rose-700"}`}>
-                        {t.roi_pct >= 0 ? `+${t.roi_pct.toFixed(1)}%` : `${t.roi_pct.toFixed(1)}%`} ROI
-                      </div>
+                      <div className={`text-[10px] font-semibold ${tone(t.roi_pct)}`}>{signed(t.roi_pct, 1, "%")} ROI</div>
                     </td>
 
                     {/* R-Multiple & Points */}
                     <td className="px-2 py-3 text-center whitespace-nowrap font-sans">
                       <div className={`font-bold ${isWin ? "text-emerald-700" : isLoss ? "text-rose-700" : "text-zinc-600"}`}>
-                        {t.r_multiple >= 0 ? `+${t.r_multiple.toFixed(2)}R` : `${t.r_multiple.toFixed(2)}R`}
+                        {signed(t.r_multiple, 2, "R")}
                       </div>
-                      <div className="text-[10px] text-zinc-500">
-                        {t.points >= 0 ? `+${t.points.toFixed(1)}` : t.points.toFixed(1)} pts
-                      </div>
+                      <div className="text-[10px] text-zinc-500">{signed(t.points, 1)} pts</div>
                     </td>
 
                     {/* Why Accordion Button */}

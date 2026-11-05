@@ -107,6 +107,8 @@ class Settings(BaseSettings):
     strike_steps: str = Field(default="NIFTY:50,BANKNIFTY:100", alias="STRIKE_STEPS")
     max_snapshot_age_seconds: int = Field(default=120, alias="MAX_SNAPSHOT_AGE_SECONDS")
     trade_crew_explain: bool = Field(default=False, alias="TRADE_CREW_EXPLAIN")
+    # S1 crew research journal served read-only by /api/live/crew. Empty: those routes answer 503.
+    crew_journal_path: str = Field(default="", alias="CREW_JOURNAL_PATH")
 
     # Brokers and live orders
     live_trading_enabled: bool = Field(default=False, alias="LIVE_TRADING_ENABLED")

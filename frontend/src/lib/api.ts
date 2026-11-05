@@ -43,7 +43,13 @@ export async function api<T = unknown>(path: string, init: { method?: string; bo
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
     const detail = (data as { detail?: unknown }).detail;
-    const message = typeof detail === "string" ? detail : JSON.stringify(detail ?? res.statusText);
+    const inner = detail as { status?: unknown; detail?: unknown } | undefined;
+    const message =
+      typeof detail === "string"
+        ? detail
+        : typeof inner?.detail === "string"
+          ? `${inner.status ?? res.status}: ${inner.detail}`
+          : JSON.stringify(detail ?? res.statusText);
     if (res.status === 401 && path !== "/api/auth/login" && window.location.pathname !== "/login") {
       window.location.assign(`/login?next=${encodeURIComponent(window.location.pathname)}`);
     }

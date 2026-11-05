@@ -2,7 +2,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import audit, auth, journal, live, market, notifications
+from app.api import audit, auth, crew, journal, live, market, notifications
 from app.api.routes import router
 from app.audit.middleware import AuditContextMiddleware
 from app.config import get_settings
@@ -30,6 +30,7 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(journal.router)
+app.include_router(crew.router)
 app.include_router(live.router)
 app.include_router(audit.router)
 app.include_router(market.router)

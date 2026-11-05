@@ -416,13 +416,38 @@ def export_trades_csv(report_id: str, db: Session = Depends(get_db)):
     )
 
 
+LEGACY_NOTICE = {
+    "source": "legacy_trade_store",
+    "verified_option_pnl": False,
+    "warning": (
+        "Legacy estimates: ₹ premiums, quantities, capital, P&L and ROI are modelled and may be estimated or"
+        " unverified. They are not broker fills or realized returns. A value or total the source lacks is shown"
+        " as unknown, never as zero. Crew research results are served separately at /api/live/crew."
+    ),
+}
+EMPTY = {"metrics": {}, "strategy_metrics": {}, "trades": []}
+
+
+def _num(value) -> float | None:
+    return None if value is None or value == "" else float(value)
+
+
 @router.get("/trades/forward-tested")
 def get_forward_tested_trades():
-    """Returns the forward-tested trades (Post-Oct 15) and aggregate metrics directly from SQLite SSOT."""
+    """Legacy forward-tested trades (post Oct 15) and estimated metrics, with LEGACY_NOTICE. Not the crew journal.
+
+    ``data_source`` says where the rows came from: ``sqlite``, ``excel_fallback`` (only while the SQLite store
+    has no rows), ``none``, or ``unavailable`` (the SQLite read or computation failed; Excel is not substituted).
+    """
+    return {**LEGACY_NOTICE, "source_warnings": [], **_forward_tested_trades()}
+
+
+def _forward_tested_trades():
+    warnings = []
     try:
         from app.db import trade_store
         trades = trade_store.get_all_trades(since="2026-10-15")
-        
+
         # Merge live active trades currently tracked by scanner daemon
         today_str = datetime.now().strftime("%Y-%m-%d")
         active_file = Path(__file__).resolve().parents[3] / "trades" / f".active_trades_{today_str}.json"
@@ -438,16 +463,19 @@ def get_forward_tested_trades():
                     t_str = str(sig.get("time", ""))[-5:]
                     t_id = trade_store.make_trade_id(d_str, t_str, strat)
                     if t_id not in existing_ids:
-                        qty = plan.get("quantity", plan.get("qty", 260))
-                        lots = plan.get("lots", 4)
-                        prem_in = plan.get("entry_premium", 78.67)
-                        cap = round(prem_in * qty, 0)
-                        current_sl = v.get("stop_p", prem_in)
+                        # Unknown when the plan lacks it: no default premium, quantity, stop or risk.
+                        qty = plan.get("quantity", plan.get("qty"))
+                        lots = plan.get("lots")
+                        prem_in = plan.get("entry_premium")
+                        current_sl = v.get("stop_p")
+                        stop_prem = (plan.get("exits") or [{}])[0].get("premium")
+                        known = None not in (prem_in, current_sl)
+                        cap = round(prem_in * qty, 0) if None not in (prem_in, qty) else None
+                        pnl = round((current_sl - prem_in) * qty, 0) if known and qty is not None else None
+                        risk_p = abs(prem_in - stop_prem) if None not in (prem_in, stop_prem) else 0
+                        r_mult = round((current_sl - prem_in) / risk_p, 2) if known and risk_p > 0 else None
                         milestones = v.get("milestones_hit", [])
                         top_m = milestones[-1] if milestones else "+0.0R"
-                        pnl = round((current_sl - prem_in) * qty, 0)
-                        risk_p = abs(prem_in - plan.get("exits", [{}])[0].get("premium", prem_in - 11.34))
-                        r_mult = round((current_sl - prem_in) / risk_p, 2) if risk_p > 0 else 1.0
                         trades.append({
                             "trade_id": t_id,
                             "date": d_str,
@@ -462,7 +490,8 @@ def get_forward_tested_trades():
                             "risk": sig.get("risk", 0.0),
                             "exit_spot": sig.get("entry", 0.0),
                             "exit_time": "Running",
-                            "exit_reason": f"Active Live Trailing Runner (Locked SL: Rs {current_sl:,.2f})",
+                            "exit_reason": "Active Live Trailing Runner" + (
+                                f" (Locked SL: Rs {current_sl:,.2f})" if current_sl is not None else ""),
                             "points": 0.0,
                             "r_multiple": r_mult,
                             "option": f"NIFTY {plan.get('option', '')}",
@@ -470,8 +499,8 @@ def get_forward_tested_trades():
                             "entry_premium": prem_in,
                             "exit_premium": current_sl,
                             "capital_deployed": cap,
-                            "exit_value": round(cap + pnl, 0),
-                            "roi_pct": round((pnl / cap * 100), 1) if cap > 0 else 0.0,
+                            "exit_value": round(cap + pnl, 0) if None not in (cap, pnl) else None,
+                            "roi_pct": round((pnl / cap * 100), 1) if pnl is not None and cap else None,
                             "est_pnl_inr": pnl,
                             "lots": lots,
                             "qty": qty,
@@ -480,27 +509,31 @@ def get_forward_tested_trades():
                         })
             except Exception as ex:
                 print(f"⚠️ Error loading active trades: {ex}")
+                warnings.append("live active trades could not be read and are not included")
 
         if trades:
-            return trade_store.compute_metrics(trades)
+            return {**trade_store.compute_metrics(trades), "data_source": "sqlite", "source_warnings": warnings}
     except Exception as e:
-        print(f"⚠️ SQLite trade store query fallback: {e}")
+        # A failed read or computation is reported, never answered from a different source.
+        print(f"⚠️ SQLite trade store failed: {type(e).__name__}: {e}")
+        return {**EMPTY, "data_source": "unavailable", "source_error": type(e).__name__,
+                "source_warnings": warnings + ["the legacy SQLite trade store could not be read or summarized"]}
 
-    # Fallback to Excel if database is not yet ready
+    # Excel only while the SQLite store has no rows (not yet synchronized)
     import openpyxl
 
     file_path = Path(__file__).resolve().parents[3] / "trades" / "live_and_forward_trades.xlsx"
     if not file_path.exists():
         file_path = Path(__file__).resolve().parents[3] / "trades" / "suggested_trades_by_strategy.xlsx"
     if not file_path.exists():
-        return {"metrics": {}, "strategy_metrics": {}, "trades": []}
+        return {**EMPTY, "data_source": "none", "source_warnings": warnings}
 
     wb = openpyxl.load_workbook(file_path, data_only=True)
     sheet_name = "📋 Live & Forward Trades" if "📋 Live & Forward Trades" in wb.sheetnames else "📋 All Suggested Trades"
     ws = wb[sheet_name]
     rows = list(ws.iter_rows(values_only=True))
     if not rows:
-        return {"metrics": {}, "strategy_metrics": {}, "trades": []}
+        return {**EMPTY, "data_source": "none", "source_warnings": warnings}
 
     header = [str(c) if c is not None else "" for c in rows[0]]
     raw_trades = [dict(zip(header, r)) for r in rows[1:] if any(r)]
@@ -510,16 +543,25 @@ def get_forward_tested_trades():
         d = str(t.get("Date") or "")[:10]
         if not d or d < "2026-10-15":
             continue
-        r_mult = float(t.get("R-Multiple") or 0.0)
-        pnl = float(t.get("Est P&L (Rs)") or 0.0)
-        pts = float(t.get("Points") or 0.0)
-        prem_in = float(t.get("Entry Premium") or 0.0)
-        lots = int(t.get("Lots") or 2)
-        qty = int(t.get("Qty") or 130)
-        capital = float(t.get("Capital Deployed") or round(prem_in * qty, 0))
-        exit_val = float(t.get("Exit Value") or max(0.0, round(capital + pnl, 0)))
-        prem_out = float(t.get("Exit Premium") or (round(exit_val / qty, 2) if qty > 0 else 0.0))
-        roi = float(t.get("ROI %") or (round((pnl / capital) * 100, 1) if capital > 0 else 0.0))
+        # A blank cell stays unknown (None); derived values only from cells that are present.
+        r_mult = _num(t.get("R-Multiple"))
+        pnl = _num(t.get("Est P&L (Rs)"))
+        pts = _num(t.get("Points"))
+        prem_in = _num(t.get("Entry Premium"))
+        lots = None if (n := _num(t.get("Lots"))) is None else int(n)
+        qty = None if (n := _num(t.get("Qty"))) is None else int(n)
+        capital = _num(t.get("Capital Deployed"))
+        if capital is None and None not in (prem_in, qty):
+            capital = round(prem_in * qty, 0)
+        exit_val = _num(t.get("Exit Value"))
+        if exit_val is None and None not in (capital, pnl):
+            exit_val = max(0.0, round(capital + pnl, 0))
+        prem_out = _num(t.get("Exit Premium"))
+        if prem_out is None and exit_val is not None and qty:
+            prem_out = round(exit_val / qty, 2)
+        roi = _num(t.get("ROI %"))
+        if roi is None and pnl is not None and capital:
+            roi = round((pnl / capital) * 100, 1)
 
         trades.append({
             "date": d,
@@ -551,4 +593,5 @@ def get_forward_tested_trades():
         })
 
     from app.db import trade_store
-    return trade_store.compute_metrics(trades)
+    return {**trade_store.compute_metrics(trades), "data_source": "excel_fallback",
+            "source_warnings": warnings + [f"read from {file_path.name}: the SQLite store has no rows"]}

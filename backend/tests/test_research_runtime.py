@@ -491,7 +491,7 @@ def test_12_restart_after_a_crash_is_idempotent_and_never_adopts_the_orphan(path
     assert len(rows(path, "SELECT * FROM crew_admissions")) == 1 and len(rows(path, "SELECT * FROM crew_trades")) == 1
     assert cj.check_consistency(path) == []
     stats = rr.finalized_results(path)
-    assert (stats["trades"], stats["model_points"], stats["excluded"]) == (0, 0, {tid: "TRACKING"})
+    assert (stats["groups"], stats["excluded"]) == ({}, {tid: "TRACKING"})
 
 
 # --- 15: UNKNOWN publications --------------------------------------------------------------------------
@@ -829,7 +829,7 @@ def test_23_a_crash_inside_open_trade_leaves_a_reported_missing_entry_never_a_la
     assert rows(path, "SELECT * FROM crew_trades") == []
     assert rows(path, "SELECT * FROM crew_admissions") == [admission]
     stats = rr.finalized_results(path)
-    assert stats["trades"] == 0 and [m["admission_id"] for m in stats["missing_model_entries"]] == [
+    assert stats["groups"] == {} and [m["admission_id"] for m in stats["missing_model_entries"]] == [
         admission["admission_id"]]
 
 
@@ -902,11 +902,27 @@ def test_25_finalized_results_count_closed_trades_of_this_policy_only_and_carry_
         cj.exit_trade(path, lease=rt.lease, trade_id=pdc["trade_id"], expected_version=1, reason="TARGET_HIT",
                       signal_candle=f"{DAY}T10:25:00+05:30", index_levels={"spot": 24060.0}, model_points=60.0,
                       model_r=2.0, now=clock())
+        c = cj.record_admission(path, lease=rt.lease, admission_class="RESEARCH_ONLY", reasons=list(RESEARCH),
+                                market_day=DAY, instrument="NIFTY", strategy_id="Breakout [15M]",
+                                strategy_version=rr.STRATEGY_VERSION, signal_candle=f"{DAY}T10:20:00+05:30",
+                                direction="CALL", setup_id="breakout", now=clock())
+        brk = cj.open_trade(path, lease=rt.lease, admission_id=c["admission"]["admission_id"], model_lots=3,
+                            entry_spot=24000, stop_spot=23970, target_spot=24060,
+                            execution_policy=rr.EXECUTION_POLICY, now=clock())["trade"]
+        cj.exit_trade(path, lease=rt.lease, trade_id=brk["trade_id"], expected_version=1, reason="TARGET_HIT",
+                      signal_candle=f"{DAY}T10:25:00+05:30", index_levels={"spot": 24060.0}, model_points=60.0,
+                      model_r=2.0, now=clock())
     finally:
         rt.stop()
     stats = rr.finalized_results(path)
-    assert stats["finalized"] == [{"trade_id": tid, "model_points": -30.0, "model_r": -1.0}]
-    assert (stats["trades"], stats["model_points"], stats["model_r"]) == (1, -30.0, -1.0)
+    # Two scanner-v0 strategies under one policy stay separate groups, with no combined total.
+    assert stats["groups"] == {
+        "Breakout [15M]": {"trades": 1, "model_points": 60.0, "model_r": 2.0, "finalized": [
+            {"trade_id": brk["trade_id"], "strategy_id": "Breakout [15M]", "model_points": 60.0, "model_r": 2.0}]},
+        "Liquidity Sweep [5M]": {"trades": 1, "model_points": -30.0, "model_r": -1.0, "finalized": [
+            {"trade_id": tid, "strategy_id": "Liquidity Sweep [5M]", "model_points": -30.0, "model_r": -1.0}]},
+    }
+    assert not {"trades", "model_points", "model_r", "finalized"} & set(stats)
     assert stats["excluded"] == {expired: "EXPIRED_UNRESOLVED", other["trade_id"]: "OTHER_EXECUTION_POLICY",
                                  pdc["trade_id"]: "OTHER_STRATEGY_VERSION"}
     assert (stats["strategy_version"], stats["execution_policy"]) == (rr.STRATEGY_VERSION, rr.EXECUTION_POLICY)
