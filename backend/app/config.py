@@ -1,3 +1,4 @@
+from decimal import Decimal
 from functools import lru_cache
 from typing import Annotated, Literal
 
@@ -109,6 +110,9 @@ class Settings(BaseSettings):
     trade_crew_explain: bool = Field(default=False, alias="TRADE_CREW_EXPLAIN")
     # S1 crew research journal served read-only by /api/live/crew. Empty: those routes answer 503.
     crew_journal_path: str = Field(default="", alias="CREW_JOURNAL_PATH")
+    # Paper-trading capital per virtual account. No default: unset keeps the runtime research-only, and
+    # DEFAULT_CAPITAL_INR is never a stand-in. Frozen into each paper account the first time it is opened.
+    paper_capital_inr: Decimal | None = Field(default=None, gt=0, alias="PAPER_CAPITAL_INR")
 
     # Brokers and live orders
     live_trading_enabled: bool = Field(default=False, alias="LIVE_TRADING_ENABLED")

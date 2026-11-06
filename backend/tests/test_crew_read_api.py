@@ -148,7 +148,8 @@ def test_02b_auth_is_a_router_dependency_and_routes_are_get_only():
     paths = {p: set(ops) for p, ops in app.openapi()["paths"].items() if p.startswith("/api/live/crew")}
     assert paths == {p: {"get"} for p in ("/api/live/crew/trades", "/api/live/crew/trades/{trade_id}/events",
                                           "/api/live/crew/admissions", "/api/live/crew/stats",
-                                          "/api/live/crew/exceptions", "/api/live/crew/sessions")}
+                                          "/api/live/crew/exceptions", "/api/live/crew/sessions",
+                                          "/api/live/crew/paper/stats")}
     assert [d.dependency.__name__ for d in crew_api.router.dependencies] == ["require_auth"]
     for route in crew_api.router.routes:
         assert route.methods == {"GET"}

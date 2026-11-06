@@ -25,6 +25,7 @@ log = logging.getLogger("genesis.telegram")
 
 DELIVERED, NOT_DELIVERED, UNKNOWN = "DELIVERED", "NOT_DELIVERED", "UNKNOWN"
 MAX_TEXT = 4096
+MOCK_CHAT_PREFIX = "mock:"
 _EXCERPT = 200
 _TOKEN = re.compile(r"(bot)?\d{5,}:[A-Za-z0-9_-]{20,}")
 
@@ -99,6 +100,9 @@ class TelegramTransport:
         if not self._token or not chat_id or not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
             return self._logged(DeliveryOutcome(NOT_DELIVERED, exc_class="PreSendValidation",
                                                 detail="missing token or chat, or empty/oversized text"))
+        if str(chat_id).startswith(MOCK_CHAT_PREFIX):
+            return self._logged(DeliveryOutcome(NOT_DELIVERED, exc_class="PreSendValidation",
+                                                detail="mock chat ids are never delivered"))
         client = self._client or httpx.Client(follow_redirects=False)
         start = time.monotonic()
         try:

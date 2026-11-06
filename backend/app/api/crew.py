@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from app.api.common import require_auth
 from app.config import get_settings
 from app.db import crew_reader
+from app.trading import paper_stats
 
 router = APIRouter(prefix="/api/live/crew", dependencies=[Depends(require_auth)])
 
@@ -84,6 +85,11 @@ def get_stats(
             raise HTTPException(status_code=422, detail="strategy_id must be 1..128 printable characters")
     return _read(crew_reader.stats, strategy_version=strategy_version, execution_policy=execution_policy,
                  strategy_ids=strategy_id, now=crew_reader.now_ist())
+
+
+@router.get("/paper/stats")
+def get_paper_stats(market_day: str | None = Query(None, pattern=DAY)):
+    return _read(paper_stats.report, market_day=market_day)
 
 
 @router.get("/exceptions")

@@ -13,9 +13,14 @@ stops the runtime at once.
 
 This is the scanner card (``scanner-v0``), not the frozen PDC Zone + 15 EMA V0 benchmark.
 
-It publishes nothing, imports no outbox, Telegram or broker code, and never opens the legacy JSON, Excel
-or ``data/trades.db`` ledgers. The daemon's ``HoldingAgent`` exits and its opposing-signal reversal are
-disabled here: they depend on process state, unjournaled trade fields and the legacy risk file.
+Admissions run only inside the NSE session (``market_status``), and startup is refused when the holiday file
+has no dates for the current year. With ``PAPER_CAPITAL_INR`` set, every model entry, half-exit and exit is
+mirrored in the paper ledger (``paper_ledger``: simulated bid/ask fills, never an order) and paper notifications
+are enqueued as OPS rows; nothing is ever delivered. Without it the runtime stays research-only.
+
+It imports no Telegram or broker code, and never opens the legacy JSON, Excel or ``data/trades.db`` ledgers.
+The daemon's ``HoldingAgent`` exits and its opposing-signal reversal are disabled here: they depend on process
+state, unjournaled trade fields and the legacy risk file.
 """
 
 from __future__ import annotations
@@ -38,8 +43,12 @@ import pandas as pd
 from app.config import Settings, get_settings
 from app.db import crew_journal as cj
 from app.db import crew_session as cs
+from app.db import paper_ledger as pl
 from app.liquidity_signals import DynamicLookoutWindow
+from app.market.hours import holidays, market_status
 from app.trading import admission as adm
+from app.trading import paper_notify as pn
+from app.trading import paper_registry as reg
 from app.trading.crew.exit_agent import ExitAgent
 from app.trading.option_quote import IST, ContractQuote, parse_chain_leg
 
@@ -88,6 +97,7 @@ class ResearchRuntime:
         self.path = Path(journal_path).expanduser().resolve()
         self.feed, self.settings, self.clock = feed, settings, clock
         self.heartbeat_seconds = heartbeat_seconds
+        self.paper = settings.paper_capital_inr is not None
         self.lease: cj.Lease | None = None
         self.lost = threading.Event()
         self._stop = threading.Event()
@@ -99,10 +109,15 @@ class ResearchRuntime:
     def start(self) -> dict:
         """Lease, recover, start the heartbeat. Raises LeaseHeld, ConsistencyError or StartupRefused."""
         _check_journal_path(self.path)
+        _check_calendar(self.clock(), self.settings)
         cj.migrate(self.path)
         self.lease = cs.acquire(self.path, now=self.clock())
         try:
             report = cs.recover(self.path, self.lease, now=self.clock())
+            if self.paper:
+                pl.ensure_accounts(self.path, lease=self.lease, capital=self.settings.paper_capital_inr,
+                                   now=self.clock())
+                report["paper"] = pl.recover(self.path, lease=self.lease, now=self.clock())
         except BaseException:
             self._release("RECOVERY_REFUSED")
             raise
@@ -181,7 +196,14 @@ class ResearchRuntime:
             return {"skipped": "FEED_ERROR"}
         if view.df_5m is None or view.df_5m.empty:
             return {"skipped": "NO_CLOSED_BAR"}
-        return {"exits": self._monitor(view, now), "admissions": self._admit(view, now)}
+        result = {"exits": self._monitor(view, now)}
+        is_open, why = market_status(now, self.settings)
+        result["admissions"] = self._admit(view, now) if is_open else []
+        if not is_open:
+            result["market_closed"] = why
+        if self.paper:
+            result["notifications"] = pn.sync(self.path, lease=self.lease, now=self.clock())
+        return result
 
     def _monitor(self, view: MarketView, now: datetime) -> list[dict]:
         bar = view.df_5m.iloc[-1]
@@ -207,6 +229,7 @@ class ResearchRuntime:
             lots = state["lots"]
             cj.partial_exit(self.path, **write, expected_version=version, reason=HOP, lots_after=lots - lots // 2,
                             index_levels={"target": state["target_price"]}, now=self.clock())
+            self._paper(pl.partial, tid, view, cmp, HOP)
             return {"trade_id": tid, "action": "HOP_PARTIAL_COMPLETED"}
 
         decision = self.exit_agent.evaluate_exit(
@@ -222,11 +245,13 @@ class ResearchRuntime:
             cj.partial_exit(self.path, **write, expected_version=moved["trade"]["version"], reason=HOP,
                             lots_after=decision.remaining_lots, index_levels={"target": decision.exit_price},
                             now=self.clock())
+            self._paper(pl.partial, tid, view, cmp, HOP)
             return {"trade_id": tid, "action": HOP, "lots_after": decision.remaining_lots}
         if decision.is_fully_closed:
             cj.exit_trade(self.path, **write, expected_version=version, reason=decision.action,
                           index_levels={"spot": cmp, "stop": state["stop_loss"], "target": state["target_price"]},
                           model_points=decision.realized_points, model_r=decision.realized_r, now=self.clock())
+            self._paper(pl.close, tid, view, cmp, decision.action)
             return {"trade_id": tid, "action": decision.action, "model_points": decision.realized_points}
 
         r_now, entry, risk = decision.realized_r, state["entry_price"], state["risk_points"]
@@ -247,7 +272,7 @@ class ResearchRuntime:
     def _admit(self, view: MarketView, now: datetime) -> list[dict]:
         clock = now.astimezone(IST).strftime("%H:%M")
         out = []
-        for setup in view.setups:
+        for setup in sorted(view.setups, key=reg.order_key):  # the shared paper account is first come, first served
             if not getattr(setup, "is_valid_for_trade_crew", False):
                 continue
             window = DynamicLookoutWindow(setup_name=setup.strategy, base_tf=str(setup.timeframe),
@@ -255,16 +280,17 @@ class ResearchRuntime:
             if not window.is_valid_window(clock):
                 continue
             self._check()
-            out.append(self._admit_one(setup, view.chain))
+            out.append(self._admit_one(setup, view))
         return out
 
-    def _admit_one(self, setup, chain: dict | None) -> dict:
+    def _admit_one(self, setup, view: MarketView) -> dict:
         candidate = adm.SignalCandidate(
             market_day=self.lease.market_day, instrument=setup.symbol, strategy_id=setup.strategy,
             strategy_version=STRATEGY_VERSION, signal_candle=_ist_candle(setup.timestamp),
             direction=setup.direction, setup_id=f"{setup.timeframe}|{setup.trigger_price}",
         )
-        admission = adm.evaluate(candidate, setup_quote(chain, setup), now=self.clock(), settings=self.settings)
+        quote = setup_quote(view.chain, setup)
+        admission = adm.evaluate(candidate, quote, now=self.clock(), settings=self.settings)
         if admission.admission_class == "ACTIONABLE":
             raise RuntimeError("ACTIONABLE admission in the research-only runtime")
         persisted = adm.persist(self.path, admission, lease=self.lease, now=self.clock())
@@ -285,7 +311,16 @@ class ResearchRuntime:
             stop_spot=float(setup.tentative_stop), target_spot=float(setup.tentative_target),
             execution_policy=EXECUTION_POLICY, now=self.clock(),
         )
+        if self.paper and not opened["replayed"]:
+            result["paper"] = pl.enter(self.path, lease=self.lease, admission=stored, model_trade=opened["trade"],
+                                       timeframe=str(setup.timeframe), quote=quote, df_5m=view.df_5m,
+                                       now=self.clock(), settings=self.settings, cutoff=INTRADAY_CUTOFF)
         return {**result, "trade": opened["trade"]["trade_id"]}
+
+    def _paper(self, step, trade_id: str, view: MarketView, cmp: float, reason: str) -> None:
+        if self.paper:
+            step(self.path, lease=self.lease, model_trade_id=trade_id, chain=view.chain, index_spot=cmp,
+                 reason=reason, now=self.clock(), settings=self.settings)
 
 
 # --- helpers -------------------------------------------------------------------------------------------
@@ -306,6 +341,13 @@ def _check_journal_path(path: Path) -> None:
         raise StartupRefused(f"{path} is not a SQLite crew journal: {e}") from e
     if "crew_meta" not in names or any(not n.startswith(("crew_", "sqlite_")) for n in names):
         raise StartupRefused(f"{path} exists and is not a crew-only journal")
+
+
+def _check_calendar(now: datetime, settings: Settings) -> None:
+    """A year missing from the holiday file would make every holiday a trading day."""
+    year = str(now.astimezone(IST).year)
+    if not any(day.startswith(year) for day in holidays(settings)):
+        raise StartupRefused(f"CALENDAR_MISSING: the NSE holiday file has no dates for {year}")
 
 
 def setup_quote(chain: dict | None, setup) -> ContractQuote | None:

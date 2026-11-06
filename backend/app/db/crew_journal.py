@@ -32,7 +32,7 @@ from pathlib import Path
 
 from app.trading.option_quote import IST
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _DAY = "GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'"
 _HEX64 = "length({c}) = 64 AND {c} NOT GLOB '*[^0-9a-f]*'"
@@ -495,6 +495,165 @@ UPDATE crew_meta SET value = '3', set_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
 WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 3;
 """
 
+# v4: paper trading. Simulated option fills priced from an executable book, in rupees, kept apart from the
+# model journal (whose events still forbid rupee keys). Cash is never stored: it is derived from the fills.
+_PAPER_OPEN = "('OPEN','PARTIALLY_EXITED')"
+_PAPER_TERMINAL = "('CLOSED','EXIT_UNPRICED','EXPIRED_UNRESOLVED')"
+_MONEY = "({c} IS NULL OR (typeof({c}) = 'text' AND CAST({c} AS REAL) >= 0))"
+SCHEMA_V4 = f"""
+CREATE TABLE IF NOT EXISTS crew_paper_accounts (
+    account_id TEXT PRIMARY KEY CHECK (account_id = 'SHARED' OR account_id GLOB 'IND:?*'),
+    capital_inr TEXT NOT NULL CHECK (typeof(capital_inr) = 'text' AND CAST(capital_inr AS REAL) > 0),
+    risk_policy_id TEXT NOT NULL CHECK (risk_policy_id <> ''),
+    opened_at TEXT NOT NULL
+);
+{_no_update_delete("crew_paper_accounts")}
+
+CREATE TABLE IF NOT EXISTS crew_paper_trades (
+    paper_trade_id TEXT PRIMARY KEY CHECK (paper_trade_id GLOB 'P_[0-9]*_?*'),
+    account_id TEXT NOT NULL REFERENCES crew_paper_accounts(account_id),
+    admission_id TEXT NOT NULL REFERENCES crew_admissions(admission_id),
+    model_trade_id TEXT NOT NULL REFERENCES crew_trades(trade_id),
+    market_day TEXT NOT NULL CHECK (market_day {_DAY} AND date(market_day) IS market_day),
+    strategy_id TEXT NOT NULL CHECK (strategy_id <> ''),
+    family TEXT NOT NULL CHECK (family <> ''),
+    strategy_version TEXT NOT NULL,
+    registry_hash TEXT NOT NULL CHECK ({_HEX64.format(c="registry_hash")}),
+    underlying TEXT NOT NULL,
+    direction TEXT NOT NULL CHECK (direction IN ('CALL','PUT')),
+    contract TEXT NOT NULL CHECK (contract <> ''),
+    expiry TEXT NOT NULL CHECK (expiry {_DAY} AND expiry >= market_day),
+    strike REAL NOT NULL CHECK (strike > 0),
+    option_type TEXT NOT NULL CHECK (option_type IN ('CE','PE')),
+    lot_size INTEGER NOT NULL CHECK (typeof(lot_size) = 'integer' AND lot_size > 0),
+    lots_initial INTEGER NOT NULL CHECK (typeof(lots_initial) = 'integer' AND lots_initial > 0),
+    lots_open INTEGER NOT NULL CHECK (typeof(lots_open) = 'integer' AND lots_open BETWEEN 0 AND lots_initial),
+    entry_spot REAL NOT NULL, stop_spot REAL NOT NULL, target_spot REAL NOT NULL,
+    signal_candle TEXT NOT NULL,
+    regime TEXT NOT NULL,
+    capital_committed_inr TEXT NOT NULL CHECK ({_MONEY.format(c="capital_committed_inr")}),
+    max_loss_inr TEXT NOT NULL CHECK ({_MONEY.format(c="max_loss_inr")}),
+    state TEXT NOT NULL CHECK (state IN ('OPEN','PARTIALLY_EXITED','CLOSED','EXIT_UNPRICED','EXPIRED_UNRESOLVED')),
+    version INTEGER NOT NULL DEFAULT 1 CHECK (typeof(version) = 'integer' AND version >= 1),
+    opened_at TEXT NOT NULL,
+    closed_at TEXT,
+    UNIQUE (account_id, admission_id),
+    CHECK (state <> 'CLOSED' OR lots_open = 0),
+    CHECK ((state IN {_PAPER_OPEN}) = (closed_at IS NULL))
+);
+
+CREATE TABLE IF NOT EXISTS crew_paper_events (
+    event_id INTEGER PRIMARY KEY,
+    paper_trade_id TEXT NOT NULL REFERENCES crew_paper_trades(paper_trade_id),
+    seq INTEGER NOT NULL CHECK (typeof(seq) = 'integer' AND seq >= 1),
+    event_type TEXT NOT NULL CHECK (event_type IN ('ENTRY','PARTIAL_EXIT','PARTIAL_SKIPPED','EXIT','EXIT_UNPRICED',
+                                                   'EXPIRED_UNRESOLVED')),
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    reason TEXT NOT NULL CHECK (reason <> ''),
+    lots_after INTEGER NOT NULL CHECK (typeof(lots_after) = 'integer' AND lots_after >= 0),
+    side TEXT CHECK (side IS NULL OR side IN ('BUY','SELL')),
+    lots INTEGER, qty INTEGER,
+    price_inr TEXT CHECK ({_MONEY.format(c="price_inr")}),
+    bid TEXT, ask TEXT, ltp TEXT, mid TEXT, quote_time TEXT, fetched_at TEXT, quote_age_s REAL, quote_source TEXT,
+    slippage_inr TEXT CHECK ({_MONEY.format(c="slippage_inr")}),
+    charges TEXT CHECK (charges IS NULL OR json_valid(charges)),
+    charges_inr TEXT CHECK ({_MONEY.format(c="charges_inr")}),
+    index_spot REAL,
+    session_id TEXT REFERENCES crew_sessions(session_id),
+    occurred_at TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL UNIQUE CHECK (idempotency_key <> ''),
+    UNIQUE (paper_trade_id, seq),
+    -- A fill is exactly an ENTRY (BUY) or a priced exit (SELL), with its book and charges.
+    CHECK ((event_type IN ('ENTRY','PARTIAL_EXIT','EXIT')) = (side IS NOT NULL)),
+    CHECK (side IS NULL OR (price_inr IS NOT NULL AND CAST(price_inr AS REAL) > 0 AND bid IS NOT NULL
+           AND ask IS NOT NULL AND quote_time IS NOT NULL AND charges_inr IS NOT NULL
+           AND typeof(qty) = 'integer' AND qty > 0 AND typeof(lots) = 'integer' AND lots > 0)),
+    CHECK ((side = 'BUY') = (event_type = 'ENTRY'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS crew_paper_events_one_terminal ON crew_paper_events(paper_trade_id)
+    WHERE to_state IN {_PAPER_TERMINAL};
+
+CREATE TABLE IF NOT EXISTS crew_paper_decisions (
+    account_id TEXT NOT NULL REFERENCES crew_paper_accounts(account_id),
+    admission_id TEXT NOT NULL REFERENCES crew_admissions(admission_id),
+    market_day TEXT NOT NULL CHECK (market_day {_DAY} AND date(market_day) IS market_day),
+    strategy_id TEXT NOT NULL CHECK (strategy_id <> ''),
+    family TEXT,
+    registry_hash TEXT NOT NULL CHECK ({_HEX64.format(c="registry_hash")}),
+    outcome TEXT NOT NULL CHECK (outcome IN ('OPENED','REJECTED','UNPRICED')),
+    reasons TEXT NOT NULL CHECK (json_valid(reasons) AND json_type(reasons) = 'array'),
+    paper_trade_id TEXT REFERENCES crew_paper_trades(paper_trade_id),
+    decided_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, admission_id),
+    CHECK ((outcome = 'OPENED') = (paper_trade_id IS NOT NULL)),
+    CHECK ((outcome = 'OPENED') = (json_array_length(reasons) = 0))
+);
+{_no_update_delete("crew_paper_decisions")}
+
+CREATE TRIGGER IF NOT EXISTS crew_paper_decisions_insert BEFORE INSERT ON crew_paper_decisions
+BEGIN
+    SELECT RAISE(ABORT, 'crew_paper_decisions: an OPENED decision needs its trade in the same account')
+    WHERE NEW.outcome = 'OPENED' AND NOT EXISTS (SELECT 1 FROM crew_paper_trades t
+        WHERE t.paper_trade_id = NEW.paper_trade_id AND t.account_id = NEW.account_id
+        AND t.admission_id = NEW.admission_id);
+END;
+
+CREATE TRIGGER IF NOT EXISTS crew_paper_trades_insert BEFORE INSERT ON crew_paper_trades
+BEGIN
+    SELECT RAISE(ABORT, 'crew_paper_trades: a paper trade starts OPEN at version 1')
+    WHERE NEW.state IS NOT 'OPEN' OR NEW.version IS NOT 1 OR NEW.lots_open IS NOT NEW.lots_initial;
+    SELECT RAISE(ABORT, 'crew_paper_trades: the model trade must come from the same research admission')
+    WHERE NOT coalesce((SELECT m.admission_id = NEW.admission_id AND m.admission_class = 'RESEARCH_ONLY'
+                        AND m.market_day = NEW.market_day AND m.strategy = NEW.strategy_id
+                        AND m.direction = NEW.direction
+                        FROM crew_trades m WHERE m.trade_id = NEW.model_trade_id), 0);
+END;
+
+CREATE TRIGGER IF NOT EXISTS crew_paper_trades_update BEFORE UPDATE ON crew_paper_trades
+BEGIN
+    SELECT RAISE(ABORT, 'crew_paper_trades: terminal paper trades cannot change')
+    WHERE OLD.state IN {_PAPER_TERMINAL};
+    SELECT RAISE(ABORT, 'crew_paper_trades: identity columns are immutable')
+    WHERE NEW.paper_trade_id IS NOT OLD.paper_trade_id OR NEW.account_id IS NOT OLD.account_id
+       OR NEW.admission_id IS NOT OLD.admission_id OR NEW.model_trade_id IS NOT OLD.model_trade_id
+       OR NEW.strategy_id IS NOT OLD.strategy_id OR NEW.contract IS NOT OLD.contract
+       OR NEW.lot_size IS NOT OLD.lot_size OR NEW.lots_initial IS NOT OLD.lots_initial
+       OR NEW.capital_committed_inr IS NOT OLD.capital_committed_inr OR NEW.max_loss_inr IS NOT OLD.max_loss_inr
+       OR NEW.opened_at IS NOT OLD.opened_at OR NEW.registry_hash IS NOT OLD.registry_hash;
+    SELECT RAISE(ABORT, 'crew_paper_trades: update must match the next crew_paper_events row')
+    WHERE NOT coalesce((SELECT NEW.version = OLD.version + 1 AND e.from_state = OLD.state
+                        AND e.to_state = NEW.state AND e.lots_after = NEW.lots_open
+                        FROM crew_paper_events e
+                        WHERE e.paper_trade_id = OLD.paper_trade_id AND e.seq = NEW.version), 0);
+END;
+
+CREATE TRIGGER IF NOT EXISTS crew_paper_trades_no_delete BEFORE DELETE ON crew_paper_trades
+BEGIN SELECT RAISE(ABORT, 'crew_paper_trades rows cannot be deleted'); END;
+
+CREATE TRIGGER IF NOT EXISTS crew_paper_events_insert BEFORE INSERT ON crew_paper_events
+BEGIN
+    SELECT RAISE(ABORT, 'crew_paper_events: illegal paper state transition')
+    WHERE NOT ((NEW.seq = 1 AND NEW.from_state IS NULL AND NEW.event_type = 'ENTRY' AND NEW.to_state = 'OPEN')
+        OR (NEW.seq > 1 AND NEW.from_state IN {_PAPER_OPEN} AND (
+               (NEW.event_type = 'PARTIAL_EXIT' AND NEW.to_state = 'PARTIALLY_EXITED')
+            OR (NEW.event_type = 'PARTIAL_SKIPPED' AND NEW.to_state = NEW.from_state)
+            OR (NEW.event_type = 'EXIT' AND NEW.to_state = 'CLOSED' AND NEW.lots_after = 0)
+            OR (NEW.event_type IN ('EXIT_UNPRICED','EXPIRED_UNRESOLVED') AND NEW.to_state = NEW.event_type))));
+    SELECT RAISE(ABORT, 'crew_paper_events: event does not follow the paper trade state and version')
+    WHERE NOT coalesce((SELECT CASE WHEN NEW.seq = 1
+                THEN t.version = 1 AND t.state = 'OPEN' AND NEW.lots_after = t.lots_initial
+                     AND NEW.lots = t.lots_initial
+                ELSE t.version + 1 = NEW.seq AND t.state = NEW.from_state
+                     AND NEW.lots_after = t.lots_open - coalesce(NEW.lots, 0)
+                END FROM crew_paper_trades t WHERE t.paper_trade_id = NEW.paper_trade_id), 0);
+END;
+{_no_update_delete("crew_paper_events")}
+
+UPDATE crew_meta SET value = '4', set_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+WHERE key = 'schema_version' AND CAST(value AS INTEGER) < 4;
+"""
+
 
 def connect(db_path: Path | str, *, create: bool = False) -> sqlite3.Connection:
     """Open the journal: WAL, synchronous=FULL, foreign_keys=ON, autocommit (use ``transaction``).
@@ -552,7 +711,7 @@ def migrate(db_path: Path | str) -> int:
             # A concurrent migrator can win the ALTER; this one then rolls back whole and a rerun is a no-op.
             conn.executescript(
                 f"BEGIN IMMEDIATE;\n{SCHEMA}\n{'' if has_chat else _V2_ADD_CHAT}\n{SCHEMA_V2}\n"
-                f"{'' if has_gen else _V3_ADD_GENERATION}\n{SCHEMA_V3}\nCOMMIT;"
+                f"{'' if has_gen else _V3_ADD_GENERATION}\n{SCHEMA_V3}\n{SCHEMA_V4}\nCOMMIT;"
             )
         except BaseException:
             if conn.in_transaction:

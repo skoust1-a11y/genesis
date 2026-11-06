@@ -246,7 +246,7 @@ def test_12_v2_journal_upgrades_and_keeps_its_sessions(tmp_path):
     conn.execute("INSERT INTO crew_sessions (session_id, market_day, started_at) VALUES ('S1', ?, ?)",
                  (DAY, T0.isoformat()))
     conn.close()
-    assert cj.migrate(p) == 3 and cj.migrate(p) == 3
+    assert cj.migrate(p) == cj.SCHEMA_VERSION and cj.migrate(p) == cj.SCHEMA_VERSION
     assert rows(p, "SELECT session_id, generation FROM crew_sessions") == [{"session_id": "S1", "generation": None}]
     assert cs.acquire(p, now=T0).generation == 1
 
