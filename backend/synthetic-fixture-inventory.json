@@ -1,0 +1,21 @@
+{
+  "provenance": "invented; no original fixtures read",
+  "files": [
+    "data/holidays/nse.yaml",
+    "data/lot_sizes/nse.yaml",
+    "data/events/synthetic.yaml",
+    "data/sample_nifty_options.csv",
+    "tests/fixtures/nse/fo05JAN2024bhav.csv",
+    "tests/fixtures/nse/BhavCopy_NSE_FO_0_0_0_20240708_F_0000.csv",
+    "tests/fixtures/nse/india_vix_2024.csv",
+    "tests/fixtures/nse/index_NIFTY_2024.csv",
+    "tests/fixtures/live_replay/nifty_5m_2026-11-03_04.json",
+    "research/strategies/liquidity-sweep.md",
+    "research/strategies/previous-day-breakout.md",
+    "research/strategies/trendline-breakout.md",
+    "research/strategies/liquidity-sweep-short.extracted.md",
+    "research/strategies/liquidity-sweep-long.extracted.md",
+    "research/strategies/OPENING_RANGE_LIQUIDITY.md",
+    "research/strategies/CONSOLIDATION_LIQUIDITY.md"
+  ]
+}

@@ -1,0 +1,166 @@
+# SYNTHETIC VERIFY: invented dates, not a market calendar
+{
+  "source": "manual_macro_calendar",
+  "events": [
+    {
+      "date": "2024-02-08",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 0"
+    },
+    {
+      "date": "2024-02-21",
+      "kind": "budget",
+      "title": "SYNTHETIC event 1"
+    },
+    {
+      "date": "2024-03-05",
+      "kind": "election",
+      "title": "SYNTHETIC event 2"
+    },
+    {
+      "date": "2024-03-18",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 3"
+    },
+    {
+      "date": "2024-03-31",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 4"
+    },
+    {
+      "date": "2024-04-13",
+      "kind": "budget",
+      "title": "SYNTHETIC event 5"
+    },
+    {
+      "date": "2024-04-26",
+      "kind": "election",
+      "title": "SYNTHETIC event 6"
+    },
+    {
+      "date": "2024-05-09",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 7"
+    },
+    {
+      "date": "2024-05-22",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 8"
+    },
+    {
+      "date": "2024-06-04",
+      "kind": "budget",
+      "title": "SYNTHETIC event 9"
+    },
+    {
+      "date": "2024-06-17",
+      "kind": "election",
+      "title": "SYNTHETIC event 10"
+    },
+    {
+      "date": "2024-06-30",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 11"
+    },
+    {
+      "date": "2024-07-13",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 12"
+    },
+    {
+      "date": "2024-07-26",
+      "kind": "budget",
+      "title": "SYNTHETIC event 13"
+    },
+    {
+      "date": "2024-08-08",
+      "kind": "election",
+      "title": "SYNTHETIC event 14"
+    },
+    {
+      "date": "2024-08-21",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 15"
+    },
+    {
+      "date": "2024-09-03",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 16"
+    },
+    {
+      "date": "2024-09-16",
+      "kind": "budget",
+      "title": "SYNTHETIC event 17"
+    },
+    {
+      "date": "2024-09-29",
+      "kind": "election",
+      "title": "SYNTHETIC event 18"
+    },
+    {
+      "date": "2024-10-12",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 19"
+    },
+    {
+      "date": "2024-10-25",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 20"
+    },
+    {
+      "date": "2024-11-07",
+      "kind": "budget",
+      "title": "SYNTHETIC event 21"
+    },
+    {
+      "date": "2024-11-20",
+      "kind": "election",
+      "title": "SYNTHETIC event 22"
+    },
+    {
+      "date": "2024-12-03",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 23"
+    },
+    {
+      "date": "2024-12-16",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 24"
+    },
+    {
+      "date": "2024-12-29",
+      "kind": "budget",
+      "title": "SYNTHETIC event 25"
+    },
+    {
+      "date": "2025-01-11",
+      "kind": "election",
+      "title": "SYNTHETIC event 26"
+    },
+    {
+      "date": "2025-01-24",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 27"
+    },
+    {
+      "date": "2025-02-06",
+      "kind": "rbi_policy",
+      "title": "SYNTHETIC event 28"
+    },
+    {
+      "date": "2025-02-19",
+      "kind": "budget",
+      "title": "SYNTHETIC event 29"
+    },
+    {
+      "date": "2025-03-04",
+      "kind": "election",
+      "title": "SYNTHETIC event 30"
+    },
+    {
+      "date": "2025-03-17",
+      "kind": "fomc",
+      "title": "SYNTHETIC event 31"
+    }
+  ]
+}

@@ -1,0 +1,117 @@
+{
+  "schema": 1,
+  "source_head": "c390e23805ab322b9514810f70df60c98c03cfc4",
+  "files": [
+    {
+      "path": "backend/app/liquidity_signals.py",
+      "mode": "100644",
+      "sha256": "f8b49ca6dd7444197241777e8f5ce44a4ebccc1cd364872d9c25aac2ab556a68"
+    },
+    {
+      "path": "backend/app/strategies/clarify.py",
+      "mode": "100644",
+      "sha256": "0e567d9142bc124dc7536448dc42066fe552b165e603e4a74c884424515b81c0"
+    },
+    {
+      "path": "backend/app/strategies/store.py",
+      "mode": "100644",
+      "sha256": "f355ada76e7bd452184eb94d0a9b3d99cd430d3c95e2c4129775c36f98ecfcc2"
+    },
+    {
+      "path": "backend/app/trading/crew/__init__.py",
+      "mode": "100644",
+      "sha256": "01d2814a4a6bcb7a64426f489bdc7a1494ba31624b72de2c145c4c2a64fab327"
+    },
+    {
+      "path": "backend/app/trading/crew/entry_agent.py",
+      "mode": "100644",
+      "sha256": "6df527ab5c1b2879bd6b1bd582646aaa078845a41420fba65dcd50d3f5e20d33"
+    },
+    {
+      "path": "backend/app/trading/crew/exit_agent.py",
+      "mode": "100644",
+      "sha256": "163498f643887e7c8663588d1a9f2e6f8c7aef63d6397f474c5c5c084616bee1"
+    },
+    {
+      "path": "backend/app/trading/crew/holding_agent.py",
+      "mode": "100644",
+      "sha256": "946414e5e7ec780f2664dcaeb535c75ed38a9d7138f675cfd4971e1e6f7082db"
+    },
+    {
+      "path": "backend/app/trading/crew/journal_agent.py",
+      "mode": "100644",
+      "sha256": "69ef902e5432a7ed26d7a98d0149adf0851889cd146ca810f7ae9ba729c7a39d"
+    },
+    {
+      "path": "backend/app/trading/crew/manager.py",
+      "mode": "100644",
+      "sha256": "a76aecb9e9c4b9c802526cbbc726265aacf34ee894b6385c13c29e42b90778c0"
+    },
+    {
+      "path": "backend/app/trading/crew/order_flow_agent.py",
+      "mode": "100644",
+      "sha256": "c0528a25276fa929525c87e4dfe08fb7fff1022038004d27846fe9f43122c0f2"
+    },
+    {
+      "path": "backend/app/trading/crew/risk_agent.py",
+      "mode": "100644",
+      "sha256": "c2b58bc064367b3ff501d5d7022e7b25bdce0af781b09f8b867cb0c0243418a5"
+    },
+    {
+      "path": "backend/app/trading/crew/sniper_agent.py",
+      "mode": "100644",
+      "sha256": "58030735eda11edf311856023ef8dfe1b1244a83b5150b75a58b3cca1bbb43ca"
+    },
+    {
+      "path": "backend/app/trading/crew/trend_agent.py",
+      "mode": "100644",
+      "sha256": "579f80e9b76e665d058251da073cacce0e6194e79c96f69de82656fc1d9123e1"
+    },
+    {
+      "path": "backend/app/trading/scanner_crew/__init__.py",
+      "mode": "100644",
+      "sha256": "73ed9a829afee4f014e3f73974ad8f3addb951551ddbdc9d795f27f4336f7631"
+    },
+    {
+      "path": "backend/app/trading/scanner_crew/consolidation_agent.py",
+      "mode": "100644",
+      "sha256": "a4ae9ff7ec78a11622ae631d248a8a79ec4432f73b08c033eb5210eee1a4bf75"
+    },
+    {
+      "path": "backend/app/trading/scanner_crew/detector_agent.py",
+      "mode": "100644",
+      "sha256": "1fe20e02d35c6ba962f9ac691537d6c3fb3985a44c664c73b2bdc0e5b8e0881c"
+    },
+    {
+      "path": "backend/app/trading/scanner_crew/feed_agent.py",
+      "mode": "100644",
+      "sha256": "561cd5ac60c1aa5a583ac0c805ae6abf7ffd53b84919d618bd66c92cbe1e7027"
+    },
+    {
+      "path": "backend/scripts/backtest_pdc_15ema.py",
+      "mode": "100644",
+      "sha256": "62230eec054195a9df6860b66eab8494a988bf4be70ecf7ac73a0e1704050d6e"
+    }
+  ],
+  "permitted_additions": [
+    "backend/app/trading/crew/alert_agent.py",
+    "backend/app/trading/scanner_crew/news_agent.py",
+    "backend/app/strategies/rules.py",
+    "backend/app/strategies/schema.py",
+    "backend/app/strategies/normalizer.py",
+    "backend/app/strategies/analyzer.py",
+    "backend/app/strategies/capabilities.py",
+    "backend/app/strategies/configuration.py",
+    "backend/app/strategies/configuration_store.py",
+    "backend/app/strategies/research.py",
+    "backend/app/trading/scanner_crew/scanner_manager.py",
+    "backend/app/trading/scanner_crew/levels_agent.py"
+  ],
+  "guarded_roots": [
+    "backend/app/trading/crew",
+    "backend/app/trading/scanner_crew",
+    "backend/app/strategies",
+    "backend/app/liquidity_signals.py",
+    "backend/scripts/backtest_pdc_15ema.py"
+  ]
+}

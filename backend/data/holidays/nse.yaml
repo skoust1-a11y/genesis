@@ -1,0 +1,5 @@
+# SYNTHETIC: test closure assumptions only; no exchange authority
+holidays:
+  - {date: 2026-11-10, name: SYNTHETIC_CLOSED_DAY}
+  - {date: 2025-10-22, name: SYNTHETIC_CLOSED_DAY}
+  - {date: 2021-01-26, name: SYNTHETIC_CLOSED_DAY}

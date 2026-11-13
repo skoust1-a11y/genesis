@@ -1,0 +1,603 @@
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import os
+import sys
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from pathlib import Path
+from types import SimpleNamespace
+from urllib.parse import unquote, urlparse
+
+# Existing tests import this namespace path; keep one set of audit hooks and counters.
+sys.modules.setdefault("tests.conftest", sys.modules[__name__])
+
+# Collection-time Settings snapshots must never inherit production delivery enablement.
+os.environ["TELEGRAM_DELIVERY_ENABLED"] = "false"
+os.environ["LIVE_TRADING_ENABLED"] = "false"
+os.environ["SANDBOX_ALLOW_LIVE"] = "false"
+os.environ["PYTHON_DOTENV_DISABLED"] = "true"
+os.environ.pop("GENESIS_TELEGRAM_ARMED", None)
+
+_outbound_attempts: list[str] = []
+
+
+def _offline_network_guard(event: str, args: tuple) -> None:
+    if event not in ("socket.connect", "socket.getaddrinfo", "socket.sendto"):
+        return
+    address = args if event == "socket.getaddrinfo" else args[1]
+    if isinstance(address, (str, bytes)):
+        return  # Unix-domain sockets have no remote IP endpoint.
+    host = address[0]
+    try:
+        local = ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        local = host == "localhost"
+    if not local:
+        _outbound_attempts.append(event)
+        raise RuntimeError("Offline tests prohibit outbound network access")
+
+
+# Install before application imports, including collection-time side effects.
+sys.addaudithook(_offline_network_guard)
+
+
+BACKEND = Path(__file__).resolve().parents[1]
+REPO = BACKEND.parent
+_collection_active = True
+_protected_reads: list[str] = []
+# Checked-in reference metadata is not mutable trading state.
+COLLECTION_REFERENCE_FILES = {
+    BACKEND / "data" / "lot_sizes" / "nse.yaml",
+    BACKEND / "data" / "holidays" / "nse.yaml",
+}
+
+# Settings URLs are CWD-relative (sqlite:///data/...), so both data dirs hold production databases.
+PRODUCTION_DATA_DIRS = (REPO / "data", BACKEND / "data")
+PROTECTED_DB_FILES = (
+    BACKEND / "genesis.db",
+    BACKEND / "live.db",
+    REPO / "trades" / "trades.db",
+)
+_production_opens: list[str] = []
+
+
+def _is_protected_sqlite_path(target: str) -> bool:
+    if not target or target == ":memory:":
+        return False
+    resolved = Path(target).resolve()
+    if any(resolved.is_relative_to(d) for d in PRODUCTION_DATA_DIRS):
+        return True
+    return any(
+        resolved == p or (resolved.parent == p.parent and resolved.name.startswith(f"{p.name}-"))
+        for p in PROTECTED_DB_FILES
+    )
+
+
+def _guard_production_sqlite(event: str, args: tuple) -> None:
+    # The sqlite3.connect audit event fires for every SQLite open: sqlite3, SQLAlchemy, Connection().
+    if event != "sqlite3.connect":
+        return
+    target = os.fsdecode(args[0]) if isinstance(args[0], bytes | os.PathLike) else str(args[0])
+    if target.startswith("file:"):
+        target = unquote(urlparse(target).path)
+    if _is_protected_sqlite_path(target):
+        _production_opens.append(target)
+        raise RuntimeError(f"Test attempted to open a production database: {target}")
+
+
+sys.addaudithook(_guard_production_sqlite)
+
+
+def _guard_collection_state(event: str, args: tuple) -> None:
+    if not _collection_active or event != "open" or isinstance(args[0], int):
+        return
+    path = Path(os.fsdecode(args[0])).resolve()
+    if path in COLLECTION_REFERENCE_FILES:
+        return
+    if (_is_protected_sqlite_path(str(path))
+            or path.is_relative_to(REPO / "trades")
+            or path.is_relative_to(BACKEND / "trades")):
+        _protected_reads.append(str(path))
+        raise RuntimeError(f"Collection attempted to open protected state: {path}")
+
+
+sys.addaudithook(_guard_collection_state)
+
+
+from app.config import Settings
+
+# Test settings must not read the developer's production .env during imports.
+Settings.model_config["env_file"] = None
+
+import pytest
+from alembic import command
+from alembic.config import Config
+from fastapi.testclient import TestClient
+
+from app.audit import audit_context
+from app.config import get_settings
+from app.db import trade_store
+from app.db.models import StrategyVersion
+from app.db.session import engine_for, get_live_sessionmaker, get_sessionmaker
+from app.live.store import LiveStore
+from app.main import app
+from app.strategies.rules import rules_sha256
+from app.strategies.schema import parse_strategy_markdown
+from app.trading import odds
+
+VERSION_FIELDS = ("id", "strategy_id", "version", "markdown", "content_sha256")
+ACTOR = {"X-Actor": "alice"}
+TOKEN = "test-token-alice"
+AUTH = {"Authorization": f"Bearer {TOKEN}"}
+
+APPROVABLE_MARKDOWN = """---
+timeframe: 1d
+rules_authority: structured
+name: approvable-condor
+underlying: NIFTY
+max_lots: 2
+rules:
+  instrument: {underlying: NIFTY, structure: iron_condor, short_distance: 1000, wing_width: 200}
+  entry:
+  - {field: iv_rank, op: '>=', value: 40}
+  - {field: dte, op: '>=', value: 7}
+  - {field: dte, op: '<=', value: 21}
+  exit:
+  - {kind: profit_target_pct_of_credit, value: 50}
+  - {kind: stop_loss_pct_of_credit, value: 100}
+  risk: {max_lots: 2, max_daily_loss_pct: 2, min_risk_reward: 0.4}
+---
+# Thesis
+Sell an iron condor on NIFTY when implied volatility is rich.
+
+## Entry
+- IV rank at least 40 with 7 to 21 days to expiry
+
+## Exit
+- Take profit at 50% of credit, stop at 100% of credit
+
+## Risk
+- At most 2 lots, stop for the day after a 2% loss
+
+## Gaps
+"""
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--verify-protected-state", action="store_true", default=False,
+        help="Explicitly hash production databases and the protected legacy journal during test execution.",
+    )
+
+
+def pytest_collection_finish(session):
+    global _collection_active
+    _collection_active = False
+    if _protected_reads or _production_opens:
+        raise RuntimeError(f"Protected-state access during collection: {_protected_reads + _production_opens}")
+
+
+@pytest.fixture(scope="session")
+def protected_file_hashes(request):
+    if not request.config.getoption("--verify-protected-state"):
+        pytest.skip("Protected-state hashing requires --verify-protected-state")
+    paths = (REPO / "data" / "trades.db", REPO / "trades" / ".active_trades_2026-10-30.json")
+    before = {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths}
+    yield before
+    assert {path: hashlib.sha256(path.read_bytes()).hexdigest() for path in paths} == before
+
+
+def _production_fingerprint() -> dict[str, str]:
+    """SHA-256 of every production SQLite file, including -wal, -shm and -journal companions."""
+    paths = {p for d in PRODUCTION_DATA_DIRS for p in d.glob("*.db*")}
+    for db_file in PROTECTED_DB_FILES:
+        if db_file.parent.exists():
+            paths.update(db_file.parent.glob(f"{db_file.name}*"))
+    out = {}
+    for path in sorted(p for p in paths if p.is_file()):
+        with path.open("rb") as f:
+            out[str(path)] = hashlib.file_digest(f, "sha256").hexdigest()
+    return out
+
+
+@pytest.fixture(autouse=True)
+def _no_outbound_network():
+    _outbound_attempts.clear()
+    yield
+    assert not _outbound_attempts, f"Unmocked outbound network attempts: {_outbound_attempts}"
+
+
+@pytest.fixture
+def outbound_attempts():
+    return _outbound_attempts
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _production_databases_unchanged(request):
+    if not request.config.getoption("--verify-protected-state"):
+        yield
+        return
+    request.getfixturevalue("protected_file_hashes")
+    before = _production_fingerprint()
+    yield
+    after = _production_fingerprint()
+    changed = sorted(p for p in before.keys() | after.keys() if before.get(p) != after.get(p))
+    assert not changed, f"production databases changed during the test session: {changed}"
+
+
+@pytest.fixture
+def production_db_opens():
+    """Production opens the guard blocked in this test; tests that trip the guard on purpose clear it."""
+    return _production_opens
+
+
+@pytest.fixture(autouse=True)
+def _isolated_databases(tmp_path, monkeypatch):
+    """Every test starts on temporary databases; any attempt to open a production one fails the test,
+    even when the code under test swallows the guard's error."""
+    monkeypatch.setattr(trade_store, "DEFAULT_DB_PATH", tmp_path / "trades.db")
+    monkeypatch.setattr(odds, "NIFTY_5M_DB_PATH", tmp_path / "nifty_5m.db")
+    for name in ("DATABASE_URL", "LIVE_DATABASE_URL", "MARKET_DATABASE_URL"):
+        monkeypatch.setenv(name, f"sqlite:///{tmp_path / 'unconfigured' / f'{name.lower()}.db'}")
+    _production_opens.clear()
+    yield
+    assert not _production_opens, f"test opened production databases: {_production_opens}"
+
+
+def alembic_config(url: str, live: bool = False) -> Config:
+    cfg = Config(str(BACKEND / "alembic.ini"), ini_section="live" if live else "alembic")
+    cfg.set_main_option("script_location", str(BACKEND / ("alembic_live" if live else "alembic")))
+    cfg.attributes["database_url"] = url
+    cfg.attributes["configure_logger"] = False
+    return cfg
+
+
+@pytest.fixture(autouse=True)
+def _code_default_settings(monkeypatch):
+    """Code defaults for settings the developer's .env commonly changes."""
+    for name, value in (
+        ("OPENAI_API_KEY", ""), ("ANTHROPIC_API_KEY", ""), ("LLM_PROVIDER", "openai"),
+        ("LANGFUSE_SECRET_KEY", ""), ("LANGFUSE_PUBLIC_KEY", ""), ("LANGFUSE_TRACING_ENABLED", "false"),
+        ("LANGCHAIN_TRACING_V2", "false"),
+        ("FALLBACK_LLM_PROVIDER", ""), ("GROQ_API_KEY", ""), ("GOOGLE_API_KEY", ""), ("HF_TOKEN", ""),
+        ("DEFAULT_CAPITAL_INR", "500000"), ("DEFAULT_MAX_LOTS", "2"),
+        ("PORTFOLIO_MAX_OPEN_POSITIONS", "3"), ("PORTFOLIO_MAX_DAILY_LOSS_INR", "10000"),
+        ("MAX_ENTRIES_PER_DAY", "0"), ("MAX_CONSECUTIVE_LOSSES", "0"), ("LOSS_COOLDOWN_DAYS", "0"),
+        ("MAX_LOSS_PCT_OF_CAPITAL", "0"), ("LOT_SIZES", "NIFTY:75,BANKNIFTY:35"),
+        ("ALERT_TELEGRAM_BOT_TOKEN", ""), ("ALERT_TELEGRAM_CHAT_ID", ""),
+        ("SIGNALS_TELEGRAM_CHAT_ID", ""), ("TELEGRAM_DELIVERY_ENABLED", "false"),
+        ("ALERT_SMTP_HOST", ""), ("ALERT_SMTP_FROM", ""), ("ALERT_SMTP_TO", ""),
+    ):  # fmt: skip
+        monkeypatch.setenv(name, value)
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def market_db_url(tmp_path, monkeypatch):
+    url = f"sqlite:///{tmp_path / 'test_market.db'}"
+    monkeypatch.setenv("MARKET_DATABASE_URL", url)
+    get_settings.cache_clear()
+    yield url
+    engine_for(url, immediate=False).dispose()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def live_db_url(tmp_path, monkeypatch, market_db_url):
+    url = f"sqlite:///{tmp_path / 'test_live.db'}"
+    monkeypatch.setenv("LIVE_DATABASE_URL", url)
+    get_settings.cache_clear()
+    command.upgrade(alembic_config(url, live=True), "head")
+    yield url
+    engine_for(url).dispose()
+
+
+@pytest.fixture
+def db_url(tmp_path, monkeypatch, live_db_url):
+    url = f"sqlite:///{tmp_path / 'test.db'}"
+    monkeypatch.setenv("DATABASE_URL", url)
+    for name in ("API_TOKENS", "BROKER_CREDENTIALS_KEY"):
+        monkeypatch.setenv(name, "")
+    monkeypatch.setenv("LIVE_MIN_PAPER_DAYS", "0")
+    for name in ("LIVE_TRADING_ENABLED", "SANDBOX_ALLOW_LIVE"):
+        monkeypatch.setenv(name, "false")
+    monkeypatch.setenv("SANDBOX_STATE_DIR", str(tmp_path / "sandbox"))
+    get_settings.cache_clear()
+    command.upgrade(alembic_config(url), "head")
+    yield url
+    engine_for(url).dispose()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def engine(db_url):
+    return engine_for(db_url)
+
+
+@pytest.fixture
+def live_engine(db_url, live_db_url):
+    return engine_for(live_db_url)
+
+
+@pytest.fixture
+def session(db_url):
+    s = get_sessionmaker()()
+    yield s
+    s.rollback()
+    s.close()
+
+
+@pytest.fixture
+def live_session(db_url):
+    s = get_live_sessionmaker()()
+    yield s
+    s.rollback()
+    s.close()
+
+
+@pytest.fixture
+def client(db_url):
+    return TestClient(app)
+
+
+@pytest.fixture
+def demo(client):
+    response = client.post("/api/demo/run", headers={"X-Actor": "tester"})
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.fixture
+def validated_oos_evidence(monkeypatch):
+    """Explicit test-only evidence for tests of downstream authorization/execution."""
+    from app.live import approvals
+    from app.strategies.normalizer import normalize_markdown
+    bindings = {}
+    from app.trading import promotion
+    original_promotion = promotion.approval_dossier_blockers
+    def test_only_promotion(payload, spec, **kwargs):
+        if spec.validation_binding() in bindings.values():
+            return []  # Explicit synthetic fixture for downstream deployment tests only.
+        return original_promotion(payload, spec, **kwargs)
+    monkeypatch.setattr(promotion, "approval_dossier_blockers", test_only_promotion)
+    original = approvals._latest_completed_report
+    def lookup(research, version_id):
+        report = original(research, version_id)
+        if report is None or report.id not in bindings:
+            return report
+        return SimpleNamespace(id=report.id, verdict_label=report.verdict_label, payload={
+            "fidelity_tier": "TIER_1_VERIFIED", "validation_passed": True,
+            "paper_promotion_eligible": True, "verified_market_performance": True,
+            "has_valid_oos_folds": True,
+            "data_fidelity_and_provenance": {"validation_binding": bindings[report.id]},
+        })
+    monkeypatch.setattr(approvals, "_latest_completed_report", lookup)
+    def register(report_id, markdown, strategy_id, version="v1"):
+        bindings[report_id] = normalize_markdown(
+            markdown, strategy_id=strategy_id, strategy_version=version).validation_binding()
+    return register
+
+
+@pytest.fixture
+def approvable(client, validated_oos_evidence):
+    """A strategy with explicitly injected test-only bound OOS evidence."""
+    ingest = client.post("/api/ingest/extract", json={"source_type": "markdown", "text": APPROVABLE_MARKDOWN})
+    assert ingest.status_code == 200, ingest.text
+    strategy_id = ingest.json()["strategy_id"]
+    review = client.post("/api/review/run", json={"strategy_id": strategy_id})
+    assert review.status_code == 200, review.text
+    validated_oos_evidence(review.json()["report_id"], APPROVABLE_MARKDOWN, strategy_id)
+    preview = client.get("/api/live/approvals/preview", params={"strategy_id": strategy_id, "version": 1}).json()
+    assert preview["blockers"] == [], preview
+    return {"strategy_id": strategy_id, "preview": preview, "report_id": review.json()["report_id"]}
+
+
+def create_account(client, mode: str = "paper", broker: str = "paper", headers: dict | None = None) -> dict:
+    response = client.post(
+        "/api/live/broker-accounts", json={"broker": broker, "account_ref_masked": "PAPER-1", "mode": mode},
+        headers=headers or {},
+    )  # fmt: skip
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+@pytest.fixture
+def live_env(db_url, monkeypatch):
+    """API tokens configured, live trading enabled and the sandbox broker allowed in live mode."""
+    from app.auth import hash_token
+
+    monkeypatch.setenv("API_TOKENS", f"alice:{hash_token(TOKEN)}")
+    monkeypatch.setenv("LIVE_TRADING_ENABLED", "true")
+    monkeypatch.setenv("SANDBOX_ALLOW_LIVE", "true")
+    get_settings.cache_clear()
+    yield AUTH
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def paper_account(client):
+    return create_account(client)
+
+
+def approval_body(approvable: dict, account: dict, **overrides) -> dict:
+    return {
+        "strategy_id": approvable["strategy_id"],
+        "version": 1,
+        "mode": account["mode"],
+        "broker_account_id": account["id"],
+        "confirm_rules_sha256": approvable["preview"]["rules_sha256"],
+        "acknowledge_verdict": True,
+    } | overrides
+
+
+def approve_and_start(client, approvable: dict, account: dict, headers: dict = ACTOR, **overrides) -> str:
+    response = client.post("/api/live/approvals", json=approval_body(approvable, account, **overrides), headers=headers)
+    assert response.status_code == 200, response.text
+    deployment_id = response.json()["deployment"]["id"]
+    started = client.post(f"/api/live/deployments/{deployment_id}/start", json={"reason": "test"}, headers=headers)
+    assert started.status_code == 200, started.text
+    return deployment_id
+
+
+def seed_live(session, version: StrategyVersion | SimpleNamespace) -> dict:
+    """Populate every live table: one closed trade, one rejected order and one review."""
+    now = datetime(2026, 1, 5, 9, 20, tzinfo=UTC)
+    store = LiveStore(session)
+    strategy_id, strategy_version_id = version.strategy_id, version.id
+    raw_rules = parse_strategy_markdown(version.markdown).frontmatter.get("rules") or {}
+    with audit_context("live-seed"):
+        snapshot = store.create_deployed_strategy(
+            strategy_id=strategy_id,
+            strategy_version_id=strategy_version_id,
+            version=version.version,
+            name="seeded",
+            markdown=version.markdown,
+            content_sha256=version.content_sha256,
+            rules=raw_rules,
+            rules_sha256=rules_sha256(raw_rules),
+            approved_by="tester",
+        )
+        account = store.create_broker_account(broker="zerodha", account_ref_masked="XX1234", mode="paper")
+        deployment = store.create_deployment(
+            deployed_strategy_id=snapshot.id,
+            broker_account_id=account.id,
+            mode="paper",
+            sebi_algo_id="ALGO-TEST-1",
+            risk_limits={"max_lots": 2},
+            approved_by="tester",
+        )
+        store.add_deployment_event(deployment.id, "started", "paper run")
+        open_intent = store.create_trade_intent(
+            deployment_id=deployment.id,
+            action="open",
+            legs=[{"side": "SELL", "option_type": "CE", "strike": 22500}],
+            entry_rule="iv_rank >= 40 and 7 <= dte <= 21",
+            entry_conditions=[{"field": "iv_rank", "op": ">=", "threshold": 40, "actual": 47, "passed": True}],
+            reason_text="IV rank 47 >= 40 with 12 DTE",
+            market_snapshot={"spot": 22410, "iv_rank": 47, "dte": 12, "vix": 14.2},
+            thesis_ref="strategy_version:thesis",
+            target_pnl=Decimal("1500"),
+            stop_loss_pnl=Decimal("-3000"),
+            max_loss=Decimal("3000"),
+            risk_reward=0.5,
+            confidence=0.7,
+            risk_checks={"max_lots_ok": True},
+            decided_by="agent",
+            model=None,
+            approval="auto",
+        )
+        order = store.place_order(
+            trade_intent_id=open_intent.id,
+            client_order_id="cli-1",
+            broker_order_id="b-1",
+            sebi_algo_id="ALGO-TEST-1",
+            exchange="NFO",
+            tradingsymbol="NIFTY26JAN22500CE",
+            expiry="2026-01-29",
+            strike=Decimal("22500"),
+            option_type="CE",
+            side="SELL",
+            quantity=75,
+            order_type="LIMIT",
+            product="NRML",
+            limit_price=Decimal("120.5"),
+            placed_at=now,
+        )
+        store.add_order_event(order_id=order.id, status="OPEN", filled_qty=0, pending_qty=75, event_at=now)
+        store.add_order_event(
+            order_id=order.id, status="COMPLETE", filled_qty=75, pending_qty=0,
+            avg_price=Decimal("120.5"), event_at=now + timedelta(seconds=2),
+        )  # fmt: skip
+        store.record_fill(
+            order_id=order.id, broker_trade_id="t-1", quantity=75, price=Decimal("120.5"),
+            filled_at=now + timedelta(seconds=2),
+        )  # fmt: skip
+        live_trade = store.close_live_trade(
+            deployment_id=deployment.id,
+            open_intent_id=open_intent.id,
+            legs=[{"side": "SELL", "option_type": "CE", "strike": 22500}],
+            opened_at=now,
+            closed_at=now + timedelta(days=2),
+            holding_minutes=2 * 24 * 60,
+            exit_rule="Close all when profit >= 50% of credit",
+            exit_reason="target_hit",
+            gross=Decimal("1650"),
+            est_costs=Decimal("95.5"),
+            actual_costs=Decimal("97.25"),
+            net=Decimal("1552.75"),
+            slippage_vs_expected=Decimal("-12.5"),
+            pnl_vs_target=Decimal("52.75"),
+            outcome_label="win",
+        )
+        store.record_broker_charge(
+            broker_account_id=account.id, trade_date="2026-01-05", order_id=order.id,
+            source="contract_note", breakdown={"brokerage": "40"}, total=Decimal("97.25"),
+        )  # fmt: skip
+        store.snapshot_positions(
+            broker_account_id=account.id, deployment_id=deployment.id, positions=[], mtm=Decimal("0")
+        )
+        store.add_capital_event(deployment_id=deployment.id, kind="deposit", amount_inr=Decimal("50000"))
+        store.record_drawdown_event(
+            deployment_id=deployment.id, level=1, action="warn", at_pct=3.0, drawdown_pct=3.2,
+            drawdown_inr=Decimal("16000"), equity=Decimal("484000"), peak=Decimal("500000"),
+        )  # fmt: skip
+
+        rejected_intent = store.create_trade_intent(
+            deployment_id=deployment.id,
+            action="open",
+            legs=[{"side": "SELL", "option_type": "PE", "strike": 22000}],
+            reason_text="IV rank 51 >= 40 with 10 DTE",
+            decided_by="agent",
+        )
+        rejected_order = store.place_order(
+            trade_intent_id=rejected_intent.id, client_order_id="cli-2", exchange="NFO",
+            tradingsymbol="NIFTY26JAN22000PE", side="SELL", quantity=75, order_type="MARKET", product="NRML",
+        )  # fmt: skip
+        store.add_order_event(
+            order_id=rejected_order.id, status="REJECTED", message="margin shortfall", event_at=now
+        )
+        review = store.add_review(live_trade.id, {"lesson": "seeded review", "mistake_tags": ["seeded"]})
+        opinion = store.add_trade_opinion(
+            deployment_id=deployment.id, trade_intent_id=rejected_intent.id, mode="veto", status="ok",
+            decision="skip", lots=0, rules_lots=1, final_lots=0, applied=True, reasons=["seeded"],
+            confidence=0.6, model="test-model", prompt_sha256="0" * 64,
+        )  # fmt: skip
+        phantom = store.record_phantom_trade(
+            deployment_id=deployment.id, trade_intent_id=rejected_intent.id, trade_opinion_id=opinion.id,
+            kind="vetoed", lots=1, legs=[{"side": "SELL", "option_type": "PE", "strike": 22000}],
+            opened_at=now, closed_at=now + timedelta(days=1), exit_reason="profit_target",
+            gross=Decimal("500"), est_costs=Decimal("50"), net=Decimal("450"),
+        )  # fmt: skip
+        store.add_broker_credential(
+            broker_account_id=account.id, field="api_key", ciphertext="seeded-ciphertext", fingerprint="0" * 12,
+            revoked=False,
+        )  # fmt: skip
+        store.record_heartbeat(deployment_id=deployment.id, at=now, feed="replay", outcome="idle", pid=1)
+    session.commit()
+    return {
+        "snapshot": snapshot,
+        "review": review,
+        "account": account,
+        "deployment": deployment,
+        "open_intent": open_intent,
+        "order": order,
+        "live_trade": live_trade,
+        "rejected_intent": rejected_intent,
+        "rejected_order": rejected_order,
+        "opinion": opinion,
+        "phantom": phantom,
+    }
+
+
+@pytest.fixture
+def live(session, live_session, demo):
+    from app.strategies.store import StrategyStore
+
+    row = StrategyStore(session).latest_version(demo["strategy_id"])
+    version = SimpleNamespace(**{k: getattr(row, k) for k in VERSION_FIELDS})
+    session.rollback()
+    return seed_live(live_session, version)

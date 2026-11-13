@@ -1,0 +1,5 @@
+SYNTHETIC SOFTWARE TEST SPECIMEN — invented for Genesis V3 demo ingestion.
+No historical NotebookLM document, private notes, market evidence or performance claim.
+Example thesis: a NIFTY iron condor with IV rank at least 40 and 7–21 days to expiry.
+Example exits: profit at 50 percent of credit; stop at 100 percent of credit.
+Example risk: at most two lots. Input provenance only; offline demo uses its explicit fixed strategy.

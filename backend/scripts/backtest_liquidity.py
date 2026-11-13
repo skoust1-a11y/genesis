@@ -1,0 +1,771 @@
+"""Backtest of the NIFTY liquidity sweep signals as an Excel workbook: Summary, Yearly, Trades, Daily.
+
+Data: Yahoo's last 60 days of 5m bars (default; VWAP from NIFTYBEES, as the live alerts), or with --history the
+Kaggle NIFTY 1-minute CSV rolled up to 5m and topped up from Groww's 5m chart (late Dec 2025 on). The index has no
+volume, so --history uses the session's time-weighted average price in place of VWAP.
+
+Entries: app.liquidity_signals.scan, the code the live alerts run. Exits: app.liquidity_signals.exit_of (stop,
+breakeven after +1R or target touched by a 5m high/low, else the 15:10 close). Options: `--lots` lots (fewer when the
+trading capital cannot pay the premium) of the OTM_STEPS-out-of-the-money CE/PE to the expiry in force (monthly Thursday before 11 Feb 2019, weekly
+Thursday until Aug 2025, weekly Tuesday since), at the lot size of the day, Black-76 at the previous day's India VIX
+(IV held constant), today's charges, no slippage. --book-profits keeps the trading capital at --capital: losses come
+out of it, a winning trade first refills it, and the rest of the profit moves to a wallet.
+
+    curl -L -o nifty.zip https://www.kaggle.com/api/v1/datasets/download/mavrick136/10-years-of-nifty-50-1-minute-data-20152025
+    uv run --with openpyxl python scripts/backtest_liquidity.py [--history data/intraday/NIFTY_1MIN_2015-2025.csv]
+        [--years 10] [--capital 100000] [--lots 1] [--book-profits] [--out FILE]
+"""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import sys
+from bisect import bisect_left
+from collections import defaultdict
+from datetime import date, datetime, timedelta
+from datetime import time as dtime
+from pathlib import Path
+
+import httpx
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.api.market import IST, _chart, add_vwap, parse_yahoo_chart
+from app.config import Settings, get_settings
+from app.engine.metrics import performance
+from app.liquidity_signals import (
+    BREAK_DAYS,
+    EXIT,
+    INDEX,
+    LOSS_STREAK,
+    MIN_RISK,
+    OTM_STEPS,
+    R_MULT,
+    VWAP_PROXY,
+    estimated_plan,
+    exit_of,
+    scan,
+    scan_retest,
+    scan_trendline_reversal,
+    staged_exit_of,
+)
+from app.market.expiry import (  # noqa: F401 (re-exported)
+    MUHURAT_SESSIONS,
+    TUESDAY_FROM,
+    WEEKLY_FROM,
+    roll_back,
+    scheduled_expiry,
+)
+from app.market.hours import holidays
+from app.market.nse import LotChange, contract_lot_size, load_lot_sizes
+from app.paper import order_charges
+from app.trading.option_pnl import black76
+
+METHODOLOGY = "ledger-v2: chronological entries/exits on shared cash; staged exits settled per execution"
+# ponytail: the dated table starts in 2019; NIFTY's lot was 75 from Nov 2015. Earlier dates fail closed.
+PRE_TABLE_LOTS = [LotChange("NIFTY", "2015-11-01", 75)]
+STAGED_PARTIAL = 0.5  # staged_exit_of's partial_pct default: the share of the position booked at +2R
+GROWW = (
+    "https://groww.in/v1/api/charting_service/v2/chart/exchange/NSE/segment/CASH/NIFTY"
+)
+
+
+# Data
+
+
+def yahoo_data() -> tuple[list[dict], dict, list[dict]]:
+    bars = [
+        b
+        for b in parse_yahoo_chart(_chart(INDEX, "5m", "60d"))
+        if None not in (b["open"], b["high"], b["low"])
+    ]
+    above = {b["date"]: b["close"] > b["vwap"] if b["vwap"] else None
+             for b in add_vwap(parse_yahoo_chart(_chart(VWAP_PROXY, "5m", "60d")))}  # fmt: skip
+    return (
+        bars,
+        above,
+        [d for d in parse_yahoo_chart(_chart(INDEX, "1d", "6mo")) if d["high"]],
+    )
+
+
+def kaggle_5m(path: Path) -> list[dict]:
+    """5m bars (labelled by start time) from the Kaggle 1-minute CSV; its 15:30 row repeats 15:29 and is dropped.
+    The file also fills every NSE holiday with the previous session's last minute repeated all day: those sessions
+    are dropped, or the next day's previous-day high/low would be that one minute's range."""
+    out: list[dict] = []
+    with path.open() as f:
+        for row in csv.DictReader(f):
+            t = row["datetime"][:16]
+            if not "09:15" <= t[11:] < "15:30" or "" in (
+                row["open"],
+                row["high"],
+                row["low"],
+                row["close"],
+            ):
+                continue
+            start = f"{t[:14]}{int(t[14:16]) // 5 * 5:02d}"
+            o, h, low, c = (float(row[k]) for k in ("open", "high", "low", "close"))
+            if out and out[-1]["date"] == start:
+                b = out[-1]
+                b["high"], b["low"], b["close"] = (
+                    max(b["high"], h),
+                    min(b["low"], low),
+                    c,
+                )
+            else:
+                out.append(
+                    {"date": start, "open": o, "high": h, "low": low, "close": c}
+                )
+    days: dict[str, set] = defaultdict(set)
+    for b in out:
+        days[b["date"][:10]].add((b["open"], b["high"], b["low"], b["close"]))
+    return [b for b in out if len(days[b["date"][:10]]) > 1]
+
+
+def groww_5m(start: date, end: date) -> list[dict]:
+    """NIFTY 5m bars from Groww's public chart service (it keeps about a year), 10 days per request."""
+    out, day = [], start
+    while day <= end:
+        stop = min(day + timedelta(days=10), end + timedelta(days=1))
+        ms = [
+            int(datetime.combine(d, dtime(9), IST).timestamp() * 1000)
+            for d in (day, stop)
+        ]
+        r = httpx.get(GROWW, params={"startTimeInMillis": ms[0], "endTimeInMillis": ms[1], "intervalInMinutes": 5},
+                      headers={"User-Agent": "Mozilla/5.0"}, timeout=20)  # fmt: skip
+        r.raise_for_status()
+        for ts, o, h, low, c, *_ in r.json()["candles"]:
+            out.append({"date": datetime.fromtimestamp(ts, IST).strftime("%Y-%m-%d %H:%M"),
+                        "open": o, "high": h, "low": low, "close": c})  # fmt: skip
+        day = stop
+    return out
+
+
+def twap_above(bars: list[dict]) -> dict[str, bool]:
+    """Whether each 5m bar closed above the session's running mean typical price (VWAP without volume)."""
+    out, day, total, n = {}, None, 0.0, 0
+    for b in bars:
+        if b["date"][:10] != day:
+            day, total, n = b["date"][:10], 0.0, 0
+        total, n = total + (b["high"] + b["low"] + b["close"]) / 3, n + 1
+        out[b["date"]] = b["close"] > total / n
+    return out
+
+
+def history_data(path: Path) -> tuple[list[dict], dict, list[dict]]:
+    bars = kaggle_5m(path)
+    seen, last = {b["date"] for b in bars}, date.fromisoformat(bars[-1]["date"][:10])
+    bars += [
+        b
+        for b in groww_5m(last + timedelta(days=1), date.today())
+        if b["date"] not in seen
+    ]
+    daily: dict[str, dict] = {}
+    for b in bars:
+        d = daily.setdefault(
+            b["date"][:10], {"date": b["date"][:10], "high": b["high"], "low": b["low"]}
+        )
+        d["high"], d["low"] = max(d["high"], b["high"]), min(d["low"], b["low"])
+    return bars, twap_above(bars), list(daily.values())
+
+
+# Rules
+
+
+def expiry_for(day: date, trading: set[str], settings: Settings) -> date:
+    """The nearest NIFTY expiry on or after `day`, moved to the trading day before when it falls on a holiday."""
+    off, last = holidays(settings), max(trading)
+    return roll_back(scheduled_expiry(day), day, lambda d: d.weekday() >= 5 or d.isoformat() in off
+                     or d.isoformat() <= last and d.isoformat() not in trading)  # fmt: skip
+
+
+def option_exit(plan: dict, spot: float, at: str, settings: Settings) -> float:
+    strike, kind = plan["option"].split()
+    expires = datetime.combine(
+        date.fromisoformat(plan["expiry"]),
+        dtime.fromisoformat(settings.market_close),
+        IST,
+    )
+    left = expires - datetime.strptime(at, "%Y-%m-%d %H:%M").replace(tzinfo=IST)
+    return black76(
+        spot,
+        float(strike),
+        max(left.total_seconds(), 0) / 86400 / 365,
+        plan["iv_pct"] / 100,
+        kind,
+    )
+
+
+def backtest(settings: Settings, bars: list[dict], above: dict, daily: list[dict], vix: dict[str, float],
+             since: str = "", stop_at: str = "swing", require_trendline: bool = False,
+             include_equal: bool = False, staged: bool = False,
+             otm_steps: int = OTM_STEPS, stagnation_bars: int = 0,
+             skip_lunch: bool = True, include_retest: bool = True,
+             include_trendline_reversal: bool = True) -> tuple[list[dict], list[str]]:  # fmt: skip
+    """Every signal from `since` (before today) with its index exit and 1-unit option premiums; and the days."""
+    by_day: dict[str, list[dict]] = defaultdict(list)
+    for b in bars:
+        by_day[b["date"][:10]].append(b)
+    daily_dates, vix_dates = [d["date"][:10] for d in daily], sorted(vix)
+    lots_table = PRE_TABLE_LOTS + load_lot_sizes(Path(settings.data_dir) / "lot_sizes" / "nse.yaml")
+    trading, today = set(by_day) - MUHURAT_SESSIONS.keys(), datetime.now(IST).strftime("%Y-%m-%d")
+    trades, days = [], []
+    for d in sorted(k for k in by_day if since <= k < today):
+        i, j = bisect_left(daily_dates, d), bisect_left(vix_dates, d)
+        if not i or not j:
+            continue
+        days.append(d)
+        prev, iv = daily[i - 1], vix[vix_dates[j - 1]]
+        expiry = expiry_for(date.fromisoformat(d), trading, settings)
+        if expiry.isoformat() == d or d in MUHURAT_SESSIONS:
+            continue  # no trades on expiry day or in the Muhurat special session
+        day_signals = scan(by_day[d], above, prev["high"], prev["low"], stop_at=stop_at, require_trendline=require_trendline, skip_lunch=skip_lunch)
+        for s in day_signals:
+            s.setdefault("pool", f"PD{'L' if s['side'] == 'Long' else 'H'}")
+        if include_retest:
+            retests = scan_retest(by_day[d], above, prev["high"], prev["low"], skip_lunch=skip_lunch)
+            day_signals.extend(retests)
+        if include_trendline_reversal:
+            tl_reversals = scan_trendline_reversal(by_day[d], skip_lunch=skip_lunch)
+            day_signals.extend(tl_reversals)
+        if include_equal:
+            from app.intraday_liquidity import atr, equal_levels, scan_levels
+            atrs = atr(by_day[d])
+            eq_lvs = equal_levels(by_day[d], atrs)
+            if eq_lvs:
+                tot_p = 0.0
+                v_list = []
+                for n_idx, b_item in enumerate(by_day[d], 1):
+                    tot_p += (b_item["high"] + b_item["low"] + b_item["close"]) / 3.0
+                    v_list.append(tot_p / n_idx)
+                for eq_s in scan_levels(by_day[d], v_list, atrs, eq_lvs, "equal", min_sweep=2.0, with_open_only=True, require_trendline=require_trendline, skip_lunch=skip_lunch):
+                    eq_s["pool"] = f"Equal {'High (EQH)' if eq_s['side'] == 'Short' else 'Low (EQL)'}"
+                    day_signals.append(eq_s)
+        for s in day_signals:
+            legs = []  # (time, index price, share of the position)
+            if staged:
+                res = staged_exit_of(by_day[d], s, stagnation_bars=stagnation_bars)
+                reason, price, at = res["exit_reason"], res["exit_price"], res["exit_time"]
+                if res["partial_hit"]:
+                    legs.append((res["partial_time"], res["partial_price"], STAGED_PARTIAL))
+            else:
+                reason, price, at = exit_of(by_day[d], s)
+            legs.append((at, price, 1 - sum(f for *_, f in legs)))
+            plan = estimated_plan(s, settings, iv, expiry, otm_steps=otm_steps)
+            exits = [{"time": t_, "points": round(p - s["entry"] if s["side"] == "Long" else s["entry"] - p, 2),
+                      "share": f, "premium": round(option_exit(plan, p, t_, settings), 2)}
+                     for t_, p, f in legs]  # fmt: skip
+            points = sum(e["points"] * e["share"] for e in exits)  # index points per unit, legs weighted by share
+            r_val = round(points / s["risk"], 2)
+            trades.append({
+                "Date": d, "Pool": s.get("pool", "PDH/PDL"), "Side": s["side"], "Entry time": s["time"][11:], "Entry": s["entry"], "Stop": s["stop"],
+                "Target": s["target"], "Risk pts": s["risk"], "Exit time": at[11:], "Exit reason": reason,
+                "Exit": round(price, 2), "Points": round(points, 2), "R": r_val,
+                "Option": plan["option"], "Expiry": plan["expiry"], "VIX": plan["iv_pct"],
+                "Lot size": contract_lot_size(lots_table, "NIFTY", d),
+                "Premium in": plan["entry_premium"], "Premium at stop": plan["exits"][0]["premium"],
+                "Premium out": exits[-1]["premium"], "Exits": exits,
+                "Why": " | ".join(s["why"]),
+            })  # fmt: skip
+    return trades, days
+
+
+# Money
+
+
+def ledger(trades: list[dict], days: list[str], settings: Settings, capital: float, lots: int, book: bool,
+           risk_pct: float | None = None, max_positions: int | None = None,
+           max_trades_per_day: int | None = None) -> list[dict]:  # fmt: skip
+    """Replays every entry and exit (each staged leg separately) in time order on one shared account; at the same
+    minute exits settle before entries, then trades in (date, entry time, side, pool, entry, contract, ...) order.
+    Lots: `risk_pct`% of the trading capital (realised cash + premium locked in open positions, at cost) / the
+    option's loss per lot at the stop (charges in) when set, else `lots`; never more than the free cash can pay,
+    charges in. Risking a fixed rupee amount instead drained the capital to Rs 3,887 over 2016-2026 on Rs 50,000.
+    `max_positions` / `max_trades_per_day` cap open positions and entries a day when given (none by default).
+    P&L is realised as each execution closes quantity. LOSS_STREAK trades closing at a loss in a row (index points,
+    in exit order) skip later entries that day and the next BREAK_DAYS trading days. With `book`, a winning trade
+    first refills the trading capital to `capital` and the rest moves to the wallet (booking every win in full drains
+    the capital: losses would never be won back), never more than the free cash (any shortfall at the next close),
+    as a BOOK execution. Each trade gets
+    its `Executions`, each with the free cash after it. Returns one row per day."""
+    trades.sort(key=lambda t: (t["Date"], t["Entry time"], t.get("Side", ""), t.get("Pool", ""), t.get("Entry", 0),
+                               t["Option"], t["Premium in"], t.get("Premium at stop", 0), t["Exit time"],
+                               repr(t.get("Exits"))))  # total order: same-key trades replay alike in any input order  # fmt: skip
+    events = []
+    for i, t in enumerate(trades):
+        t.setdefault("Exits", [{"time": f"{t['Date']} {t['Exit time']}", "points": t["Points"], "share": 1.0,
+                                "premium": t["Premium out"]}])  # fmt: skip
+        entry_at = f"{t['Date']} {t['Entry time']}"
+        if any(e["time"] <= entry_at for e in t["Exits"]):
+            raise ValueError(f"trade {entry_at} exits at or before its entry")
+        events.append((entry_at, 1, i, -1))
+        events += [(e["time"], 0, i, k) for k, e in enumerate(t["Exits"])]
+    events.sort()
+
+    cash, locked, wallet, streak, paused = capital, 0.0, 0.0, 0, ""
+    open_qty: dict[int, int] = {}
+    taken_on: dict[str, int] = defaultdict(int)
+    eod: dict[str, tuple[float, float]] = {}
+
+    def charges(kind, side, price, qty, day):
+        return order_charges(settings, kind, side, price, qty, day)["total"]
+
+    def snapshot(t):
+        t.update({"Trading capital Rs": round(cash + locked), "Wallet Rs": round(wallet),
+                  "Total Rs": round(cash + locked + wallet)})  # fmt: skip
+
+    for at, is_entry, i, k in events:
+        t = trades[i]
+        kind, lot, day = t["Option"].split()[1], t["Lot size"], t["Date"]
+        if is_entry:
+            n, skip = 0, ""
+            if day <= paused:
+                skip = f"{LOSS_STREAK}-loss break"
+            elif max_positions is not None and len(open_qty) >= max_positions:
+                skip = "max open positions"
+            elif max_trades_per_day is not None and taken_on[day] >= max_trades_per_day:
+                skip = "daily trade limit"
+            else:
+                unit = t["Premium in"] * lot
+                n_cash = max(int(cash // unit), 0) if unit > 0 else lots
+                while n_cash and n_cash * unit + charges(kind, "BUY", t["Premium in"], n_cash * lot, day) > cash:
+                    n_cash -= 1
+                n = min(lots, n_cash)
+                if risk_pct is not None:
+                    risk = (cash + locked) * risk_pct / 100
+                    loss = (t["Premium in"] - t["Premium at stop"]) * lot + sum(
+                        charges(kind, side, p, lot, day) for side, p in (("BUY", t["Premium in"]), ("SELL", t["Premium at stop"])))  # fmt: skip
+                    n = min(int(risk // loss) if loss > 0 else 0, n_cash)
+                    skip = f"1 lot risks over {risk_pct:g}% of capital" if loss <= 0 or risk < loss else ""
+                if not n and not skip:
+                    skip = "capital too low"
+            qty = n * lot
+            t.update({"Lots": n, "Skipped": skip, "Qty": qty, "Futures Rs": 0, "Option Rs": 0, "Booked Rs": 0,
+                      "Executions": []})  # fmt: skip
+            if qty:
+                c = charges(kind, "BUY", t["Premium in"], qty, day)
+                flow = -(t["Premium in"] * qty + c)
+                cash, locked, open_qty[i] = cash + flow, locked - flow, qty
+                taken_on[day] += 1
+                t["Executions"].append({"Time": at, "Side": "BUY", "Index pts": 0.0, "Premium": t["Premium in"],
+                                        "Qty": qty, "Charges Rs": c, "Cash flow Rs": flow, "Open qty": qty,
+                                        "Free cash Rs": cash})  # fmt: skip
+            snapshot(t)
+        elif i in open_qty:
+            leg, total = t["Exits"][k], t["Qty"]
+            last = k == len(t["Exits"]) - 1
+            q = open_qty[i] if last else int(t["Lots"] * leg["share"]) * lot  # whole lots only
+            if q:
+                c = charges(kind, "SELL", leg["premium"], q, day)
+                flow = leg["premium"] * q - c
+                cost = t["Premium in"] * q + t["Executions"][0]["Charges Rs"] * q / total  # buy side, pro rata
+                cash, locked, open_qty[i] = cash + flow, locked - cost, open_qty[i] - q
+                t["Executions"].append({"Time": at, "Side": "SELL", "Index pts": leg["points"],
+                                        "Premium": leg["premium"], "Qty": q, "Charges Rs": c,
+                                        "Cash flow Rs": flow, "Open qty": open_qty[i], "Free cash Rs": cash})  # fmt: skip
+            if last:
+                del open_qty[i]
+                if not open_qty:
+                    locked = 0.0  # drop float dust once flat
+                sells = t["Executions"][1:]
+                pnl = sum(e["Cash flow Rs"] for e in t["Executions"])
+                fut = sum(e["Index pts"] * e["Qty"] for e in sells)
+                t["Points"] = round(fut / total, 2)  # as executed: a 1-lot staged trade cannot book half
+                if t.get("Risk pts"):
+                    t["R"] = round(t["Points"] / t["Risk pts"], 2)
+                streak = streak + 1 if t["Points"] < 0 else 0
+                if streak == LOSS_STREAK:
+                    j = bisect_left(days, day) + BREAK_DAYS
+                    streak, paused = 0, days[j] if j < len(days) else "9999"
+                # cash + locked (open positions at cost) - capital = realised P&L after charges and earlier bookings;
+                # capped at free cash (a staged trade's earlier legs may already fund other positions), so a shortfall
+                # is booked at a later close
+                booked = int(min(cash, max(cash + locked - capital, 0.0)) * 100) / 100 if book else 0.0  # whole paise
+                cash, wallet = cash - booked, wallet + booked  # refill losses first, book the rest
+                if booked > 0:
+                    t["Executions"].append({"Time": at, "Side": "BOOK", "Index pts": 0.0, "Premium": 0.0, "Qty": 0,
+                                            "Charges Rs": 0.0, "Cash flow Rs": -booked, "Open qty": 0,
+                                            "Free cash Rs": cash})  # fmt: skip
+                t.update({"Futures Rs": round(fut), "Option Rs": round(pnl), "Booked Rs": round(booked)})
+                snapshot(t)
+        eod[at[:10]] = (cash + locked, wallet)
+
+    rows, k, cash, wallet = [], 0, capital, 0.0
+    for d in days:
+        today = []
+        while k < len(trades) and trades[k]["Date"] == d:
+            today.append(trades[k])
+            k += 1
+        cash, wallet = eod.get(d, (cash, wallet))
+        cash, wallet = round(cash), round(wallet)
+        rows.append({"Date": d, "Trades": len(today), "Points": round(sum(t["Points"] for t in today), 2),
+                     "Option Rs": sum(t["Option Rs"] for t in today), "Booked Rs": sum(t["Booked Rs"] for t in today),
+                     "Trading capital Rs": round(cash), "Wallet Rs": round(wallet), "Total Rs": round(cash + wallet)})  # fmt: skip
+    return rows
+
+
+def yearly(trades: list[dict], days: list[dict]) -> list[dict]:
+    out = []
+    for year in sorted({d["Date"][:4] for d in days}):
+        ts = [t for t in trades if t["Date"][:4] == year and t["Lots"]]
+        end = [d for d in days if d["Date"][:4] == year][-1]
+        out.append({"Year": year, "Trades": len(ts), "Wins": sum(t["Points"] > 0 for t in ts),
+                    "Win rate %": round(sum(t["Points"] > 0 for t in ts) / len(ts) * 100, 1) if ts else None,
+                    "Points": round(sum(t["Points"] for t in ts), 2), "R": round(sum(t["R"] for t in ts), 2),
+                    "Option Rs": sum(t["Option Rs"] for t in ts), "Booked Rs": sum(t["Booked Rs"] for t in ts),
+                    "Trading capital Rs": end["Trading capital Rs"], "Wallet Rs": end["Wallet Rs"],
+                    "Total Rs": end["Total Rs"]})  # fmt: skip
+    return out
+
+
+def money(
+    trades: list[dict], days: list[dict], capital: float, sizing: str, book: bool
+) -> list[tuple]:
+    if not days:
+        return []
+    end, years = (
+        days[-1],
+        (
+            date.fromisoformat(days[-1]["Date"]) - date.fromisoformat(days[0]["Date"])
+        ).days
+        / 365.25,
+    )
+    high, low = (
+        max(days, key=lambda d: d["Total Rs"]),
+        min(days, key=lambda d: d["Total Rs"]),
+    )
+    low_cash = min(days, key=lambda d: d["Trading capital Rs"])
+    cagr = (
+        (end["Total Rs"] / capital) ** (1 / years) - 1
+        if years > 0 and end["Total Rs"] > 0
+        else None
+    )
+    return [(f"Your money ({sizing}{f', profit above Rs {capital:,.0f} booked to the wallet' if book else ''})", ""),
+            ("Starting capital Rs", round(capital)),
+            ("Trading capital at the end Rs", end["Trading capital Rs"]),
+            ("Wallet (profit booked) Rs", end["Wallet Rs"]),
+            ("Total (capital + wallet) Rs", end["Total Rs"]),
+            ("Change Rs", end["Total Rs"] - round(capital)),
+            ("Change %", round((end["Total Rs"] - capital) / capital * 100, 2)),
+            ("Yearly growth % (CAGR)", round(cagr * 100, 2) if cagr is not None else None),
+            ("Highest total Rs", f"{high['Total Rs']:,} on {high['Date']}"),
+            ("Lowest total Rs", f"{low['Total Rs']:,} on {low['Date']}"),
+            ("Lowest trading capital Rs", f"{low_cash['Trading capital Rs']:,} on {low_cash['Date']}"),
+            *((f"Trades skipped: {r}", sum(t["Skipped"] == r for t in trades))
+              for r in sorted({t["Skipped"] for t in trades} - {""})),
+            ("Lots per trade (min / average / max)", lots_used(trades)), ("", "")]  # fmt: skip
+
+
+def lots_used(trades: list[dict]) -> str:
+    n = [t["Lots"] for t in trades if t["Lots"]]
+    return f"{min(n)} / {sum(n) / len(n):.1f} / {max(n)}" if n else "none"
+
+
+def summary(
+    trades: list[dict], days: list[dict], capital: float, history: bool
+) -> list[tuple]:
+    taken = [t for t in trades if t["Lots"]]
+    rows: list[tuple] = [("Period", f"{days[0]['Date']} to {days[-1]['Date']}" if days else "no data"),
+                         ("Trading days", len(days)), ("Days with a trade", len({t["Date"] for t in taken}))]  # fmt: skip
+    for name, picked in (
+        ("All", taken),
+        *(
+            (side, [t for t in taken if t["Side"] == side])
+            for side in ("Long", "Short")
+        ),
+    ):
+        rows += [("", ""), (f"{name} trades", len(picked)),
+                 (f"{name} win rate %", round(sum(t["Points"] > 0 for t in picked) / len(picked) * 100, 1) if picked else None),
+                 (f"{name} {EXITS_LABEL}", " / ".join(str(sum(t["Exit reason"] == r for t in picked)) for r in EXITS)),
+                 (f"{name} total points", round(sum(t["Points"] for t in picked), 2)),
+                 (f"{name} total R", round(sum(t["R"] for t in picked), 2)),
+                 (f"{name} futures Rs", sum(t["Futures Rs"] for t in picked)),
+                 (f"{name} option Rs", sum(t["Option Rs"] for t in picked))]  # fmt: skip
+    stats = performance([t["Option Rs"] for t in taken], [{"equity": d["Total Rs"] - capital} for d in days], capital,
+                        len({t["Date"] for t in taken}))  # fmt: skip
+    rows += [("", ""), ("Option trades statistics", "")]
+    rows += [
+        (k.replace("_", " "), str(v) if isinstance(v, list) else v)
+        for k, v in stats.items()
+    ]
+    data = ("Kaggle NIFTY 1-minute (2015 to Dec 2025) + Groww 5m since, rolled to 5m; VWAP replaced by the session "
+            "time-weighted average price (the index has no volume); previous day from the same bars"
+            if history else "Yahoo 5m NIFTY (a few minutes delayed), VWAP from NIFTYBEES, previous day from Yahoo daily")  # fmt: skip
+    rows += [("", ""), ("Assumptions", ""), ("Methodology", METHODOLOGY), ("Data", data),
+             ("Filters", f"No trades on expiry days; setups risking under {MIN_RISK} pts skipped"),
+             ("Exits", (f"Stop or {R_MULT:g}R target on a 5m high/low (both in one bar = stop), stop to entry from the bar "
+                        "after one reaching +1R, else the 15:10 close")),
+             ("Option", (f"CE/PE {OTM_STEPS} strikes out of the money, to the expiry in force (monthly Thursday before Feb 2019, weekly Thursday to Aug 2025, "
+                        "weekly Tuesday since), lot size of the day, Black-76 at the previous day's India VIX, IV constant")),
+             ("Charges", "Today's brokerage and taxes on every trade (older years had different rates)"),
+             ("Losing streaks", (f"{LOSS_STREAK} trades closing at a loss in a row (index points, in exit order) = "
+                                f"later entries that day and the next {BREAK_DAYS} trading days off")),
+             ("Capital", ("Entries and exits replayed in time order on one account: overlapping trades share the free "
+                          "cash, P&L counts when quantity closes, staged legs settle separately in whole lots")),
+             ("Not modelled", "Slippage, bid-ask spread, IV changes")]  # fmt: skip
+    return rows
+
+
+# Excel
+
+
+def write(path: Path, sheets: dict[str, list], capital: float, sizing: str) -> None:
+    from openpyxl import (
+        Workbook,  # not a project dependency: run with `uv run --with openpyxl`
+    )
+    from openpyxl.chart import LineChart, Reference
+    from openpyxl.styles import Font, PatternFill
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Summary"
+    for row in sheets.pop("Summary"):
+        ws.append(row)
+    for cell in ws["A"]:
+        cell.font = Font(bold=bool(cell.value) and not str(cell.value)[:1].islower())
+    ws.column_dimensions["A"].width, ws.column_dimensions["B"].width = 44, 100
+    head, red, green = (
+        PatternFill("solid", fgColor="1F4E78"),
+        Font(color="C62828"),
+        Font(color="2E7D32"),
+    )
+    for title, rows in sheets.items():
+        sheet = wb.create_sheet(title)
+        keys = [k for k, v in (rows[0] if rows else {"Date": 0}).items() if k != "Why" and not isinstance(v, list)] + (
+            ["Why"] if rows and "Why" in rows[0] else []
+        )
+        sheet.append(keys)
+        for c in sheet[1]:
+            c.font, c.fill = Font(bold=True, color="FFFFFF"), head
+        for r in rows:
+            sheet.append([r[k] for k in keys])
+        for col in sheet.columns:
+            sheet.column_dimensions[col[0].column_letter].width = (
+                60 if col[0].value == "Why" else 14
+            )
+            if col[0].value in ("Points", "R", "Futures Rs", "Option Rs"):
+                for c in col[1:]:
+                    c.font = (
+                        green
+                        if (c.value or 0) > 0
+                        else red
+                        if (c.value or 0) < 0
+                        else Font()
+                    )
+            if "Rs" in str(col[0].value):
+                for c in col[1:]:
+                    c.number_format = "#,##0"
+        sheet.freeze_panes, sheet.auto_filter.ref = "A2", sheet.dimensions
+    for title, anchor in (("Daily", "J2"), ("Yearly", "A15")):
+        sheet = wb[title]
+        cols = [
+            i
+            for i, c in enumerate(sheet[1], 1)
+            if c.value in ("Trading capital Rs", "Wallet Rs", "Total Rs")
+        ]
+        if sheet.max_row < 2 or not cols:
+            continue
+        chart = LineChart()
+        chart.title = f"Your money from Rs {capital:,.0f}, {sizing}"
+        chart.y_axis.title, chart.width, chart.height = "Rs", 26, 12
+        for i in cols:
+            chart.add_data(
+                Reference(sheet, min_col=i, min_row=1, max_row=sheet.max_row),
+                titles_from_data=True,
+            )
+        chart.set_categories(
+            Reference(sheet, min_col=1, min_row=2, max_row=sheet.max_row)
+        )
+        sheet.add_chart(chart, anchor)
+    wb.save(path)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(prog="scripts/backtest_liquidity.py")
+    parser.add_argument(
+        "--history",
+        type=Path,
+        help="Kaggle NIFTY 1-minute CSV (default: Yahoo's last 60 days)",
+    )
+    parser.add_argument(
+        "--years",
+        type=float,
+        default=10,
+        help="with --history: how many years back from today",
+    )
+    parser.add_argument("--capital", type=float, default=100_000)
+    parser.add_argument("--lots", type=int, default=1)
+    parser.add_argument(
+        "--book-profits",
+        action="store_true",
+        help="keep trading capital at --capital and move each win's profit above it to a wallet",
+    )
+    parser.add_argument(
+        "--risk-pct",
+        type=float,
+        help="percent of the current trading capital at risk per trade: lots = that / option loss per lot at the stop",
+    )
+    parser.add_argument(
+        "--stop",
+        choices=("swing", "sweep"),
+        default="swing",
+        help="stop for the main sheets",
+    )
+    parser.add_argument(
+        "--trendline",
+        action="store_true",
+        help="require trendline breakdown on Short and breakout on Long",
+    )
+    parser.add_argument(
+        "--include-equal",
+        action="store_true",
+        help="include intraday Equal High (EQH) and Equal Low (EQL) sweeps",
+    )
+    parser.add_argument(
+        "--staged",
+        action="store_true",
+        help="use staged exits (50%% partial at +2R, +1R trail stop lock, 5m candle close trail)",
+    )
+    parser.add_argument(
+        "--otm-steps",
+        type=int,
+        default=0,
+        help="Strike selection: 0 = ATM (default), 2 = 2-OTM, -1 = 1-ITM",
+    )
+    parser.add_argument(
+        "--stagnation-bars",
+        type=int,
+        default=0,
+        help="exit if no +0.5R progress after N 5m bars (e.g. 18 = 90m)",
+    )
+    parser.add_argument(
+        "--allow-lunch",
+        action="store_true",
+        help="allow entries during lunch lull (11:30 - 13:00 IST), default is to skip them",
+    )
+    parser.add_argument(
+        "--skip-retest",
+        action="store_true",
+        help="skip Breakout & Support/Resistance Retest signals (enabled by default)",
+    )
+    parser.add_argument(
+        "--skip-trendline-reversal",
+        action="store_true",
+        help="skip Standalone Trendline Reversal signals (enabled by default)",
+    )
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args()
+    settings = get_settings()
+    bars, above, daily = history_data(args.history) if args.history else yahoo_data()
+    since = (
+        (date.today() - timedelta(days=round(365.25 * args.years))).isoformat()
+        if args.history
+        else ""
+    )
+    vix_range = f"{int(args.years) + 1}y" if args.history else "1y"
+    vix = {
+        d["date"][:10]: d["close"]
+        for d in parse_yahoo_chart(_chart("^INDIAVIX", "1d", vix_range))
+        if d["close"]
+    }
+    sizing = (
+        f"{args.risk_pct:g}% of trading capital at risk per trade"
+        if args.risk_pct
+        else f"{args.lots} lot{'s' * (args.lots > 1)} per trade"
+    )
+    runs = {}
+    for stop_at in (args.stop, "sweep" if args.stop == "swing" else "swing"):
+        trades, days = backtest(
+            settings,
+            bars,
+            above,
+            daily,
+            vix,
+            since,
+            stop_at,
+            require_trendline=args.trendline,
+            include_equal=args.include_equal,
+            staged=args.staged,
+            otm_steps=args.otm_steps,
+            stagnation_bars=args.stagnation_bars,
+            skip_lunch=not args.allow_lunch,
+            include_retest=not args.skip_retest,
+            include_trendline_reversal=not args.skip_trendline_reversal,
+        )
+        runs[stop_at] = (
+            trades,
+            ledger(
+                trades,
+                days,
+                settings,
+                args.capital,
+                args.lots,
+                args.book_profits,
+                args.risk_pct,
+            ),
+        )
+    trades, day_rows = runs[args.stop]
+    money_rows = money(trades, day_rows, args.capital, sizing, args.book_profits)
+    stops = compare(runs, args.capital, sizing, args.book_profits)
+    span = f"{args.years:g}y" if args.history else "60d"
+    out = (
+        args.out
+        or Path(__file__).resolve().parents[2]
+        / "DocumentsAndDiagrams"
+        / f"NIFTY_Liquidity_Backtest_{span}_{date.today()}.xlsx"
+    )
+    executions = [{"Date": t["Date"], "Entry time": t["Entry time"], "Trade": t["Side"], "Option": t["Option"], **e}
+                  for t in trades for e in t["Executions"]]  # fmt: skip
+    write(out, {"Summary": money_rows + summary(trades, day_rows, args.capital, bool(args.history)),
+                "Stops compared": stops, "Yearly": yearly(trades, day_rows), "Trades": trades,
+                "Executions": executions, "Daily": day_rows},
+          args.capital, f"{sizing}, {args.stop} stop")  # fmt: skip
+    for row in stops:
+        print(" | ".join(str(v) for v in row.values()))
+    print("wrote", out)
+
+
+EXITS, EXITS_LABEL = (
+    ("Target", "Stop", "Breakeven", EXIT),
+    "targets / stops / breakevens / 15:10",
+)
+STOP_NAMES = {
+    "swing": "Swing stop (current)",
+    "sweep": "Stop 5 pts past the sweep high/low",
+}
+
+
+def compare(
+    runs: dict[str, tuple[list[dict], list[dict]]],
+    capital: float,
+    sizing: str,
+    book: bool,
+) -> list[dict]:
+    """One row per metric, one column per stop rule."""
+    cols = {}
+    for key, (trades, days) in runs.items():
+        taken = [t for t in trades if t["Lots"]]
+        stats = performance([t["Option Rs"] for t in taken], [{"equity": d["Total Rs"] - capital} for d in days],
+                            capital, len({t["Date"] for t in taken}))  # fmt: skip
+        cols[STOP_NAMES[key]] = {
+            "Signals": len(trades), "Trades taken": len(taken),
+            "Win rate %": round(sum(t["Points"] > 0 for t in taken) / len(taken) * 100, 1) if taken else None,
+            "Average stop distance (pts)": round(sum(t["Risk pts"] for t in taken) / len(taken), 1) if taken else None,
+            EXITS_LABEL.capitalize(): " / ".join(str(sum(r in t["Exit reason"] for t in taken)) for r in EXITS),
+            "Total R": round(sum(t["R"] for t in taken), 2),
+            "R per trade": round(sum(t["R"] for t in taken) / len(taken), 3) if taken else None,
+            "Option Rs": sum(t["Option Rs"] for t in taken),
+            "Profit factor": stats["profit_factor"], "Max drawdown %": stats["max_drawdown_pct"],
+            "Longest losing streak": stats["max_consecutive_losses"],
+            **dict(money(trades, days, capital, sizing, book)[1:-1]),
+        }  # fmt: skip
+    metrics = dict.fromkeys(k for col in cols.values() for k in col)
+    return [
+        {"Metric": m, **{name: col.get(m) for name, col in cols.items()}}
+        for m in metrics
+    ]
+
+
+if __name__ == "__main__":
+    main()

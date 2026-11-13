@@ -1,0 +1,216 @@
+"""JournalAgent: SQLite Single Source of Truth (SSOT), Active Cache & Excel Sync.
+
+Responsibilities:
+1. SQLite SSOT: Records and commits all trade life-cycle events into data/trades.db.
+2. Active Trade Cache: Manages trades/.active_trades_{date}.json with strict type coercion
+   (ensuring milestone tracking sets never crash on JSON reload).
+3. Trade Log Export: Updates trades/live_executed_trades.json for instant API consumption.
+4. Excel Workbook Synchronization: Calls maintain_trades_excel to keep all Excel sheets updated.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from app.trading.crew.entry_agent import TradeSignal
+from app.trading.crew.exit_agent import ExitDecision
+
+logger = logging.getLogger("genesis.journal_agent")
+
+
+class JournalAgent:
+    """Institutional Trade Journaling, SQLite SSOT & Excel Sync Engine."""
+
+    def __init__(
+        self,
+        trades_dir: Path | None = None,
+        db_path: Path | None = None,
+    ) -> None:
+        self.trades_dir = trades_dir or Path("trades")
+        self.trades_dir.mkdir(parents=True, exist_ok=True)
+        # None means trade_store.DEFAULT_DB_PATH (repo-root data/trades.db), independent of CWD.
+        self.db_path = db_path
+        self.load_failed = False
+
+    def _get_active_file(self, date_str: str | None = None) -> Path:
+        d = date_str or datetime.now().strftime("%Y-%m-%d")
+        return self.trades_dir / f".active_trades_{d}.json"
+
+    def load_active_trades(self, date_str: str | None = None) -> dict[str, Any]:
+        """Load active trades JSON with milestone set coercion to prevent serialization crashes."""
+        path = self._get_active_file(date_str)
+        if not path.exists():
+            self.load_failed = False
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("active journal is not an object")
+            # Ensure milestones_hit is converted to set for every trade
+            for t in data.values():
+                if "milestones_hit" in t and isinstance(t["milestones_hit"], list):
+                    t["milestones_hit"] = set(t["milestones_hit"])
+            self.load_failed = False
+            return data
+        except Exception as e:
+            # Fail closed: callers must not treat this as an empty book or overwrite the file.
+            self.load_failed = True
+            logger.error(f"Error loading active trades: {e}")
+            return {}
+
+    def save_active_trades(self, trades: dict[str, Any], date_str: str | None = None) -> None:
+        """Save active trades to JSON, converting sets to lists for valid JSON."""
+        if self.load_failed:
+            logger.error("Refusing to save the journal after a failed load")
+            return
+        path = self._get_active_file(date_str)
+        serializable = {}
+        for k, v in trades.items():
+            trade_copy = dict(v)
+            if "milestones_hit" in trade_copy and isinstance(trade_copy["milestones_hit"], set):
+                trade_copy["milestones_hit"] = list(trade_copy["milestones_hit"])
+            serializable[k] = trade_copy
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(serializable, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving active trades: {e}")
+
+    def record_entry(self, signal: TradeSignal, date_str: str | None = None) -> dict[str, Any] | None:
+        """Record a new open trade in the active cache and SQLite."""
+        import uuid
+        trade_id = f"TRADE_{signal.symbol}_{int(datetime.now().timestamp() * 1000)}_{uuid.uuid4().hex[:6]}"
+        thesis_dict = None
+        if getattr(signal, "thesis", None) is not None:
+            from dataclasses import asdict
+            thesis_dict = asdict(signal.thesis)
+
+        trade_data: dict[str, Any] = {
+            "trade_id": trade_id,
+            "strategy": signal.strategy,
+            "symbol": signal.symbol,
+            "direction": signal.direction,
+            "entry_price": signal.entry_price,
+            "stop_loss": signal.stop_loss,
+            "target_price": signal.target_price,
+            "risk_points": signal.risk_points,
+            "target_points": signal.target_points,
+            "rr_ratio": signal.rr_ratio,
+            "lots": signal.lots,
+            "quantity": signal.quantity,
+            "suggested_strike": signal.suggested_strike,
+            "timestamp": signal.timestamp,
+            "rationale": signal.rationale,
+            "entry_reason": signal.rationale,
+            "base_timeframe": getattr(signal, "base_timeframe", "30M"),
+            "liquidity_pool": getattr(signal, "liquidity_pool", "UNSPECIFIED"),
+            "lookout_duration_mins": getattr(signal, "lookout_duration_mins", 120),
+            "lookout_status": getattr(signal, "lookout_status", "TRIGGERED"),
+            "thesis": thesis_dict,
+            "bars_in_trade": 0,
+            "milestones_hit": set(),
+            "status": "OPEN",
+            "path_target_pct": getattr(signal, "path_target_pct", None),
+            "path_stop_pct": getattr(signal, "path_stop_pct", None),
+            "path_neither_pct": getattr(signal, "path_neither_pct", None),
+            "path_verdict": getattr(signal, "path_verdict", None),
+            "odds_line": getattr(signal, "odds_line", None),
+            "rc_quick_cut": False,
+        }
+
+        active = self.load_active_trades(date_str)
+        if self.load_failed:
+            return None
+        active[trade_id] = trade_data
+        self.save_active_trades(active, date_str)
+
+        # Log Directional Thesis to trades/pre_market_plan.json
+        if thesis_dict:
+            try:
+                plan_file = self.trades_dir / "pre_market_plan.json"
+                plan_data: dict[str, Any] = {}
+                if plan_file.exists():
+                    with open(plan_file, "r", encoding="utf-8") as pf:
+                        plan_data = json.load(pf)
+                plan_data["latest_directional_thesis"] = thesis_dict
+                plan_data["active_trade_id"] = trade_id
+                plan_data["thesis_updated_at"] = datetime.now().isoformat()
+                with open(plan_file, "w", encoding="utf-8") as pf:
+                    json.dump(plan_data, pf, indent=2)
+            except Exception as pe:
+                logger.debug(f"Notice updating pre_market_plan.json with thesis: {pe}")
+
+        # Persist open trade to SQLite SSOT
+        try:
+            from app.db import trade_store
+            trade_store.upsert_trade(trade_data, self.db_path)
+        except Exception as se:
+            logger.debug(f"SQLite trade_store entry upsert notice: {se}")
+
+        return trade_data
+
+    def record_exit(
+        self,
+        trade_id: str,
+        decision: ExitDecision,
+        date_str: str | None = None,
+        lot_qty: int = 65,
+        exit_time_str: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Record trade completion, persist to SQLite & executed trades log, and clear active state."""
+        active = self.load_active_trades(date_str)
+        if self.load_failed or trade_id not in active:
+            return None
+
+        trade = active[trade_id]
+        trade["exit_price"] = decision.exit_price
+        trade["realized_points"] = decision.realized_points
+        trade["realized_r"] = decision.realized_r
+        # Index points are not an option premium. Rupees stay empty until a real fill prices them.
+        trade["pnl_rupees"] = None
+        trade["pnl_method"] = "index_points_not_priced"
+        trade["exit_reason"] = decision.exit_reason
+        trade["exit_action"] = decision.action
+        t_now = exit_time_str or datetime.now().strftime("%H:%M:%S")
+        if len(t_now) == 5:
+            t_now = f"{t_now}:00"
+        trade["exit_timestamp"] = f"{date_str} {t_now}" if date_str else datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        trade["status"] = "CLOSED"
+
+        # Remove from active trades
+        del active[trade_id]
+        self.save_active_trades(active, date_str)
+
+        # Append to live_executed_trades.json
+        exec_file = self.trades_dir / "live_executed_trades.json"
+        executed: list[dict[str, Any]] = []
+        if exec_file.exists():
+            try:
+                with open(exec_file, "r", encoding="utf-8") as f:
+                    executed = json.load(f)
+            except Exception:
+                executed = []
+
+        # Convert set before appending
+        trade_to_save = dict(trade)
+        if "milestones_hit" in trade_to_save and isinstance(trade_to_save["milestones_hit"], set):
+            trade_to_save["milestones_hit"] = list(trade_to_save["milestones_hit"])
+
+        executed.append(trade_to_save)
+        with open(exec_file, "w", encoding="utf-8") as f:
+            json.dump(executed, f, indent=2)
+
+        # Upsert directly to SQLite SSOT
+        try:
+            from app.db import trade_store
+            trade_store.upsert_trade(trade_to_save, self.db_path)
+        except Exception as e:
+            logger.debug(f"SQLite trade_store upsert notice: {e}")
+
+        return trade_to_save
+
