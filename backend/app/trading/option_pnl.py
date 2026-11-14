@@ -16,19 +16,34 @@ from app.paper import order_charges
 
 
 def _cdf(x: float) -> float:
-    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+    # erfc retains the negative tail instead of cancelling 1 + erf(x).
+    return 0.5 * math.erfc(-x / math.sqrt(2))
 
 
 def black76(forward: float, strike: float, years: float, iv: float, option_type: str) -> float:
     """Undiscounted: over a weekly or monthly expiry, rates move a premium by well under 1%."""
-    if years <= 0 or iv <= 0:
-        return max(forward - strike if option_type == "CE" else strike - forward, 0.0)
+    if not all(math.isfinite(x) for x in (forward, strike, years, iv)):
+        raise ValueError("Black-76 inputs must be finite")
+    if forward <= 0 or strike <= 0 or iv < 0 or option_type not in ("CE", "PE"):
+        raise ValueError("Black-76 requires positive forward/strike, nonnegative IV and CE/PE")
+    intrinsic = max(forward - strike if option_type == "CE" else strike - forward, 0.0)
+    if years <= 0 or iv == 0:
+        return intrinsic
     sd = iv * math.sqrt(years)
+    if not math.isfinite(sd) or sd == 0:
+        raise ValueError("Black-76 volatility scale is not representable")
     d1 = math.log(forward / strike) / sd + sd / 2
     d2 = d1 - sd
     if option_type == "CE":
-        return forward * _cdf(d1) - strike * _cdf(d2)
-    return strike * _cdf(-d2) - forward * _cdf(-d1)
+        price = forward * _cdf(d1) - strike * _cdf(d2)
+    else:
+        price = strike * _cdf(-d2) - forward * _cdf(-d1)
+    # Only repair roundoff on the scale of the two premium terms; a material
+    # boundary violation or non-finite result must never become a valid quote.
+    roundoff = 8 * math.ulp(max(forward, strike))
+    if not math.isfinite(price) or price < intrinsic - roundoff:
+        raise ValueError("Black-76 premium violates its intrinsic-value bound")
+    return max(price, intrinsic)
 
 
 def implied_vol(price: float, forward: float, strike: float, years: float, option_type: str) -> float | None:
