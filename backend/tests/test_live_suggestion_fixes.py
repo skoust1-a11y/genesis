@@ -260,14 +260,10 @@ def test_every_entry_capable_caller_supplies_checked_vix():
         for p in (ROOT / d).rglob("*.py")
         if ".on_market_tick(" in p.read_text(encoding="utf-8", errors="ignore")
     }
-    replays = {"scripts/diagnose_trades.py": "tm.alert_agent._send = lambda m: True",
-               "scripts/resimulate_since_oct15.py": "silent_alert_agent._send = lambda msg: True"}
-    assert callers == {"scripts/live_scanner.py", *replays}
-    assert "india_vix=_fetch_india_vix(datetime.now(IST))" in (ROOT / "scripts" / "live_scanner.py").read_text()
-    # Offline replays: a temp journal and a stubbed send, so their fixed VIX reaches no account or channel.
-    for rel, stub in replays.items():
-        text = (ROOT / rel).read_text()
-        assert "tempfile.mkdtemp(" in text and stub in text, rel
+    # Source-only V3 excludes the two legacy replay launchers. Any newly
+    # introduced caller must be reviewed here and supply independently checked VIX.
+    assert callers == {"scripts/live_scanner.py"}
+    assert "india_vix=_fetch_india_vix(datetime.now(IST))" in (ROOT / "scripts/live_scanner.py").read_text()
     # The frozen manager falls back to app.api.market.get_quote; while it is absent, a None VIX always vetoes.
     assert not hasattr(market, "get_quote")
 

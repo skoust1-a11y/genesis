@@ -25,6 +25,11 @@ def test_journal_filters(client, live):
     everything = client.get("/api/journal", params={"limit": 1000}).json()["trades"]
     assert {r["kind"] for r in everything} == {"sim", "live"}
 
+    # Filtering needs a tagged review, independently of the demo's synthetic P&L.
+    sim = next(r for r in everything if r["kind"] == "sim")
+    response = client.post(f"/api/trades/sim/{sim['trade_id']}/reviews",
+                           json={"mistake_tags": ["high_cost_ratio"]})
+    assert response.status_code == 200, response.text
     tagged = client.get("/api/journal", params={"tag": "high_cost_ratio", "limit": 1000}).json()["trades"]
     assert tagged and all("high_cost_ratio" in r["mistake_tags"] for r in tagged)
 

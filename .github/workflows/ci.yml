@@ -1,0 +1,83 @@
+name: Source-only CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  PYTHON_DOTENV_DISABLED: 'true'
+  PYTHONDONTWRITEBYTECODE: '1'
+  TELEGRAM_DELIVERY_ENABLED: 'false'
+  LIVE_TRADING_ENABLED: 'false'
+  SANDBOX_ALLOW_LIVE: 'false'
+  NEXT_TELEMETRY_DISABLED: '1'
+jobs:
+  backend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@f0ec1fc3b38f5e7cd731bb6ce540c5af426746bb # v6.1.0
+        with:
+          version: '0.11.2'
+      - run: uv python install 3.12.13
+      - run: uv sync --locked --python 3.12.13 --no-install-project
+      - name: Verify frozen source before tests
+        run: uv run --no-sync python frozen_source_guard.py
+      - name: Backend regression (provisioning has process-global guards)
+        run: uv run --no-sync python -m pytest --ignore=tests/state_authority/test_provisioning.py -q -ra
+      - name: Verify frozen source after tests
+        if: always()
+        run: uv run --no-sync python frozen_source_guard.py
+  provisioning:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@f0ec1fc3b38f5e7cd731bb6ce540c5af426746bb # v6.1.0
+        with:
+          version: '0.11.2'
+      - run: uv python install 3.12.13
+      - run: uv sync --locked --python 3.12.13 --no-install-project
+      - run: uv run --no-sync python -m unittest discover -s tests/state_authority -p test_provisioning.py -v
+  frontend:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '26.0.0'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci --ignore-scripts
+      - run: npx --no-install tsc --noEmit
+      - run: npm test
+      - run: npm run build
+  release-security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - run: python3 scripts/check_release_security.py

@@ -1,4 +1,6 @@
 import copy
+from pathlib import Path
+import subprocess
 
 import pytest
 from app.trading import candle_integrity as ci
@@ -63,6 +65,12 @@ def test_D06_stronger_requirements_and_wrong_scope():
     assert exc.value.code=="CI_SNAPSHOT_SCOPE_MISMATCH"
 
 
+@pytest.mark.skipif(
+    subprocess.run(["git", "cat-file", "-e",
+                    "af8d9f79bc24f9572f1aff13b703795c89403219:backend/app/trading/walk_forward.py"],
+                   cwd=Path(__file__).resolve().parents[2],
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode != 0,
+    reason="Historical pre-V3 SHA excluded from independent-root release; current input-mode parity is tested below")
 def test_P03_baseline_signal_fill_fee_risk_and_report_hash_parity():
     """Expected values come from immutable baseline execution, not the new runner."""
     import subprocess
@@ -113,3 +121,20 @@ def test_V03_zero_prefix_never_calls_vwap_fallback(monkeypatch):
     rows[20]["volume"]=100
     wf.RuleBasedCausalSignalGenerator().generate_signals(spec,{},rows,allowed_dates=DAYS,config=_wf_cfg())
     assert calls and min(calls)>=21
+
+
+def test_current_source_raw_and_snapshot_signal_fill_fee_risk_and_report_hash_parity():
+    """Both supported certified input forms must preserve the full execution report."""
+    from tests.test_causal_walk_forward import _trading_calendar
+    days = _trading_calendar()
+    rows = [r for day in days for r in _make_session_candles(day)]
+    spec = _make_test_strategy_spec()
+    cfg = _wf_cfg(fidelity_tier="TIER_2_SYNTHETIC")
+    raw = wf.run_causal_walk_forward_validation(
+        spec, candles=copy.deepcopy(rows), trading_dates=days, config=cfg,
+        dataset_declaration=declaration(days))
+    certified = wf.run_causal_walk_forward_validation(
+        spec, candles=snapshot(rows, days), trading_dates=days, config=cfg)
+    assert raw.to_dict() == certified.to_dict()
+    assert raw.report_hash == certified.report_hash
+    assert raw.folds and any(f.oos_executions for f in raw.folds)

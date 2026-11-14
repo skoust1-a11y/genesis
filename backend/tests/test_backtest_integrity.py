@@ -17,8 +17,7 @@ pytestmark = pytest.mark.usefixtures("synthetic_calendar")
 from app.config import get_settings
 from app.liquidity_signals import staged_exit_of
 from app.market.expiry import ExpiryUnresolved, resolve_expiry, scheduled_expiry
-from app.market.hours import holidays
-from app.market.nse import LotChange, contract_lot_size, load_lot_sizes
+from app.market.nse import LotChange, contract_lot_size
 from app.trading import walk_forward as wf
 from app.trading.option_quote import ContractQuote
 from scripts import backtest_liquidity as bl
@@ -28,8 +27,19 @@ from tests.test_causal_walk_forward import (
 )
 
 BACKEND = Path(__file__).resolve().parents[1]
-LOTS = load_lot_sizes(BACKEND / "data" / "lot_sizes" / "nse.yaml")
-HOLIDAYS = holidays(get_settings())
+# Invented transition scenarios, independent of the release's flat synthetic
+# lot table and deliberately incomplete closure inventory; no exchange authority.
+LOTS = [LotChange("NIFTY", day, size) for day, size in (
+    ("2020-01-01", 75), ("2021-06-25", 50), ("2024-04-26", 25),
+    ("2024-11-20", 75), ("2026-01-01", 65))]
+HOLIDAYS = {day: "SYNTHETIC_CLOSED_DAY" for day in (
+    "2021-01-26", "2024-01-26", "2025-08-27", "2025-10-22", "2026-11-10")}
+
+
+@pytest.fixture(autouse=True)
+def synthetic_backtest_metadata(monkeypatch):
+    monkeypatch.setattr(bl, "load_lot_sizes", lambda path: list(LOTS))
+    monkeypatch.setattr(bl, "holidays", lambda settings: dict(HOLIDAYS))
 
 
 # 1. Historical expiry: transitions and holidays
@@ -72,6 +82,8 @@ def test_listed_contracts_are_taken_as_fact_and_unknowns_fail_closed():
 
 
 def _events(day, **gen_kwargs):
+    gen_kwargs.setdefault("lot_changes", LOTS)
+    gen_kwargs.setdefault("holidays", HOLIDAYS)
     gen = wf.RuleBasedCausalSignalGenerator(**gen_kwargs)
     return gen.generate_signals(_make_test_strategy_spec("integrity"), {}, _make_session_candles(day),
                                 allowed_dates=[day])  # fmt: skip
@@ -399,7 +411,7 @@ def test_lot_size_transition_boundaries():
         contract_lot_size(table, "NIFTY", "2015-10-30")
 
 
-# 14. Diwali Muhurat days: NSE F&O bhavcopy shows no NIFTY expiry on them; the week's expiry moved a day earlier
+# 14. Synthetic closures exercise rollback around built-in irregular sessions
 
 
 @pytest.mark.parametrize(("day", "policy", "expiry"), [
@@ -409,7 +421,7 @@ def test_lot_size_transition_boundaries():
     ("2021-11-01", "same_day", "2021-11-03"), ("2021-11-03", "same_day", "2021-11-03"),
     ("2021-11-03", "next", "2021-11-11"), ("2021-11-04", "same_day", "2021-11-11"),
 ])  # fmt: skip
-def test_diwali_week_expiry_matches_nse_listed_contracts(day, policy, expiry):
+def test_expiry_rolls_back_under_synthetic_closures(day, policy, expiry):
     assert resolve_expiry(date.fromisoformat(day), holidays=HOLIDAYS, policy=policy).isoformat() == expiry
 
 

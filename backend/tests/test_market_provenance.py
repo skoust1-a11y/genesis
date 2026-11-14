@@ -36,11 +36,13 @@ def _feed(*, lot=65, token="GC-24100CE", quote_age=0, delta=True, source="synthe
         start = (now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % 5 + 5)).strftime("%H:%M")
         live = {"ltp": 10.2, "bid": 10.0, "ask": 10.4, "quoteTime": (now - timedelta(seconds=quote_age)).isoformat()}
         leg = {"liveData": live, "marketLot": lot, "tradingSymbol": SYMBOL, "growwContractId": token}
+        if token is None:
+            leg.pop("growwContractId")  # absent identity reaches the ledger; explicit null is malformed
         observed = None if delta_age is NO_STAMP else now - timedelta(seconds=delta_age)
         evidence = {SYMBOL: DeltaEvidence(Decimal("0.5"), observed, SYMBOL, source)} if delta else {}
         return rr.MarketView(df_5m=bars([24000.0], start=start),
                              setups=[setup(strategy=STRATEGY, stop=23995, ts=f"{DAY} 10:15")],
-                             chain={"contracts": [{"strike": 24100, "ce": leg}], "expiry": "2026-11-10",
+                             chain={"contracts": [{"underlying": "NIFTY", "strike": 24100, "ce": leg}], "expiry": "2026-11-10",
                                     "fetched_at": now},
                              key_levels=[], delta_evidence=evidence)
     return feed
@@ -80,15 +82,27 @@ def _no_broker_order(monkeypatch):
         monkeypatch.setattr(target, refuse)
 
 
+@pytest.fixture
+def dated_lot_table(tmp_path, monkeypatch):
+    table = tmp_path / "synthetic-lots.yaml"
+    table.write_text("# SYNTHETIC transition scenario; no exchange authority\nchanges:\n"
+        "  - {underlying: NIFTY, from: 2020-01-01, lot_size: 75}\n"
+        "  - {underlying: NIFTY, from: 2021-06-25, lot_size: 50}\n"
+        "  - {underlying: NIFTY, from: 2024-04-26, lot_size: 25}\n"
+        "  - {underlying: NIFTY, from: 2024-11-20, lot_size: 75}\n"
+        "  - {underlying: NIFTY, from: 2026-01-01, lot_size: 65}\n")
+    monkeypatch.setattr(pl, "LOT_TABLE", table)
+
+
 @pytest.mark.parametrize("day,lot", [("2026-11-10", 65), ("2025-06-02", 75), ("2022-06-01", 50),
                                      ("2024-06-03", 25), ("2024-12-02", 25)])  # last: an old-lot expiry still trading
-def test_broker_lot_agrees_with_the_dated_reference_table(day, lot):
+def test_broker_lot_agrees_with_the_dated_reference_table(day, lot, dated_lot_table):
     assert pl.lot_verified("NIFTY", day, lot)
 
 
 @pytest.mark.parametrize("day,lot", [("2026-11-10", 75), ("2026-11-10", 50), ("2022-06-01", 75), ("2018-06-01", 75),
                                      ("2026-11-10", 0)])
-def test_broker_lot_that_contradicts_or_predates_the_table_is_unverified(day, lot):
+def test_broker_lot_that_contradicts_or_predates_the_table_is_unverified(day, lot, dated_lot_table):
     assert not pl.lot_verified("NIFTY", day, lot)
 
 
@@ -100,6 +114,18 @@ def test_a_stale_broker_lot_rejects_priced_paper_admission(path):
 def test_a_missing_instrument_token_rejects_priced_paper_admission(path):
     assert _tick(path, _feed(token=None)) == [("REJECTED", ["CONTRACT_IDENTITY_MISSING"])] * 2
     assert rows(path, "SELECT * FROM crew_paper_trades") == []
+
+
+def test_an_explicit_null_instrument_token_is_rejected_before_paper_admission(path):
+    base = _feed(token=None)
+    def malformed(now):
+        view = base(now)
+        view.chain["contracts"][0]["ce"]["growwContractId"] = None
+        return view
+    assert _tick(path, malformed) == []
+    assert [json.loads(a["reasons"]) for a in rows(path, "SELECT reasons FROM crew_admissions")] == [[adm.QUOTE_MISSING]]
+    assert rows(path, "SELECT * FROM crew_paper_trades") == []
+    assert rows(path, "SELECT * FROM crew_paper_events") == []
 
 
 def test_a_stale_quote_is_rejected_at_admission_and_never_reaches_the_ledger(path):
@@ -203,3 +229,11 @@ def test_journal_and_observation_store_agree_on_a_frontend_only_change(tmp_path)
     assert rr.code_rev(tmp_path) == oq.code_revision(tmp_path) and "+" not in rr.code_rev(tmp_path)
     (tmp_path / "frontend" / "a.tsx").write_text("2")
     assert rr.code_rev(tmp_path) == oq.code_revision(tmp_path) and rr.code_rev(tmp_path).endswith("+dirty")
+
+
+def test_released_synthetic_lot_table_is_flat_and_rejects_other_sizes():
+    """Transition scenarios above must not conceal the shipped synthetic contract."""
+    for day in ("2021-01-04", "2022-06-01", "2024-06-03", "2025-06-02", "2026-11-10"):
+        assert pl.lot_verified("NIFTY", day, 65)
+        assert not pl.lot_verified("NIFTY", day, 75)
+        assert not pl.lot_verified("NIFTY", day, 25)

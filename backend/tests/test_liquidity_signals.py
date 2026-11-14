@@ -68,9 +68,13 @@ def test_option_premium_follows_the_index_and_both_charts_render(monkeypatch):
     assert calls == []
 
 
-def test_estimated_option_plan_without_a_live_chain():
-    settings = get_settings()
-    assert weekly_expiry(date(2026, 10, 14), settings) == date(2026, 10, 19)  # Tuesday 20th is Dussehra: Monday
+def test_estimated_option_plan_without_a_live_chain(tmp_path):
+    (tmp_path / "holidays").mkdir()
+    (tmp_path / "holidays/nse.yaml").write_text(
+        "# SYNTHETIC closure scenario; no exchange authority\nholidays:\n"
+        "  - {date: 2026-10-20, name: SYNTHETIC_CLOSED_DAY}\n")
+    settings = get_settings().model_copy(update={"data_dir": str(tmp_path)})
+    assert weekly_expiry(date(2026, 10, 14), settings) == date(2026, 10, 19)  # synthetic Tuesday closure rolls back to Monday
     assert weekly_expiry(date(2026, 10, 22), settings) == date(2026, 10, 27)  # Thursday -> next Tuesday
     assert weekly_expiry(date(2026, 10, 13), settings) == date(2026, 10, 13)  # expiry day itself
     s = {"side": "Long", "time": "2026-10-14 11:15", "entry": 22537.8, "stop": 22475.8, "target": 22661.8,
