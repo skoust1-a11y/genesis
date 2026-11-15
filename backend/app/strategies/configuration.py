@@ -12,7 +12,7 @@ from app.db.hashing import canonical_json, sha256_hex
 from app.strategies.capabilities import EOD_ADAPTER_VERSION, eod_rejection_reasons
 from app.strategies.normalizer import normalize_markdown
 
-CONFIGURATION_VERSION = "strategy-configuration-v1"
+CONFIGURATION_VERSION = "strategy-configuration-v2"
 RESEARCH_MODES = frozenset({"historical_replay", "historical_synthetic"})
 
 
@@ -57,7 +57,43 @@ def create_configuration(
     if source_type not in {"markdown", "deterministic_variant"}:
         reasons.append({"code": "UNVERIFIED_SOURCE_RULE_COVERAGE",
                         "detail": "Source extraction requires independent semantic fidelity verification"})
+    # Inspect submitted fields before normalization can supply schema defaults.
+    raw = doc.frontmatter.get("rules_v2")
+    if isinstance(raw, dict):
+        mandatory = {
+            "": ("market", "instrument", "timeframes", "intraday_entry", "stop_loss", "target",
+                 "risk", "position_sizing", "session_window", "indicators", "data_dependencies"),
+            "position_sizing": ("risk_policy_id", "capital_inr", "max_lots", "lot_step_mode"),
+            "risk": ("max_lots", "max_daily_loss_pct", "max_open_positions"),
+            "session_window": ("timezone", "entry_start", "entry_cutoff", "square_off", "blackout_windows"),
+        }
+        if isinstance(raw.get("timeframes"), dict) and raw["timeframes"].get("primary") == "1d":
+            mandatory.pop("session_window")
+        predicates = raw.get("intraday_entry")
+        for index, predicate in enumerate(predicates if isinstance(predicates, list) else []):
+            if isinstance(predicate, dict):
+                for field in ("timeframe", "direction", "params", "requires_closed_bar"):
+                    if field not in predicate:
+                        reasons.append({"code": "MISSING_EXPLICIT_RULE",
+                                        "detail": f"rules_v2.intraday_entry.{index}.{field}"})
+        for section, fields in mandatory.items():
+            block = raw.get(section, {}) if section else raw
+            for field in fields:
+                if not isinstance(block, dict) or field not in block:
+                    reasons.append({"code": "MISSING_EXPLICIT_RULE",
+                                    "detail": f"rules_v2.{section + '.' if section else ''}{field}"})
     rules = spec.rules_v2
+    if rules is not None:
+        bindings = {
+            "stop_loss_points": (rules.stop_loss.mode == "index_points", rules.stop_loss.value),
+            "target_points": (rules.target.mode == "index_points", rules.target.value),
+            "target_r_multiple": (rules.target.mode == "r_multiple", rules.target.value),
+            "max_lots": (True, rules.position_sizing.max_lots),
+            "strike_offset": (True, rules.instrument.strike_offset),
+        }
+        for name, (mode_matches, value) in bindings.items():
+            if name in rules.parameters and (not mode_matches or rules.parameters[name].value != value):
+                reasons.append({"code": "CONFLICTING_PARAMETER_DECLARATION", "detail": name})
     adapter = None
     engine = None
     if rules is not None and not reasons:
@@ -171,6 +207,23 @@ def run_configuration(
         parameter_selector=parameter_selector, option_quote_provider=option_quote_provider,
     )
     evidence = report.to_dict()
+    # Use the exact admitted OOS executions, preserving engine costs and risk gates.
+    from app.trading.walk_forward import compute_validation_metrics
+    executions = [execution for fold in report.folds for execution in fold.oos_executions] if hasattr(report, "folds") else []
+    segmentation = {}
+    for dimension in ("structure", "volatility", "direction", "timeframe"):
+        groups = {}
+        for execution in executions:
+            label = execution.research_segmentation.get(dimension, "UNKNOWN")
+            groups.setdefault(label, []).append(execution)
+        segmentation[dimension] = {
+            label: compute_validation_metrics(rows, trading_days_evaluated=len({r.market_day for r in rows}),
+                initial_capital_inr=config.initial_capital_inr, fidelity_tier=config.fidelity_tier).to_dict()
+            for label, rows in sorted(groups.items())
+        }
+    evidence["research_segmentation"] = segmentation
+    from app.trading.regime import RESEARCH_REGIME_VERSION
+    evidence["research_regime_version"] = RESEARCH_REGIME_VERSION
     integrity = evidence.pop("dataset_integrity", None)
     evidence["engine_report_hash"] = evidence.pop("report_hash")
     evidence["validation_scope"] = "DEVELOPMENT_ONLY"
@@ -201,6 +254,11 @@ def validate_configuration_execution(configuration, *, config, settings=None):
         raise ValueError("NOT_EXECUTABLE_EXACTLY")
     required_tier = {"historical_replay": "TIER_1_VERIFIED",
                      "historical_synthetic": "TIER_2_SYNTHETIC"}[payload["execution_mode"]]
+    declared_capital = payload["normalized_specification"]["rules_v2"]["position_sizing"]["capital_inr"]
+    if config.initial_capital_inr != declared_capital:
+        raise ValueError("STRATEGY_CAPITAL_MISMATCH")
+    if required_tier == "TIER_2_SYNTHETIC" and "iv" not in payload["normalized_specification"]["rules_v2"]["parameters"]:
+        raise ValueError("MISSING_EXPLICIT_SYNTHETIC_IV")
     if config.fidelity_tier != required_tier:
         raise ValueError("EXECUTION_MODE_FIDELITY_MISMATCH")
     spec = normalize_markdown(

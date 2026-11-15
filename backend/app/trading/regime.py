@@ -472,3 +472,37 @@ def classify_regime(
 
 classify_regime_v2 = classify_regime
 classify_market_regime = classify_regime
+
+
+RESEARCH_REGIME_VERSION = "research-regime-v1"
+
+
+def classify_research_regime(bars, *, now: datetime) -> dict[str, Any]:
+    """Research-only closed-bar segmentation; never a trading eligibility decision.
+
+    Directional efficiency over 14 close changes: >=0.6 trends, <=0.3 ranges,
+    otherwise transitional. Volatility is mean true range / close (14 bars):
+    <=0.05% low, >=0.15% high, otherwise normal. This is underlying realized
+    range, not an invented intraday VIX observation.
+    """
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        raise ValueError("now must be a timezone-aware datetime")
+    frame = _causal_closed_frame(bars, now, 5)
+    result = {"version": RESEARCH_REGIME_VERSION, "decision_time": now.isoformat(),
+              "structure": "INSUFFICIENT_DATA", "volatility": "UNKNOWN_VOL",
+              "volatility_source": "underlying_true_range_14", "trading_authority": False}
+    if len(frame) < 15:
+        return result
+    tail = frame.tail(15)
+    closes = tail["close"].astype(float)
+    changes = closes.diff().iloc[1:]
+    path = float(changes.abs().sum())
+    displacement = float(closes.iloc[-1] - closes.iloc[0])
+    efficiency = abs(displacement) / path if path else 0.0
+    structure = ("BULLISH_TREND" if displacement > 0 else "BEARISH_TREND") if efficiency >= 0.6 else (
+        "SIDEWAYS" if efficiency <= 0.3 else "TRANSITIONAL")
+    tr = pd.concat([tail["high"] - tail["low"], (tail["high"] - closes.shift()).abs(),
+                    (tail["low"] - closes.shift()).abs()], axis=1).max(axis=1).iloc[1:]
+    relative_range = float(tr.mean()) / float(closes.iloc[-1])
+    volatility = "LOW_VOL" if relative_range <= 0.0005 else "HIGH_VOL" if relative_range >= 0.0015 else "NORMAL_VOL"
+    return {**result, "structure": structure, "volatility": volatility}

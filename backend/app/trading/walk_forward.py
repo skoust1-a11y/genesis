@@ -67,7 +67,7 @@ def black76_price(
     discount = math.exp(-rate * years)
     return discount * black76(forward, strike, years, iv, option_type)
 
-WALK_FORWARD_ENGINE_VERSION = "walk-forward-v3.3"
+WALK_FORWARD_ENGINE_VERSION = "walk-forward-v3.4"
 
 DEFAULT_IS_TRADING_DAYS = 60
 DEFAULT_OOS_TRADING_DAYS = 20
@@ -254,6 +254,12 @@ class WalkForwardConfig:
             raise ValueError("label_horizon_days must be >= 1")
         if self.cooldown_days < 0:
             raise ValueError("cooldown_days cannot be negative")
+        for name in ("tier2_spread_bps_each_way", "tier2_slippage_ticks", "tier2_iv_stress_pct"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative")
+        if self.tier2_iv_stress_pct >= 1:
+            raise ValueError("tier2_iv_stress_pct must be below 1")
         if self.initial_capital_inr <= 0:
             raise ValueError("initial_capital_inr must be positive")
 
@@ -557,6 +563,7 @@ class SimulatedOptionExecution:
     conservative_exit_reserve_inr: str | None = None
     entry_cost_evidence_json: str | None = None
     exit_cost_evidence_json: str | None = None
+    research_segmentation: Mapping[str, Any] = field(default_factory=dict)
 
 
 def _quote_timestamp(raw):
@@ -709,7 +716,14 @@ def _simulate_verified(event, cfg, settings, fail_closed):
         realized_r=float(net / risk) if risk else None)
 
 
-def simulate_option_execution(
+def simulate_option_execution(event: CandidateSignalEvent, *, config=None, settings=None,
+                              fail_closed_on_missing=True) -> SimulatedOptionExecution:
+    execution = _simulate_option_execution(event, config=config, settings=settings,
+                                          fail_closed_on_missing=fail_closed_on_missing)
+    return replace(execution, research_segmentation=dict(event.metadata.get("research_segmentation", {})))
+
+
+def _simulate_option_execution(
     event: CandidateSignalEvent,
     *,
     config: WalkForwardConfig | None = None,
@@ -805,7 +819,7 @@ def simulate_option_execution(
     )
 
     # Conservative IV stress burden: long option pays higher IV on entry or receives lower IV on exit
-    stressed_exit_iv = max(base_exit_iv * (1.0 - cfg.tier2_iv_stress_pct), 0.05)
+    stressed_exit_iv = max(base_exit_iv * (1.0 - cfg.tier2_iv_stress_pct), 1e-8)
     stressed_mid_exit = max(
         black76_price(event.exit_spot, event.strike, t_exit_years, cfg.risk_free_rate, stressed_exit_iv, event.option_type),
         0.05,
@@ -1285,12 +1299,17 @@ class ReplayRiskTracker:
         full_premium_limit: Decimal = paper_risk.FULL_PREMIUM_LIMIT,
         daily_exposure_limit: Decimal = paper_risk.DAILY_EXPOSURE_LIMIT,
         stop_risk_fraction: Decimal = Decimal("0.02"),
+        max_daily_loss_pct: float | None = None,
     ) -> None:
         if (Decimal(str(initial_capital_inr)) != Decimal("50000")
                 or full_premium_limit != paper_risk.FULL_PREMIUM_LIMIT
                 or daily_exposure_limit != paper_risk.DAILY_EXPOSURE_LIMIT
                 or stop_risk_fraction != Decimal("0.02") or max_open_positions < 1):
             raise ValueError("UNAPPROVED_REPLAY_RISK_POLICY")
+        if max_daily_loss_pct is not None and (not math.isfinite(max_daily_loss_pct) or max_daily_loss_pct <= 0):
+            raise ValueError("INVALID_DAILY_LOSS_LIMIT")
+        self.daily_loss_limit = (Decimal(str(initial_capital_inr)) * Decimal(str(max_daily_loss_pct)) / 100
+                                 if max_daily_loss_pct is not None else None)
         self.initial_capital = paper_accounting.money(Decimal(str(initial_capital_inr)))
         self.cash = self.initial_capital
         self.max_open_positions = max_open_positions
@@ -1365,6 +1384,9 @@ class ReplayRiskTracker:
 
         day = event.market_day
         gross_daily_loss = self.daily_losses.get(day, Decimal("0.00"))
+        if self.daily_loss_limit is not None and gross_daily_loss >= self.daily_loss_limit:
+            return replace(execution, priced=False, admitted=False, net_pnl_inr=None,
+                           gross_pnl_inr=None, realized_r=None, rejection_reason="STRATEGY_DAILY_LOSS_LIMIT")
         existing_reservations = sum((p["full_premium_loss"] for p in self.open_positions.values()), Decimal("0.00"))
         spendable_cash = max(Decimal("0.00"), self.cash - sum((p["exit_reserve"] for p in self.open_positions.values()), Decimal("0.00")))
         effective_capital = max(Decimal("0.00"), min(self.initial_capital, self.cash + sum((p["entry_debit"] for p in self.open_positions.values()), Decimal("0.00")) - existing_reservations))
@@ -1503,6 +1525,20 @@ class RuleBasedCausalSignalGenerator(CausalSignalGenerator):
             raise UnsupportedStrategyRuleError(f"NO_ENTRY_CONDITIONS: Strategy '{spec.strategy_id}' has no entry rules")
 
         rules = spec.rules_v2
+        if rules.timeframes.structure or rules.timeframes.reference:
+            raise UnsupportedStrategyRuleError("UNSUPPORTED_CONTEXTUAL_TIMEFRAME")
+        if set(rules.data_dependencies) - {"underlying_5m", "historical_option_quotes", "historical_contract_metadata"}:
+            raise UnsupportedStrategyRuleError("UNSUPPORTED_DATA_DEPENDENCY")
+        if rules.position_sizing.risk_policy_id != "paper-risk-v2" or rules.position_sizing.capital_inr != 50000:
+            raise UnsupportedStrategyRuleError("UNSUPPORTED_SIZING_POLICY")
+        if rules.position_sizing.lot_step_mode != "fixed_lots":
+            raise UnsupportedStrategyRuleError("UNSUPPORTED_DYNAMIC_SIZING")
+        if rules.position_sizing.max_lots != rules.risk.max_lots or rules.risk.max_lots > paper_risk.MAX_LOTS:
+            raise UnsupportedStrategyRuleError("SIZING_LOT_LIMIT_MISMATCH")
+        for name in ("min_risk_reward", "max_entries_per_day", "max_consecutive_losses", "cooldown_days",
+                     "max_loss_pct_of_capital", "max_losses_per_day", "min_minutes_between_trades"):
+            if getattr(rules.risk, name) is not None:
+                raise UnsupportedStrategyRuleError(f"UNSUPPORTED_RISK_RULE: {name}")
         if rules.market != "nse_options":
             raise UnsupportedStrategyRuleError("NOT_EXECUTABLE_EXACTLY: unsupported market adapter")
         if rules.session_window and rules.session_window.timezone not in ("Asia/Kolkata", "Asia/Calcutta"):
@@ -1641,7 +1677,7 @@ class RuleBasedCausalSignalGenerator(CausalSignalGenerator):
             lot_path = Path(__file__).resolve().parents[2] / "data" / "lot_sizes" / "nse.yaml"
         lot_changes = list(self.lot_changes) if self.lot_changes is not None else load_lot_sizes(lot_path)
         holidays = self.holidays if self.holidays is not None else exchange_holidays(active_settings)
-        requested_lots = max(1, int(parameters.get("max_lots", 1)))
+        requested_lots = max(1, int(parameters.get("max_lots", rules.position_sizing.max_lots)))
         lots = min(requested_lots, paper_risk.MAX_LOTS, spec.rules_v2.risk.max_lots, spec.rules_v2.position_sizing.max_lots)
         strike_step = active_settings.strike_step(underlying)
         if strike_step is None or strike_step <= 0:
@@ -1966,6 +2002,12 @@ class RuleBasedCausalSignalGenerator(CausalSignalGenerator):
                 quoted = entry_q.lot_size if isinstance(entry_q, ContractQuote) else (entry_q or {}).get("lot_size")
                 with suppress(ValueError):  # a quoted lot the table rules out stays on as a Tier 1 contract mismatch
                     lot_size = contract_lot_size(lot_changes, underlying, day_str, quoted)
+                research_segmentation = {
+                    **regime.classify_research_regime(
+                        [{"timestamp": b["timestamp"].isoformat(), **{k: b[k] for k in ("open", "high", "low", "close")}}
+                         for b in day_bars[:i + 1]], now=dec_time),
+                    "direction": entry_direction, "timeframe": rules.timeframes.primary,
+                }
                 regime_label = regime.classify_regime(
                     [{"date": b["timestamp"].isoformat(), **{k: b[k] for k in ("open", "high", "low", "close")}}
                      for b in day_bars[: i + 1]], now=dec_time).structure_regime
@@ -1998,7 +2040,8 @@ class RuleBasedCausalSignalGenerator(CausalSignalGenerator):
                         holding_minutes=0.0,
                         incomplete_label=True,
                         exit_reason="MISSING_FUTURE_BARS",
-                        metadata={"parameter_hash": sha256_hex(canonical_json(normalize_json(dict(parameters))))},
+                        metadata={"parameter_hash": sha256_hex(canonical_json(normalize_json(dict(parameters)))),
+                                  "research_segmentation": research_segmentation},
                     )
                     events.append(ev)
                     i += 1
@@ -2036,7 +2079,8 @@ class RuleBasedCausalSignalGenerator(CausalSignalGenerator):
                             holding_minutes=holding_mins,
                             incomplete_label=True,
                             exit_reason="MISSING_EXIT_QUOTE",
-                            metadata={"parameter_hash": sha256_hex(canonical_json(normalize_json(dict(parameters))))},
+                            metadata={"parameter_hash": sha256_hex(canonical_json(normalize_json(dict(parameters)))),
+                                  "research_segmentation": research_segmentation},
                         )
                         events.append(ev)
                         i += 1
@@ -2066,7 +2110,8 @@ class RuleBasedCausalSignalGenerator(CausalSignalGenerator):
                     dte_days=dte_days,
                     holding_minutes=holding_mins,
                     exit_reason=exit_reason,
-                    metadata={"parameter_hash": sha256_hex(canonical_json(normalize_json(dict(parameters))))},
+                    metadata={"parameter_hash": sha256_hex(canonical_json(normalize_json(dict(parameters)))),
+                                  "research_segmentation": research_segmentation},
                 )
                 events.append(ev)
                 i += 1
@@ -2153,7 +2198,8 @@ class GridSearchParameterSelector(CausalParameterSelector):
                 for ev in clean_events
             ]
             tracker = ReplayRiskTracker(initial_capital_inr=config.initial_capital_inr,
-                max_open_positions=spec.rules_v2.risk.max_open_positions)
+                max_open_positions=spec.rules_v2.risk.max_open_positions,
+                max_daily_loss_pct=spec.rules_v2.risk.max_daily_loss_pct)
             is_execs = [tracker.check_and_apply(ev, ex) for ev, ex in zip(clean_events, is_execs)]
             metrics = compute_validation_metrics(
                 is_execs,
@@ -2314,7 +2360,8 @@ def run_walk_forward_validation(
     observed_cost_policies: set[str] = set()
 
     oos_risk_tracker = ReplayRiskTracker(initial_capital_inr=cfg.initial_capital_inr,
-        max_open_positions=spec.rules_v2.risk.max_open_positions if spec.rules_v2 else 1)
+        max_open_positions=spec.rules_v2.risk.max_open_positions if spec.rules_v2 else 1,
+        max_daily_loss_pct=spec.rules_v2.risk.max_daily_loss_pct if spec.rules_v2 else None)
     for fold in folds:
         is_date_set = set(fold.is_dates)
         purged_date_set = set(fold.purged_dates)
@@ -2371,7 +2418,8 @@ def run_walk_forward_validation(
                         for ev in clean_base_is
                     ]
                     tracker = ReplayRiskTracker(initial_capital_inr=cfg.initial_capital_inr,
-                        max_open_positions=spec.rules_v2.risk.max_open_positions)
+                        max_open_positions=spec.rules_v2.risk.max_open_positions,
+                        max_daily_loss_pct=spec.rules_v2.risk.max_daily_loss_pct)
                     base_is_execs = [tracker.check_and_apply(ev, ex) for ev, ex in zip(clean_base_is, base_is_execs)]
                     sel_out = parameter_selector(fold, clean_base_is, base_is_execs, spec)
                     if isinstance(sel_out, tuple) and len(sel_out) == 2:
@@ -2415,6 +2463,7 @@ def run_walk_forward_validation(
             is_risk_tracker = ReplayRiskTracker(
                 initial_capital_inr=cfg.initial_capital_inr,
                 max_open_positions=getattr(spec.rules_v2.risk, "max_open_positions", 1) if spec.rules_v2 else 1,
+                max_daily_loss_pct=spec.rules_v2.risk.max_daily_loss_pct if spec.rules_v2 else None,
             )
             is_executions = []
             for ev in clean_is_events:
@@ -2467,6 +2516,7 @@ def run_walk_forward_validation(
             is_risk_tracker = ReplayRiskTracker(
                 initial_capital_inr=cfg.initial_capital_inr,
                 max_open_positions=getattr(spec.rules_v2.risk, "max_open_positions", 1) if spec.rules_v2 else 1,
+                max_daily_loss_pct=spec.rules_v2.risk.max_daily_loss_pct if spec.rules_v2 else None,
             )
             is_executions = []
             for ev in clean_is_events:

@@ -170,6 +170,11 @@ rules_v2:
     max_lots: 1
     max_daily_loss_pct: 2.0
     max_open_positions: 1
+  position_sizing:
+    risk_policy_id: paper-risk-v2
+    capital_inr: 50000
+    max_lots: 1
+    lot_step_mode: fixed_lots
   session_window:
     timezone: Asia/Kolkata
     entry_start: "09:15"
@@ -648,6 +653,11 @@ rules_v2:
     max_lots: 1
     max_daily_loss_pct: 2.0
     max_open_positions: 1
+  position_sizing:
+    risk_policy_id: paper-risk-v2
+    capital_inr: 50000
+    max_lots: 1
+    lot_step_mode: fixed_lots
   session_window:
     timezone: Asia/Kolkata
     entry_start: "09:15"
@@ -945,9 +955,9 @@ def test_adversarial_risk_enforcement_paper_risk_v2():
     assert len(oos_execs) == 2
     assert oos_execs[0].priced is True
     assert oos_execs[0].net_pnl_inr < -4000.0
-    # Trade 2 must be rejected by daily exposure limit
+    # The declared 2% daily realized-loss budget blocks before the account exposure ceiling.
     assert oos_execs[1].priced is False
-    assert oos_execs[1].rejection_reason in ("DAILY_EXPOSURE_LIMIT", "INSUFFICIENT_CAPITAL")
+    assert oos_execs[1].rejection_reason == "STRATEGY_DAILY_LOSS_LIMIT"
 
 
 # -------------------------------------------------------------------------------------------------
