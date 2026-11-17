@@ -145,7 +145,10 @@ class FeePolicyUnavailable(ValueError):
 
 
 def is_known_policy_id(policy_id: str | None) -> bool:
-    return isinstance(policy_id, str) and policy_id in POLICIES_BY_ID
+    if isinstance(policy_id, str) and policy_id in POLICIES_BY_ID:
+        return True
+    from app.trading.forward_fees import from_id
+    return from_id(policy_id) is not None
 
 
 def resolve_policy(
@@ -160,6 +163,9 @@ def resolve_policy(
     if policy_id is not None:
         spec = POLICIES_BY_ID.get(policy_id)
         if spec is None:
+            from app.trading.forward_fees import from_id
+            spec = from_id(policy_id)
+        if spec is None:
             raise FeePolicyUnavailable("COST_POLICY_UNKNOWN")
         if not (spec.verified_from <= market_day <= spec.verified_through):
             raise FeePolicyUnavailable("COST_POLICY_UNVERIFIED_DATE")
@@ -173,6 +179,10 @@ def resolve_policy(
             if not allow_historical_brokerage_assumption:
                 raise FeePolicyUnavailable("COST_POLICY_UNVERIFIED_DATE")
             return spec
+    from app.trading.forward_fees import policy
+    daily = policy(market_day)
+    if daily is not None:
+        return daily
     raise FeePolicyUnavailable("COST_POLICY_UNVERIFIED_DATE")
 
 

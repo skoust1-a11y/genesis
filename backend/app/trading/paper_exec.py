@@ -7,16 +7,22 @@ fill: without an executable book the result is UNPRICED with a reason, and no pr
 
 from __future__ import annotations
 
-import math
 import re
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, replace
+from datetime import date, datetime
 from decimal import Decimal, localcontext
 
 from app.config import Settings
 from app.paper import order_charges
-from app.trading import paper_fees, regime as reg_mod
-from app.trading.option_quote import IST, ContractQuote, _strike, parse_chain_leg, quote_decision
+from app.trading import paper_fees
+from app.trading import regime as reg_mod
+from app.trading.option_quote import (
+    IST,
+    ContractQuote,
+    _strike,
+    parse_chain_leg,
+    quote_decision,
+)
 
 TICK = Decimal("0.05")
 PAISA = Decimal("0.01")
@@ -73,6 +79,41 @@ def executable(quote: ContractQuote | None, now: datetime, settings: Settings) -
     return None, _REASONS.get(decision.reason or "", QUOTE_REJECTED)
 
 
+def exit_executable(quote: ContractQuote | None, now: datetime, settings: Settings):
+    """Protective paper liquidation; caller must verify this is the exact held contract."""
+    from app.trading.paper_exit_policy import FRESH_BID, LEGACY
+
+    policy = settings.paper_exit_quote_policy
+    if policy == LEGACY:
+        return executable(quote, now, settings)
+    if policy != FRESH_BID:
+        raise ValueError("Unknown paper exit policy")
+    if not isinstance(now, datetime) or now.utcoffset() is None:
+        return None, QUOTE_REJECTED
+    if settings.live_trading_enabled or settings.sandbox_allow_live:
+        return None, "PAPER_ONLY_EXIT_POLICY"
+    from app.market.hours import market_status
+
+    if not market_status(now, settings)[0]:
+        return None, "MARKET_CLOSED"
+    if quote is None:
+        return None, QUOTE_MISSING
+    try:
+        if now.astimezone(IST).date() > date.fromisoformat(quote.expiry):
+            return None, "CONTRACT_EXPIRED"
+    except (ValueError, TypeError):
+        return None, "CONTRACT_IDENTITY_MISSING"
+    if (not quote.provider_instrument_id or not quote.tradingsymbol
+            or type(quote.lot_size) is not int or quote.lot_size < 1):
+        return None, "CONTRACT_IDENTITY_MISSING"
+    decision = quote_decision(quote, now, settings, purpose="exit")
+    if decision.status != "executable":
+        return None, _REASONS.get(decision.reason or "", QUOTE_REJECTED)
+    if quote.bid < TICK:
+        return None, "BID_BELOW_MINIMUM_TICK"
+    return replace(quote, source=f"{quote.source}|paper-exit:{policy}"), None
+
+
 def fill(quote: ContractQuote, side: str, lots: int, *, now: datetime, settings: Settings, ticks: int,
          cost_policy_id: str | None = None,
          allow_historical_brokerage_assumption: bool = False) -> Fill:
@@ -104,7 +145,7 @@ def max_loss(entry: Fill, settings: Settings, day: str) -> Decimal:
         historical = bool(policy_snap.get("brokerage_provenance"))
         exit_fixed = Decimal(str(
             _charges(
-                Decimal("0"), entry.qty, "SELL", day, settings, policy,
+                Decimal(0), entry.qty, "SELL", day, settings, policy,
                 allow_historical_brokerage_assumption=historical,
             )["total"]
         ))

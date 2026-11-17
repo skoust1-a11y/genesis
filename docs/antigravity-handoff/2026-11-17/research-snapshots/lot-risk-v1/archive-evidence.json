@@ -1,0 +1,30 @@
+{
+  "archive_sources": {
+    "/Users/skoust/Documents/GenesisArchives/genesis-original-20261114/README.md": "0ed209c6c78725f1eb93676866bfc28c6e47881e2217a04a185c1f9f368ea755",
+    "/Users/skoust/Documents/GenesisArchives/genesis-original-20261114/backend/app/liquidity_signals.py": "f8b49ca6dd7444197241777e8f5ce44a4ebccc1cd364872d9c25aac2ab556a68",
+    "/Users/skoust/Documents/GenesisArchives/genesis-original-20261114/backend/app/trading/crew/risk_agent.py": "c2b58bc064367b3ff501d5d7022e7b25bdce0af781b09f8b867cb0c0243418a5"
+  },
+  "documented_tiers": {
+    "momentum": {
+      "strike": "1-OTM",
+      "lots": 3
+    },
+    "supertrend": {
+      "strike": "2-OTM",
+      "lots": 4
+    },
+    "scalp_countertrend": {
+      "strike": "ATM",
+      "lots": 2
+    }
+  },
+  "execution_discrepancy": "Archived resolver selects 2-OTM only, preferring 3/4 lots or 2 when underlying stop >40. Frozen risk branch also uses standard3/super4. Documentation is not proof these tiers were all executed.",
+  "original_resolver_defaults": {
+    "capital": 50000,
+    "max_risk_pct": 7.5,
+    "risk_budget": 3750,
+    "margin_budget": 28000
+  },
+  "experiment": "Research limits only: 2500/3000 stop budget, ATM/ITM <=2 lots, OTM <=4 lots. Current premium/daily exposure caps5000 retained. No original tier classifier, no risk-floor override, no live promotion.",
+  "research_limit_source_sha256": "9936e8a9b3156348abcfde3806a0e2c34c7a2fa0b210971b6b6204e08f927f5d"
+}

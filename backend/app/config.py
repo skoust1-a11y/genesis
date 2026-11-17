@@ -122,6 +122,12 @@ class Settings(BaseSettings):
     # Minutes after the model exit bar that an unpriceable paper exit keeps retrying at a real executable quote
     # before EXIT_UNPRICED. 0: no retry.
     paper_exit_requote_minutes: int = Field(default=0, ge=0, le=30, alias="PAPER_EXIT_REQUOTE_MINUTES")
+    paper_exit_quote_policy: Literal["entry-spread-v1", "fresh-bid-v1"] = Field(
+        default="entry-spread-v1", alias="PAPER_EXIT_QUOTE_POLICY"
+    )
+    paper_candidate_profit_giveback_pct: Decimal | None = Field(
+        default=None, ge=10, le=20, alias="PAPER_CANDIDATE_PROFIT_GIVEBACK_PCT"
+    )
 
     # Brokers and live orders
     live_trading_enabled: bool = Field(default=False, alias="LIVE_TRADING_ENABLED")
@@ -170,6 +176,7 @@ class Settings(BaseSettings):
     api_tokens: str = Field(default="", alias="API_TOKENS")
     # Lifetime of a username/password login (users from `python -m app.auth new-user NAME`).
     session_hours: float = Field(default=12, gt=0, alias="SESSION_HOURS")
+    signup_approver_names: str = Field(default="", alias="SIGNUP_APPROVER_NAMES")
 
     # Logging configuration
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")

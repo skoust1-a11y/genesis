@@ -1,0 +1,11 @@
+# Prompt 04 — Dynamic selection and fair lot/risk comparison
+
+The documented original allocation was ATM2lots for scalps,1-OTM3lots standard momentum,2-OTM4lots supertrend. The actual archived resolver differed. Audit/label this rather than claiming exact historic restoration. Current active account remains1,000 stop ceiling/max3lots, premium/daily5,000. User discussed2,500/3,000 ceilings and ATM1–2 versus more OTM lots for RESEARCH, not active promotion.
+
+Build a pure selector taking causal entry/stop, executable actual chain, verified delta, fees, cash, daily gross loss, reservations, time-to-expiry and setup class. Compare ATM, shallow ITM and OTM at the same monetary risk CEILING with whole-lot sizing, not equal quantities. Same ceiling does not mean equal actual deployed risk. Keep all contract attempts and rejection reasons. No forced minimum lot if no size qualifies. Max cap and preferred tier are different concepts.
+
+Test expiry versus non-expiry and entry-time buckets before11:00,11:00–13:30,after13:30. The simple rotation ITM→ATM→OTM is a hypothesis, not proven optimal. If adding ranked fallback, declare preference/eligibility order before replay and compare separately with strict rotation. Do not select the historically winning strike using future returns or future peak. Preserve exact held-contract identity after entry; changing the selected strike must not mark an existing holding with a replacement quote.
+
+Use today’s13:38/13:52 recorded books as counterexamples: with higher ceilings ITM wins the first, ATM the second. With1,000 the eligible set changes. These are independent overlapping shadows, not additive portfolio returns. Morning books are absent. Synthetic model at13:38 gave0.95/1.00 versus real8.70/8.75, materially changing admission. Do not use that model alone to claim profitable execution or choose production settings.
+
+Keep premium and daily caps explicit. If testing old28,000 premium allowance, declare that as a separate risk regime and do not compare it as if only selection changed. Fee/risk verification must cover intended partial exits. Show target exposure, allowed quantity, estimated stop risk, full-premium risk, costs and rejection reason for each candidate.

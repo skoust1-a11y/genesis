@@ -63,9 +63,8 @@ def parse_chain_leg(row: dict, side: str, expiry: str | None, fetched_at: dateti
     fetched = _aware(fetched_at)
     if chain_expiry is None or fetched is None or not isinstance(row, dict):
         return None
-    if row.get("expiry") not in (None, ""):
-        if _iso_date(row.get("expiry")) != chain_expiry:
-            return None
+    if row.get("expiry") not in (None, "") and _iso_date(row.get("expiry")) != chain_expiry:
+        return None
     if fetched.astimezone(IST).date() > date.fromisoformat(chain_expiry):
         return None
     option_type = {"CE": "CE", "CALL": "CE", "PE": "PE", "PUT": "PE"}.get(str(side).upper())
@@ -94,9 +93,9 @@ def parse_chain_leg(row: dict, side: str, expiry: str | None, fetched_at: dateti
         values = [_text(leg[key]) for key in keys if key in leg]
         if values and (None in values or len(set(values)) != 1):
             return None
-    if "strike" in row and "strikePrice" in row:
-        if _strike({"strike": row["strike"]}) != _strike({"strikePrice": row["strikePrice"]}):
-            return None
+    if ("strike" in row and "strikePrice" in row
+            and _strike({"strike": row["strike"]}) != _strike({"strikePrice": row["strikePrice"]})):
+        return None
     return ContractQuote(
         underlying=_underlying(row),
         expiry=chain_expiry,
@@ -115,8 +114,11 @@ def parse_chain_leg(row: dict, side: str, expiry: str | None, fetched_at: dateti
     )
 
 
-def quote_decision(quote: ContractQuote, now: datetime, settings: Settings) -> QuoteDecision:
+def quote_decision(quote: ContractQuote, now: datetime, settings: Settings, *,
+                   purpose: str = "entry") -> QuoteDecision:
     """Buy is the ask and sell is the bid, and only when the book is fresh. Last price is never either."""
+    if purpose not in ("entry", "exit"):
+        raise ValueError("Quote purpose must be entry or exit")
     if not quote.underlying:
         return _reject("underlying is missing")
     clock = _aware(now)
@@ -135,13 +137,15 @@ def quote_decision(quote: ContractQuote, now: datetime, settings: Settings) -> Q
 
     bid, ask = quote.bid, quote.ask
     if bid is not None and ask is not None:
+        if not isinstance(bid, Decimal) or not isinstance(ask, Decimal) or not bid.is_finite() or not ask.is_finite():
+            return _reject("bid or ask is not finite", fetch_age)
         if bid <= 0 or ask <= 0:
             return _reject("bid or ask is not positive", fetch_age)
         if ask < bid:
             return _reject("spread is inverted", fetch_age)
         mid = (ask + bid) / 2
         spread_pct = (ask - bid) / mid * Decimal(100)
-        if spread_pct > Decimal(str(settings.max_spread_pct)):
+        if purpose == "entry" and spread_pct > Decimal(str(settings.max_spread_pct)):
             return _reject("spread is wide", fetch_age)
         if quote.quote_time is None:
             if quote.ltp is not None and quote.ltp > 0:

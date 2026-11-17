@@ -1,0 +1,11 @@
+# Prompt 06 — Versioned paper integration after validation
+
+Do the implementation and validation work first. Keep active current policy as control. A new research policy must not be presented as already active. Only promote a clearly identified paper profile if the owner's instructions authorize that specific change and its risk regime; do not infer authorization to raise1,000 to2,500/3,000 or increase3lots to4 from a research discussion.
+
+Use a fresh strategy/run identity and journal when rules, source/exit identity or risk regime change. Preserve the existing active-run manifest/history, positions and immutable fee/fill records. Never rewrite source hashes to make an old live journal accept changed code; never clear unresolved rows, position leases or loss budgets to start fresh. Check all relevant candidate, baseline paper and model positions before a controlled restart. Protect pending exits and prevent new admissions during shutdown.
+
+Integrate only necessary components, with explicit module boundaries and documented unavailable factor behavior. Ensure dashboards and future paper alerts label policy/profile and distinguish real quotes, synthetic research and actual paper fills. Operational paper entry/exit alerts to the existing configured group were authorized earlier; posting research findings is not authorized by that fact. Never send a research recap or a new-group message merely to demonstrate delivery.
+
+Continuous operation is currently this Mac only. Awake guard/watchdog are installed but require AC, lid open, login and network. Do not claim monitoring while asleep. Surface heartbeat, quote/candle freshness, coverage gaps and rejected reasons. Watchdog must not force-restart with open/unknown positions. Keep read-only health snapshots free of credentials. Existing local LaunchAgents are outside the repo and not recreated by a Git checkout.
+
+Provide rollback steps to the untouched control profile, premarket checks, EOD reconciliation and a list of what is active versus research. Keep live orders disabled. Run appropriate backend/frontend checks; avoid unnecessary broad changes. Respect the owner's latest instruction: this prompt folder stays inside Genesis, work stays on this branch, and THE OWNER WILL PUSH when done. Do not push autonomously.

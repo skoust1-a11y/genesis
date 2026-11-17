@@ -9,9 +9,11 @@ type Me = { username: string | null; auth_enabled: boolean };
 
 export function AuthNav() {
   const [me, setMe] = useState<Me | null>(null);
+  const [canApprove, setCanApprove] = useState(false);
 
   useEffect(() => {
     api<Me>("/api/auth/me").then(setMe).catch(() => setMe(null));
+    api<{ can_approve: boolean }>("/api/auth/signup/permissions").then((p) => setCanApprove(p.can_approve)).catch(() => setCanApprove(false));
   }, []);
 
   async function logout() {
@@ -31,6 +33,7 @@ export function AuthNav() {
   return (
     <span className="flex items-center gap-2 text-zinc-600">
       {me.username}
+      {canApprove && <Link href="/account-requests" className="whitespace-nowrap text-xs text-emerald-700 underline">Account requests</Link>}
       <button onClick={logout} className="rounded-md border px-2 py-1 text-xs hover:bg-zinc-100">
         Log out
       </button>

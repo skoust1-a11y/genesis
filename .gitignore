@@ -20,6 +20,7 @@ logs/
 *.pid
 backend/data/strategies/
 backend/data/reports/
+backend/data/restored-research/
 backend/data/sandbox/
 backend/data/logs/
 backend/data/intraday/

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Header, HTTPException
-from pydantic import BaseModel, Field
+from typing import Literal
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from pydantic import BaseModel, ConfigDict, Field
 
 from app import auth
+from app.api.common import require_auth
+from app.auth import registration
 from app.config import get_settings
 from app.db.session import session_scope
 
@@ -13,6 +17,44 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 class LoginBody(BaseModel):
     username: str = Field(min_length=1, max_length=64)
     password: str = Field(min_length=1, max_length=1024)
+
+
+class SignupBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    username: str = Field(pattern=r"^[A-Za-z0-9_.@-]{1,64}$")
+    password: str = Field(min_length=8, max_length=1024)
+
+
+class SignupDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    decision: Literal["approve", "reject"]
+
+
+@router.post("/signup", status_code=202)
+def signup(body: SignupBody, request: Request):
+    registration.rate_limit(request.client.host if request.client else "unknown")
+    if not registration.approvers():
+        raise HTTPException(status_code=503, detail="Signup is unavailable until an account owner is configured")
+    with session_scope() as db:
+        registration.request_access(db, body.username, body.password)
+    return {"status": "pending", "detail": "Signup request received. An owner must approve access before you can log in."}
+
+
+@router.get("/signup/permissions")
+def signup_permissions(actor: str = Depends(require_auth)):
+    return {"can_approve": actor in registration.approvers()}
+
+
+@router.get("/signup-requests")
+def signup_requests(actor: str = Depends(registration.require_owner)):
+    with session_scope() as db:
+        return {"requests": registration.list_requests(db)}
+
+
+@router.post("/signup-requests/{username}")
+def review_signup(username: str, body: SignupDecision, actor: str = Depends(registration.require_owner)):
+    with session_scope() as db:
+        return registration.decide(db, username, body.decision, actor)
 
 
 @router.post("/login")

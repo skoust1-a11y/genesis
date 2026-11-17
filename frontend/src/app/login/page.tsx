@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 
 import { api, setToken } from "@/lib/api";
 
@@ -19,7 +20,9 @@ export default function Login() {
       const res = await api<{ token: string }>("/api/auth/login", { body: { username, password } });
       setToken(res.token);
       const next = new URLSearchParams(window.location.search).get("next");
-      window.location.assign(next?.startsWith("/") && !next.startsWith("//") ? next : "/");
+      const destination = new URL(next || "/", window.location.origin);
+      window.location.assign(destination.origin === window.location.origin && destination.pathname !== "/login"
+        ? destination.pathname + destination.search + destination.hash : "/");
     } catch (err) {
       setError(err instanceof Error ? err.message.replace(/ — log in or set an API token$/, "") : String(err));
       setBusy(false);
@@ -55,9 +58,7 @@ export default function Login() {
         <button className="w-full rounded-md bg-emerald-600 px-4 py-2 text-white disabled:opacity-50" disabled={busy}>
           {busy ? "Logging in…" : "Log in"}
         </button>
-        <p className="text-xs text-zinc-500">
-          Create a login with <code>uv run python -m app.auth new-user NAME</code> in <code>backend/</code>.
-        </p>
+        <p className="text-center text-sm text-zinc-600">Need an account? <Link href="/signup" className="font-medium text-emerald-700 underline">Sign up</Link></p>
       </form>
     </main>
   );

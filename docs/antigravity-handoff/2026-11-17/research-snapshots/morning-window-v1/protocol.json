@@ -1,0 +1,19 @@
+{
+  "budget": 2500,
+  "expiry_selection": "ITM before11, ATM11-13:30, OTM afterwards; nonexpiry OTM",
+  "lot_caps": {
+    "ATM_ITM": 2,
+    "OTM": 4
+  },
+  "premium_daily_caps": 5000,
+  "profit_exit": "20% giveback after1R net; initial stop;15:10 squareoff",
+  "morning_confirmation": "completed1m local-pivot sweep/reclaim immediately; no extra break required",
+  "morning_windows": "09:30 inclusive;10:30/11:00 exclusive",
+  "afternoon_window": "12:00 inclusive to15:00 exclusive; original expanded entry rules",
+  "scope": "21 past sessions plus today separately; no opening-range/VWAP directional filter or opposite-position reversal exit added",
+  "source_sha256": {
+    "logs/resimulation-20261117/morning-window-v1/replay.py": "bf94d61f0d41b194f6ad4ae9ad5c17481e863bce68974adad417ca79702e89bb",
+    "logs/resimulation-20261117/morning-window-v1/morning_policy.py": "39351199d51899d06d9bbd0ff0291c724ad803e7abd455bc1280914c357cfa81",
+    "logs/resimulation-20261117/lot-risk-v1/research_limits.py": "9936e8a9b3156348abcfde3806a0e2c34c7a2fa0b210971b6b6204e08f927f5d"
+  }
+}

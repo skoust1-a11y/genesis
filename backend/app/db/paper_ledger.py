@@ -20,11 +20,11 @@ from app.config import Settings
 from app.db import crew_journal as cj
 from app.trading import paper_accounting as pa
 from app.trading import paper_exec as px
+from app.trading import paper_fees
 from app.trading import paper_registry as reg
 from app.trading import paper_risk as risk_v2
-from app.trading import paper_fees
-from app.trading.option_quote import IST
 from app.trading.market_validation import closed_bars
+from app.trading.option_quote import IST
 
 OPEN = ("OPEN", "PARTIALLY_EXITED")
 STRATEGY_NOT_REGISTERED = "STRATEGY_NOT_REGISTERED"
@@ -45,7 +45,10 @@ LOT_TABLE = Path(__file__).resolve().parents[2] / "data" / "lot_sizes" / "nse.ya
 
 def lot_verified(underlying: str, market_day: str, broker_lot: int) -> bool:
     """The broker's contract lot agrees with the dated reference table for that day (see ``contract_lot_size``)."""
-    from app.market.nse import contract_lot_size, load_lot_sizes  # the read-only crew API must not load app.market
+    from app.market.nse import (  # the read-only crew API must not load app.market
+        contract_lot_size,
+        load_lot_sizes,
+    )
 
     try:
         return contract_lot_size(load_lot_sizes(LOT_TABLE), underlying, market_day, quoted=broker_lot) == broker_lot
@@ -61,7 +64,7 @@ def ensure_accounts(db_path: Path | str, *, lease: cj.Lease, capital: Decimal, n
     """Open every registered account once. A later start with another capital or risk policy is refused."""
     if not isinstance(capital, Decimal) or not capital.is_finite() or capital <= 0:
         raise cj.InvalidTransition("paper capital must be a positive decimal")
-    if capital != Decimal("50000"):
+    if capital != Decimal(50000):
         raise cj.ConsistencyError([{"kind": "paper_capital_not_approved", "approved_capital": "50000"}])
     policy = reg.RISK_POLICY["risk_policy_id"]
 
@@ -102,7 +105,7 @@ def bind_legacy_accounts(db_path: Path | str, *, lease: cj.Lease, expected_regis
         changed = []
         for account in accounts:
             aid = account["account_id"]
-            if (aid not in reg.account_ids() or Decimal(account["capital_inr"]) != Decimal("50000")
+            if (aid not in reg.account_ids() or Decimal(account["capital_inr"]) != Decimal(50000)
                     or account["risk_policy_id"] != reg.RISK_POLICY["risk_policy_id"]):
                 raise cj.ConsistencyError([{"kind": "legacy_account_incompatible", "account_id": aid}])
             hashes = {r[0] for r in conn.execute(
@@ -167,6 +170,9 @@ def enter(db_path: Path | str, *, lease: cj.Lease, admission: dict, model_trade:
     candles_valid = risk["risk_policy_id"] != risk_v2.POLICY_ID or not closed_bars(df_5m, now).empty
 
     def op(conn: sqlite3.Connection) -> list[dict]:
+        from app.trading.paper_exit_policy import bind
+
+        bind(conn, settings.paper_exit_quote_policy, trades_table="crew_paper_trades")
         persisted = conn.execute("SELECT inputs,market_day,signal_id,class FROM crew_admissions WHERE admission_id=?",
                                  (admission["admission_id"],)).fetchone()
         if (persisted is None or json.loads(persisted["inputs"]) != inputs
@@ -184,7 +190,7 @@ def enter(db_path: Path | str, *, lease: cj.Lease, admission: dict, model_trade:
                 "SELECT a.capital_inr, a.risk_policy_id, i.registry_hash, i.strategy_version "
                 "FROM crew_paper_accounts a LEFT JOIN crew_paper_account_identity i USING(account_id) "
                 "WHERE a.account_id=?", (account_id,)).fetchone()
-            if (identity is None or Decimal(identity["capital_inr"]) != Decimal("50000")
+            if (identity is None or Decimal(identity["capital_inr"]) != Decimal(50000)
                     or identity["risk_policy_id"] != risk["risk_policy_id"]
                     or identity["registry_hash"] != reg.REGISTRY_HASH
                     or identity["strategy_version"] != reg.STRATEGY_VERSION):
@@ -637,6 +643,9 @@ def _each_open(db_path, lease, now, model_trade_id, act) -> list[dict]:
 
 def _book(conn, trade, chain, now, settings):
     """The held contract's executable book. ``trade["contract"]`` is the entry trading symbol (entry requires one)."""
+    from app.trading.paper_exit_policy import bind
+
+    bind(conn, settings.paper_exit_quote_policy, trades_table="crew_paper_trades")
     quote = px.contract_quote(chain, strike=trade["strike"], option_type=trade["option_type"], expiry=trade["expiry"])
     if quote is not None:
         if not quote.tradingsymbol or not quote.underlying:
@@ -654,7 +663,7 @@ def _book(conn, trade, chain, now, settings):
         return None, "CONTRACT_IDENTITY_MISSING"
     if quote is not None and any(getattr(quote, key) != contract[key] for key in keys):
         return None, "CONTRACT_IDENTITY_MISMATCH"
-    return px.executable(quote, now, settings)
+    return px.exit_executable(quote, now, settings)
 
 
 def _event(conn, trade, event_type, to_state, reason, lots_after, *, key, lease, now, fill=None, index_spot=None):

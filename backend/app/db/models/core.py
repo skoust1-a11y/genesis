@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import AppendOnly, Base, NoDelete
@@ -110,6 +110,18 @@ class User(Base):
     username: Mapped[str] = mapped_column(String(64), primary_key=True)
     password_hash: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+
+
+class SignupRequest(Base):
+    __tablename__ = "signup_requests"
+    __table_args__ = (CheckConstraint("status IN ('pending','approved','rejected')", name="status"),)
+
+    username: Mapped[str] = mapped_column(String(64), primary_key=True)
+    password_hash: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    status: Mapped[str] = mapped_column(String(16), default="pending")
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), default=utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    decided_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class UserSession(Base):

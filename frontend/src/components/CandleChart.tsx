@@ -840,6 +840,8 @@ export function CandleChart({
     [bars]
   );
 
+  const hasVolume = data.some((bar) => (bar.volume ?? 0) > 0);
+
   const timeMap = useMemo(() => {
     const map = new Map<string, Time>();
     for (const b of data) {
@@ -849,8 +851,8 @@ export function CandleChart({
   }, [data]);
 
   // Total active panes count determines the dynamic container height
-  const paneCount = 1 + (showRsi ? 1 : 0) + (showMacd ? 1 : 0);
-  const chartPixelHeight = paneCount === 3 ? 740 : paneCount === 2 ? 620 : 520;
+  const paneCount = 2 + (showRsi ? 1 : 0) + (showMacd ? 1 : 0);
+  const chartPixelHeight = 520 + (paneCount - 1) * 125;
 
   // Determine whether the active viewing range is increased (e.g. zoomed out, wide price span, higher timeframe)
   const { vMin, vMax, visiblePriceSpan, isRangeIncreased } = useMemo(() => {
@@ -936,7 +938,7 @@ export function CandleChart({
       },
       rightPriceScale: {
         borderColor: isDark ? darkBorder : lightBorder,
-        scaleMargins: { top: 0.08, bottom: 0.18 },
+        scaleMargins: { top: 0.08, bottom: 0.08 },
         autoScale: true,
       },
       timeScale: {
@@ -997,14 +999,19 @@ export function CandleChart({
       }, 0);
     }
 
-    // 2. Volume Series at bottom of Pane 0
+    // 2. Keep volume in its own pane with an independent, zero-based scale.
     const volume = api.addSeries(HistogramSeries, {
-      priceScaleId: "",
+      priceScaleId: "right",
       priceFormat: { type: "volume" },
+      title: "Vol",
+      base: 0,
       lastValueVisible: false,
       priceLineVisible: false,
-    }, 0);
-    volume.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
+    }, 1);
+    volume.priceScale().applyOptions({
+      autoScale: true,
+      scaleMargins: { top: 0.1, bottom: 0 },
+    });
 
     // 3. Dynamic Moving Averages Overlays on Pane 0
     const vwap = api.addSeries(LineSeries, {
@@ -1048,7 +1055,7 @@ export function CandleChart({
     mainSeries.attachPrimitive(overlays);
 
     // 5. Dedicated Sub-Panes (RSI & MACD)
-    let currentPaneIndex = 1;
+    let currentPaneIndex = 2;
     let rsiSeries: ISeriesApi<"Line"> | undefined;
     let macdHist: ISeriesApi<"Histogram"> | undefined;
     let macdLine: ISeriesApi<"Line"> | undefined;
@@ -1206,8 +1213,8 @@ export function CandleChart({
         time: b.time,
         value: b.volume ?? 0,
         color: b.close >= (b.open ?? b.close)
-          ? (isDark ? "rgba(8, 153, 129, 0.22)" : "rgba(8, 153, 129, 0.18)")
-          : (isDark ? "rgba(242, 54, 69, 0.22)" : "rgba(242, 54, 69, 0.18)"),
+          ? (isDark ? "rgba(8, 153, 129, 0.65)" : "rgba(8, 153, 129, 0.55)")
+          : (isDark ? "rgba(242, 54, 69, 0.65)" : "rgba(242, 54, 69, 0.55)"),
       }))
     );
 
@@ -1221,7 +1228,7 @@ export function CandleChart({
         c.api.timeScale().setVisibleLogicalRange({ from: data.length - 90, to: data.length + 6 });
       }
     }
-  }, [data, chartType, isDark, intraday]);
+  }, [data, chartType, isDark, intraday, showRsi, showMacd]);
 
   // Update Overlays: VWAP & EMAs
   useEffect(() => {
@@ -1242,7 +1249,7 @@ export function CandleChart({
     c.ema20.setData(showEma20 && indicators ? getLineData(indicators.ema20) : []);
     c.ema50.setData(showEma50_200 && indicators ? getLineData(indicators.ema50) : []);
     c.ema200.setData(showEma50_200 && indicators ? getLineData(indicators.ema200) : []);
-  }, [data, showVwap, showEma20, showEma50_200, indicators]);
+  }, [data, showVwap, showEma20, showEma50_200, indicators, theme, chartType, showRsi, showMacd]);
 
   // Update Sub-Panes Data: RSI & MACD
   useEffect(() => {
@@ -1286,7 +1293,7 @@ export function CandleChart({
         })
       );
     }
-  }, [data, indicators, showRsi, showMacd, isDark]);
+  }, [data, indicators, showRsi, showMacd, isDark, chartType]);
 
   // Update Overlays: Zones, Sweeps, Trendlines
   useEffect(() => {
@@ -1368,7 +1375,7 @@ export function CandleChart({
       showSweeps,
       isDark
     );
-  }, [zones, plans, data, intraday, showLevelsAndTrendlines, showLabels, showStructure, showSweeps, marketStructure, trendlines, sweeps, timeMap, isDark, isRangeIncreased]);
+  }, [zones, plans, data, intraday, showLevelsAndTrendlines, showLabels, showStructure, showSweeps, marketStructure, trendlines, sweeps, timeMap, isDark, isRangeIncreased, chartType, showRsi, showMacd]);
 
   // Clean, Non-Colliding Horizontal Levels on Chart
   useEffect(() => {
@@ -1457,7 +1464,7 @@ export function CandleChart({
         })
       );
     }
-  }, [levels, showLevelsAndTrendlines, showLabels, data, isDark, isRangeIncreased]);
+  }, [levels, showLevelsAndTrendlines, showLabels, data, isDark, isRangeIncreased, chartType, showRsi, showMacd]);
 
   // Hovered Bar & Values
   const shown = data[hover !== null && hover >= 0 && hover < data.length ? hover : data.length - 1];
@@ -2182,6 +2189,10 @@ export function CandleChart({
             <span>C <strong className={isDark ? "text-zinc-200" : "text-zinc-900"}>{num(shown.close)}</strong></span>
             <span className={change >= 0 ? "text-emerald-500 font-semibold" : "text-rose-500 font-semibold"}>
               {change >= 0 ? "+" : ""}{num(change)} ({changePct}%)
+            </span>
+
+            <span title={hasVolume ? "Traded volume" : "The market data source does not report traded volume for this instrument"}>
+              Vol <strong>{hasVolume ? (shown.volume ?? 0).toLocaleString("en-IN") : "Unavailable"}</strong>
             </span>
 
             {/* Indicator values on hover */}

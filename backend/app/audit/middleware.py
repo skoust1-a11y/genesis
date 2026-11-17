@@ -29,9 +29,9 @@ def _clean(value: str | None, limit: int) -> str | None:
 
 
 def _needs_token(scope) -> bool:
-    """Once auth is enabled: every mutating request except login, and every TOKEN_READS read."""
+    """Once auth is enabled: mutating requests except login/signup, and TOKEN_READS reads."""
     method, path = scope.get("method", "GET"), scope.get("path", "")
-    if path == "/api/auth/login":
+    if path in {"/api/auth/login", "/api/auth/signup"}:
         return False
     return method in MUTATING or (method != "OPTIONS" and path.startswith(TOKEN_READS))
 

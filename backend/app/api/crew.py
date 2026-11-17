@@ -97,6 +97,12 @@ def get_paper_stats(market_day: str | None = Query(None, pattern=DAY)):
     return _read(paper_stats.report, market_day=market_day)
 
 
+@router.get("/paper/operations")
+def get_paper_operations():
+    from app.trading.forward_operations import report
+    return _read(lambda conn: report(get_settings().crew_journal_path))
+
+
 @router.get("/exceptions")
 def get_exceptions(limit: int = Limit()):
     return _read(crew_reader.exceptions, now=crew_reader.now_ist(), limit=limit)

@@ -1,0 +1,201 @@
+{
+  "CONTROL": {
+    "historical_trades": 77,
+    "historical_net": "12278.72",
+    "historical_marked_drawdown": "5489.42",
+    "today_trades": 6,
+    "today_net": "7206.24",
+    "today_trade_list": [
+      {
+        "entry": "09:28",
+        "exit": "09:34",
+        "side": "CALL",
+        "net": "-1019.33",
+        "spot": 25330.15
+      },
+      {
+        "entry": "09:55",
+        "exit": "11:14",
+        "side": "CALL",
+        "net": "1637.41",
+        "spot": 25379.3
+      },
+      {
+        "entry": "11:17",
+        "exit": "12:04",
+        "side": "CALL",
+        "net": "2798.18",
+        "spot": 25440.25
+      },
+      {
+        "entry": "12:08",
+        "exit": "12:37",
+        "side": "CALL",
+        "net": "-1481.28",
+        "spot": 25483.95
+      },
+      {
+        "entry": "12:37",
+        "exit": "13:13",
+        "side": "PUT",
+        "net": "3630.62",
+        "spot": 25459.65
+      },
+      {
+        "entry": "13:14",
+        "exit": "13:46",
+        "side": "CALL",
+        "net": "1640.64",
+        "spot": 25381.75
+      }
+    ],
+    "today_0938_decision": []
+  },
+  "CONFIRM_0930_1100": {
+    "historical_trades": 29,
+    "historical_net": "8633.48",
+    "historical_marked_drawdown": "3749.64",
+    "today_trades": 1,
+    "today_net": "-1404.17",
+    "today_trade_list": [
+      {
+        "entry": "09:34",
+        "exit": "09:41",
+        "side": "PUT",
+        "net": "-1404.17",
+        "spot": 25305.85
+      }
+    ],
+    "today_0938_decision": []
+  },
+  "RECLAIM_0930_1030": {
+    "historical_trades": 25,
+    "historical_net": "6910.70",
+    "historical_marked_drawdown": "5207.00",
+    "today_trades": 1,
+    "today_net": "-1404.17",
+    "today_trade_list": [
+      {
+        "entry": "09:34",
+        "exit": "09:41",
+        "side": "PUT",
+        "net": "-1404.17",
+        "spot": 25305.85
+      }
+    ],
+    "today_0938_decision": [
+      {
+        "outcome": "REJECTED",
+        "reason": "POSITION_OR_EXIT_PENDING"
+      }
+    ]
+  },
+  "RECLAIM_0930_1100": {
+    "historical_trades": 32,
+    "historical_net": "8770.66",
+    "historical_marked_drawdown": "5207.00",
+    "today_trades": 1,
+    "today_net": "-1404.17",
+    "today_trade_list": [
+      {
+        "entry": "09:34",
+        "exit": "09:41",
+        "side": "PUT",
+        "net": "-1404.17",
+        "spot": 25305.85
+      }
+    ],
+    "today_0938_decision": [
+      {
+        "outcome": "REJECTED",
+        "reason": "POSITION_OR_EXIT_PENDING"
+      }
+    ]
+  },
+  "REVERSAL_ONLY_0930_1100": {
+    "historical_trades": 28,
+    "historical_net": "-2850.56",
+    "historical_marked_drawdown": "4627.53",
+    "today_trades": 3,
+    "today_net": "-616.86",
+    "today_trade_list": [
+      {
+        "entry": "09:38",
+        "exit": "09:43",
+        "side": "CALL",
+        "net": "1031.17",
+        "spot": 25304.0
+      },
+      {
+        "entry": "09:53",
+        "exit": "09:55",
+        "side": "PUT",
+        "net": "-812.65",
+        "spot": 25361.7
+      },
+      {
+        "entry": "10:10",
+        "exit": "10:14",
+        "side": "PUT",
+        "net": "-835.38",
+        "spot": 25360.45
+      }
+    ],
+    "today_0938_decision": [
+      {
+        "outcome": "OPENED",
+        "reason": "VERIFIED_PAPER_FILL"
+      }
+    ]
+  },
+  "RECLAIM_PLUS_AFTERNOON": {
+    "historical_trades": 74,
+    "historical_net": "13730.87",
+    "historical_marked_drawdown": "5772.38",
+    "today_trades": 5,
+    "today_net": "1633.08",
+    "today_trade_list": [
+      {
+        "entry": "09:34",
+        "exit": "09:41",
+        "side": "PUT",
+        "net": "-1404.17",
+        "spot": 25305.85
+      },
+      {
+        "entry": "12:01",
+        "exit": "12:07",
+        "side": "CALL",
+        "net": "-625.85",
+        "spot": 25494.85
+      },
+      {
+        "entry": "12:08",
+        "exit": "12:37",
+        "side": "CALL",
+        "net": "-764.24",
+        "spot": 25483.95
+      },
+      {
+        "entry": "12:37",
+        "exit": "13:13",
+        "side": "PUT",
+        "net": "3630.62",
+        "spot": 25459.65
+      },
+      {
+        "entry": "13:14",
+        "exit": "13:46",
+        "side": "CALL",
+        "net": "796.72",
+        "spot": 25381.75
+      }
+    ],
+    "today_0938_decision": [
+      {
+        "outcome": "REJECTED",
+        "reason": "POSITION_OR_EXIT_PENDING"
+      }
+    ]
+  }
+}

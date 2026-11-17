@@ -41,19 +41,23 @@ from typing import Any
 
 import pandas as pd
 
-from app.state_authority import (
-    AuthorityError, Environment, Resource, StateAuthorityContract, preflight,
-)
 from app.config import Settings, get_settings
 from app.db import crew_journal as cj
 from app.db import crew_session as cs
 from app.db import paper_ledger as pl
 from app.liquidity_signals import DynamicLookoutWindow
 from app.market.hours import holidays, market_status
+from app.state_authority import (
+    AuthorityError,
+    Environment,
+    Resource,
+    StateAuthorityContract,
+    preflight,
+)
 from app.trading import admission as adm
 from app.trading import market_validation as mv
-from app.trading import paper_exec as px
 from app.trading import paper_delivery
+from app.trading import paper_exec as px
 from app.trading import paper_notify as pn
 from app.trading import paper_registry as reg
 from app.trading.crew.exit_agent import ExitAgent
@@ -137,7 +141,7 @@ class ResearchRuntime:
         """Lease, recover, start the heartbeat. Raises LeaseHeld, ConsistencyError or StartupRefused."""
         _check_state_binding(self.state_contract, self.deployment_id, self.path, self.settings)
         if self.synthetic_research:
-            from app.synthetic_research_state import binding, validate, initialize
+            from app.synthetic_research_state import binding, initialize, validate
             identity, root = binding(self.state_contract, self.deployment_id, self.account_id,
                                      self.path, self.settings)
             missing = validate(self.path, root, identity, self.authorize_synthetic_init)
@@ -157,6 +161,10 @@ class ResearchRuntime:
             if self.paper:
                 pl.ensure_accounts(self.path, lease=self.lease, capital=self.settings.paper_capital_inr,
                                    now=self.clock())
+                from app.trading.paper_exit_policy import bind
+
+                cj._fenced(self.path, self.lease, self.clock(), lambda conn: bind(
+                    conn, self.settings.paper_exit_quote_policy, trades_table="crew_paper_trades"))
                 report["paper"] = pl.recover(self.path, lease=self.lease, now=self.clock())
                 report["paper_notifications"] = self._notifications(deliver=False)
         except BaseException:
