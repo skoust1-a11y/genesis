@@ -1,0 +1,122 @@
+{
+  "audit_date": "2026-11-17",
+  "historical_period": "2026-10-15 to 2026-11-16 (21 sessions)",
+  "starting_capital_inr": 50000.0,
+  "risk_regime": {
+    "stop_loss_ceiling_inr": 1000.0,
+    "full_premium_limit_inr": 5000.0,
+    "daily_exposure_limit_inr": 5000.0,
+    "max_lots": 3,
+    "lot_size": 65
+  },
+  "factorial_2x2": {
+    "cell_1_1_current_entry_current_trail": {
+      "entry_family": "ZONE",
+      "exit_policy": "20% Net Profit Giveback after 1R",
+      "trades": 19,
+      "closed": 19,
+      "wins": 9,
+      "losses": 10,
+      "net_inr": 1499.52,
+      "max_drawdown_inr": 2513.04,
+      "total_fees_inr": 986.73,
+      "exit_reasons": {
+        "PEAK_PROFIT_GIVEBACK": 9,
+        "STOP": 6,
+        "STOP_TOUCH": 4
+      }
+    },
+    "cell_1_2_current_entry_thesis_management": {
+      "entry_family": "ZONE",
+      "exit_policy": "Thesis Management (5M Structure + Milestones)",
+      "trades": 19,
+      "closed": 19,
+      "wins": 8,
+      "losses": 11,
+      "net_inr": 10751.97,
+      "max_drawdown_inr": 2396.08,
+      "total_fees_inr": 1146.28,
+      "exit_reasons": {
+        "TRAILING_STOP_HIT": 6,
+        "STOP_LOSS_HIT": 9,
+        "TARGET_HIT": 2,
+        "STRUCTURE_TRAIL_EXIT": 1,
+        "STAGNATION_TIME_STOP": 1
+      }
+    },
+    "cell_2_1_revised_entry_current_trail": {
+      "entry_family": "ZONE_PLUS_BROADER_OR_MORNING",
+      "exit_policy": "20% Net Profit Giveback after 1R",
+      "morning_0930_1100_trades": 29,
+      "morning_0930_1100_net_inr": 8633.48,
+      "morning_0930_1100_drawdown_inr": 3749.64,
+      "expanded_all_day_trades": 77,
+      "expanded_all_day_net_inr": 12278.72,
+      "expanded_all_day_drawdown_inr": 5489.42
+    },
+    "cell_2_2_revised_entry_thesis_management": {
+      "entry_family": "ZONE_PLUS_BROADER",
+      "exit_policy": "Thesis Management (5M Structure + Milestones)",
+      "trades": 36,
+      "closed": 36,
+      "wins": 14,
+      "losses": 22,
+      "net_inr": 11431.60,
+      "max_drawdown_inr": 3234.51,
+      "total_fees_inr": 2042.90,
+      "exit_reasons": {
+        "STOP_LOSS_HIT": 13,
+        "TRAILING_STOP_HIT": 10,
+        "REVERSAL_EXIT": 5,
+        "STAGNATION_TIME_STOP": 4,
+        "TARGET_HIT": 3,
+        "STRUCTURE_TRAIL_EXIT": 1
+      }
+    }
+  },
+  "reference_benchmarks": {
+    "current_zones_fixed_3r": {
+      "trades": 19,
+      "net_inr": 14679.73,
+      "drawdown_inr": 1929.28,
+      "exit_reasons": {
+        "TARGET": 8,
+        "STOP": 6,
+        "STOP_TOUCH": 4,
+        "TARGET_TOUCH": 1
+      }
+    },
+    "broader_entries_fixed_3r": {
+      "trades": 24,
+      "net_inr": 5933.28,
+      "drawdown_inr": 6145.41
+    },
+    "old_27_trade_reconciliation": {
+      "saved_proxy_rupees": 87637.22,
+      "reconciled_formula": "index_points * 0.5 delta proxy with stale Yahoo prices and no option fees",
+      "closest_committed_engine_under_current_risk": 1366.92
+    }
+  },
+  "today_17_nov_separate": {
+    "actual_candidate_paper": {
+      "trades": 1,
+      "trade": "13:52 CALL 25550 CE (3 lots)",
+      "net_inr": -1082.46,
+      "note": "Operational paper account; earlier signals missed due to Mac system sleep."
+    },
+    "model_discrepancy": {
+      "timestamp": "13:38:07 IST",
+      "contract": "25500 CE",
+      "recorded_broker_bid_ask": "8.70 / 8.75",
+      "synthetic_model_bid_ask": "0.95 / 1.00",
+      "ratio": "9.16x model under-pricing"
+    },
+    "morning_0938_winner_analysis": {
+      "candle_sweep": "09:37 local-low sweep to 25292.85, reclaimed 25300.85, closed 25304.00",
+      "actionable_clock": "09:38:00 IST",
+      "reversal_only_trail_exit": "09:43:05 IST at +1031.17 INR (peak +1546.71 at 09:41)",
+      "thesis_management_behavior": "5M candle structure intact; held through 09:43 pullback into 10:00+ continuation",
+      "portfolio_conflict": "In all-day/broader morning accounts, 09:34 PUT was already held and blocked 09:38 CALL admission."
+    }
+  }
+}

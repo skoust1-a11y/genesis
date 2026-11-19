@@ -282,9 +282,26 @@ def run(state_root, config):
             raise ValueError(
                 "Reference data changed; review this experiment before resuming"
             )
-    candidate = CandidateAccount(
-        run_root / "candidate.db", config, run_id=manifest["run_id"]
+    from app.trading.dual_agent_shadow_account import DualAgentShadowAccount
+    from app.trading.enhanced_master_policy import EnhancedMasterAccount, EnhancedMasterConfig
+
+    candidate = EnhancedMasterAccount(
+        run_root / "candidate.db",
+        config,
+        run_id=manifest["run_id"],
+        config=EnhancedMasterConfig(
+            enable_ema_cross_strategy=True,
+            stop_budget_limit=Decimal("2500.00"),
+            daily_loss_limit=Decimal("2500.00"),
+            legacy_management=False,
+            time_rotation_enabled=True,
+            enable_liquidity_hopping=False,
+            max_lots_otm=4,
+            max_lots_atm=2,
+            max_daily_trades=10,
+        ),
     )
+    dual_agent_shadow = DualAgentShadowAccount(run_root / "dual_agent_shadow.db")
     baseline_path = run_root / "baseline.db"
     if not baseline_path.exists():
         initialize_baseline(baseline_path, config)
@@ -418,11 +435,23 @@ def run(state_root, config):
                     fee_policy=policy.policy_id if policy else None,
                     admission_blocker=candidate_admission_blocker(stop, inputs),
                 )
+                try:
+                    latest["dual_agent_shadow"] = dual_agent_shadow.tick(
+                        now=candidate_now,
+                        raw_1m=raw,
+                        chain=chain,
+                        news_safe=news_safe,
+                        fee_policy=policy.policy_id if policy else None,
+                    )
+                except Exception as exc:  # noqa: BLE001 - isolate shadow account from primary accounts
+                    log.warning("Dual-agent shadow tick failed: %s", type(exc).__name__)
+                    latest["dual_agent_shadow"] = {"state": "ERROR", "error": type(exc).__name__}
             copy_baseline_notifications(candidate, baseline_path)
             dispatch(candidate, config)
             accounts = {
                 "baseline": baseline_stats(baseline_path),
                 "candidate": candidate.stats(),
+                "dual_agent_shadow": dual_agent_shadow.stats(),
             }
             if active and now.strftime("%H:%M") >= "15:30":
                 text = f"GENESIS PAPER COMPARISON | {manifest['run_id']}\n{now.date()} end-of-day cumulative results\n"
@@ -513,6 +542,7 @@ def run(state_root, config):
         if inputs:
             inputs.close()
         candidate.close()
+        dual_agent_shadow.close()
         # Never leave a fresh SCANNING heartbeat after a controlled shutdown.
         status = root / "status.json"
         if status.exists():

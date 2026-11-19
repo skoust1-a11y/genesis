@@ -35,5 +35,11 @@
   "research-snapshots/morning-window-v1/summary.json": "2e25ad1b71e77f9d5c7bcba938fb975bd0061be0ccdaa4b9caad20acc129ec13",
   "research-snapshots/morning-window-v1/test_morning_policy.py": "1b92c673877c864a044fcd142ad7fe8b7ccbd1feda8e67382f9b6ec99e1994c8",
   "research-snapshots/morning-window-v1/verify.py": "9782d365ed84402a1983704fed7acb1941559f4ee24d4358d3d3b901c5cefeba",
-  "research-summary.json": "e9cdb7c74e7b00f474da369124c1240403b2b8a55a3e8154e5d445d3b6e81446"
+  "research-summary.json": "e9cdb7c74e7b00f474da369124c1240403b2b8a55a3e8154e5d445d3b6e81446",
+  "reports/01-management-audit-matrix.md": "74f85658160a75d8f2e0716b4aedb45f9a9d09602fb226be83a950b0462030de",
+  "reports/04-strike-selection-backtest-reconciliation.md": "62eb66079c5055491d19490c478dc9bb0f5988944534c2bbd934589ff27acf5f",
+  "reports/05-factorial-backtest-reconciliation.md": "f7432382eaae02a74c26d16361eed628f625b81559105d250db6c020fcafcac3",
+  "reports/05-factorial-summary.json": "ad331733f72d9f9617efc799986b6456f3cfd55d441246a3413c4f16ca9d1699",
+  "reports/06-paper-rollout-and-operations.md": "56b2c28c1378abd86726e51d3875b68959bef3bcecb802d01465d3932b984344",
+  "reports/07-earlier-strategies-reconciliation.md": "d1403a7cc88432959f7c685a0c06e3df30b971d29fb0ff7701af8a2d151bc2fd"
 }

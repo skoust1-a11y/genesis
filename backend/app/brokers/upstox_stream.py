@@ -159,7 +159,9 @@ class UpstoxStream:
     def _run(self):
         from websockets.sync.client import connect
 
+        backoff_seconds = 2
         while not self.stop_event.is_set():
+            received_live = False
             try:
                 with httpx.Client(timeout=15, trust_env=False, follow_redirects=False) as client:
                     response = client.get("https://api.upstox.com/v3/feed/market-data-feed/authorize",
@@ -169,7 +171,7 @@ class UpstoxStream:
                 parsed = urlparse(url)
                 if parsed.scheme != "wss" or not parsed.hostname or not parsed.hostname.endswith(".upstox.com"):
                     raise ValueError("STREAM_HOST_REFUSED")
-                with connect(url, open_timeout=15, close_timeout=3) as socket:
+                with connect(url, open_timeout=15, close_timeout=3, ping_interval=20, ping_timeout=15) as socket:
                     self.state = "CONNECTED_WAITING_FOR_LIVE_DATA"
                     socket.send(json.dumps({"guid": "genesis-paper", "method": "sub", "data": {"mode": "full", "instrumentKeys": list(self.contracts)}}).encode())
                     while not self.stop_event.is_set():
@@ -179,12 +181,16 @@ class UpstoxStream:
                             continue
                         if isinstance(raw, bytes):
                             self.accept(raw)
+                            if not received_live and self.state == "LIVE_SNAPSHOT_RECEIVED":
+                                received_live = True
+                                backoff_seconds = 2
             except Exception as exc:  # noqa: BLE001 - reconnect after provider/decoder failures without logging secret URLs
                 # Authorized websocket URLs contain a one-use secret; never log exceptions/URLs.
-                log.warning("Read-only stream disconnected: %s", type(exc).__name__)
+                log.warning("Read-only stream disconnected (%s); reconnecting in %ds", type(exc).__name__, backoff_seconds)
                 self.state = "DISCONNECTED"
             finally:
                 self.market_open = False
                 with self.lock:
                     self.cache.clear()
-            self.stop_event.wait(30)
+            self.stop_event.wait(backoff_seconds)
+            backoff_seconds = min(30, backoff_seconds * 2)
