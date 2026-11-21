@@ -18,6 +18,7 @@ trades/
 logs/
 *.log
 *.pid
+.archify/
 backend/data/strategies/
 backend/data/reports/
 backend/data/restored-research/
