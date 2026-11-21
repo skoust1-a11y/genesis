@@ -51,6 +51,33 @@ def heartbeat(status, now):
     }
 
 
+def _connect_readonly(path: Path, timeout: float = 2.0) -> sqlite3.Connection:
+    resolved = path.resolve()
+
+    def _open(query: str) -> sqlite3.Connection:
+        conn = sqlite3.connect(f"{resolved.as_uri()}?{query}", uri=True, timeout=timeout)
+        try:
+            conn.execute("PRAGMA query_only=ON")
+            conn.execute("PRAGMA schema_version").fetchone()
+            return conn
+        except Exception:
+            conn.close()
+            raise
+
+    try:
+        return _open("mode=ro")
+    except sqlite3.OperationalError as exc:
+        if "disk i/o error" not in str(exc).lower() or not resolved.exists():
+            raise
+        wal = Path(f"{resolved}-wal")
+        if not wal.exists() or wal.stat().st_size == 0:
+            try:
+                return _open("mode=ro&immutable=1")
+            except sqlite3.OperationalError:
+                pass
+        return _open("mode=rw")
+
+
 def exposure(root):
     """Require both paper ledgers and baseline model trades to be verifiably flat."""
     manifest = load(root / "active-run.json")
@@ -63,12 +90,14 @@ def exposure(root):
         ("baseline.db", ("crew_paper_trades", "crew_trades")),
     ):
         path = run / filename
-        with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True, timeout=2) as db:
-            db.execute("PRAGMA query_only=ON")
+        db = _connect_readonly(path, timeout=2)
+        try:
             for table in tables:
                 counts[table] = db.execute(
                     f"SELECT count(*) FROM {table} WHERE state <> 'CLOSED'"
                 ).fetchone()[0]
+        finally:
+            db.close()
     return {
         "verified": True,
         "flat": not any(counts.values()),

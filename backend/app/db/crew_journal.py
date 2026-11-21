@@ -852,10 +852,30 @@ def trade_id_for(market_day: str, signal_id: str) -> str:
 def connect_readonly(db_path: Path | str) -> sqlite3.Connection:
     """Read-only connection. Does not create the file and cannot write it."""
     path = Path(db_path).resolve()
-    conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=30.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA query_only = ON")
-    return conn
+
+    def _open(query: str) -> sqlite3.Connection:
+        c = sqlite3.connect(f"{path.as_uri()}?{query}", uri=True, timeout=30.0)
+        try:
+            c.row_factory = sqlite3.Row
+            c.execute("PRAGMA query_only = ON")
+            c.execute("PRAGMA schema_version").fetchone()
+            return c
+        except Exception:
+            c.close()
+            raise
+
+    try:
+        return _open("mode=ro")
+    except sqlite3.OperationalError as exc:
+        if "disk i/o error" not in str(exc).lower() or not path.exists():
+            raise
+        wal = Path(f"{path}-wal")
+        if not wal.exists() or wal.stat().st_size == 0:
+            try:
+                return _open("mode=ro&immutable=1")
+            except sqlite3.OperationalError:
+                pass
+        return _open("mode=rw")
 
 
 def record_admission(

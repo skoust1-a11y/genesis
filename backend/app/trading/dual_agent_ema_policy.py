@@ -488,16 +488,24 @@ class DirectionalAgent:
                 (curr_e9 > curr_e20) if is_call else (curr_e9 < curr_e20),
                 f"1M EMA9={curr_e9:.2f} vs EMA20={curr_e20:.2f}",
             )
-            c_level = ConditionCheck(
-                "next_bar_beyond_level",
-                (curr_close > pe.level) if is_call else (curr_close < pe.level),
-                f"Close={curr_close:.2f} vs Level={pe.level:.2f}",
-            )
-            c_st = self._evaluate_supertrend_condition(ctx)
-
-            init_sl = (pe.level - buf) if is_call else (pe.level + buf)
+            anchor = pe.level
+            anchor_label = f"{pe.level:.2f}"
+            init_sl = (anchor - buf) if is_call else (anchor + buf)
             risk_pts = abs(curr_close - init_sl)
             min_r, max_r = resolve_dynamic_risk_band(self.cfg, ctx.atr_5m)
+            # Fall back to 1M EMA20 as SL anchor when structural level is farther than max_r
+            if risk_pts > max_r:
+                anchor = curr_e20
+                anchor_label = f"1M EMA20({curr_e20:.2f})"
+                init_sl = (anchor - buf) if is_call else (anchor + buf)
+                risk_pts = abs(curr_close - init_sl)
+
+            c_level = ConditionCheck(
+                "next_bar_beyond_level",
+                (curr_close > anchor) if is_call else (curr_close < anchor),
+                f"Close={curr_close:.2f} vs Level={anchor_label}",
+            )
+            c_st = self._evaluate_supertrend_condition(ctx)
             c_risk = ConditionCheck(
                 "dynamic_risk_band",
                 min_r <= risk_pts <= max_r,
@@ -509,7 +517,7 @@ class DirectionalAgent:
                 dyn_1r = resolve_dynamic_1r(self.cfg, ctx.atr_5m, risk_pts)
                 thesis = (
                     f"{self.agent_name} confirmed {self.cfg.side} at {ctx.time_hhmm}: "
-                    f"1M 9/20 cross ({pe.cross_time}) confirmed on Bar t+1 beyond {pe.level:.2f}; "
+                    f"1M 9/20 cross ({pe.cross_time}) confirmed on Bar t+1 beyond {anchor_label}; "
                     f"SL={init_sl:.2f} (risk={risk_pts:.1f}pt, buf={buf:.1f}pt), "
                     f"dynamic 1R={dyn_1r:.1f}pt -> lock {dyn_1r * self.cfg.first_sl_lock_fraction:.1f}pt."
                 )
@@ -519,7 +527,7 @@ class DirectionalAgent:
                     entry_spot=curr_close,
                     initial_sl=init_sl,
                     risk_pts=risk_pts,
-                    conquered_level=pe.level,
+                    conquered_level=anchor,
                     dynamic_1r_pts=dyn_1r,
                     time_hhmm=ctx.time_hhmm,
                     conditions=checks,

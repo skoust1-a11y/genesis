@@ -277,3 +277,180 @@ def test_confirmed_eqh_reversal_filters_fakeouts_and_allows_pe_entry() -> None:
     assert pe.on_1m_close(ctx=ctx, prev_e9=25046.0, prev_e20=25045.0, curr_close=25042.0, curr_e9=25043.0, curr_e20=25044.0) is None
     prop = pe.on_1m_close(ctx=ctx, prev_e9=25043.0, prev_e20=25044.0, curr_close=25040.0, curr_e9=25041.0, curr_e20=25043.0)
     assert prop is not None and prop.side == "PUT"
+
+
+def _make_shadow_bars() -> list[dict[str, float | str]]:
+    """Build prev-day + today 1m bars where a clean CALL EMA9/20 cross arms at 09:42 and confirms at 09:43."""
+    from datetime import datetime, timedelta
+    from app.trading.dual_agent_ema_policy import IST
+
+    bars: list[dict[str, float | str]] = []
+    # Previous day: 40 bars trending up around 25000..25100 so 5M ST is green (+1) and PDC=25100
+    t0 = datetime(2026, 11, 19, 14, 50, tzinfo=IST)
+    for i in range(40):
+        px = 25000.0 + i * 2.5
+        bars.append({
+            "date": (t0 + timedelta(minutes=i)).isoformat(),
+            "open": px - 1.0, "high": px + 5.0, "low": px - 5.0, "close": px,
+        })
+    # Today 09:15..09:41: slight pullback below 25100 so EMA9 < EMA20 while 5M ST stays green (+1)
+    t1 = datetime(2026, 11, 20, 9, 15, tzinfo=IST)
+    # 09:15..09:29 (OR-15): 25100 -> 25086
+    for i in range(15):
+        px = 25100.0 - i * 1.0
+        bars.append({
+            "date": (t1 + timedelta(minutes=i)).isoformat(),
+            "open": px + 0.5, "high": px + 5.0, "low": px - 5.0, "close": px,
+        })
+    # 09:30..09:41: gentle drift down from 25086 so EMA9 < EMA20 at 09:41 while 5M ST stays green (+1)
+    for i in range(15, 27):
+        px = 25086.0 - (i - 15) * 0.2
+        bars.append({
+            "date": (t1 + timedelta(minutes=i)).isoformat(),
+            "open": px + 0.5, "high": px + 5.0, "low": px - 5.0, "close": px,
+        })
+    # 09:42 (Bar t): breakout above OR-15 low (25081.0), EMA9 crosses > EMA20
+    bars.append({
+        "date": (t1 + timedelta(minutes=27)).isoformat(),
+        "open": 25084.0, "high": 25102.0, "low": 25084.0, "close": 25100.0,
+    })
+    # 09:43 (Bar t+1): confirmation bar holding above level & EMA9 > EMA20
+    bars.append({
+        "date": (t1 + timedelta(minutes=28)).isoformat(),
+        "open": 25100.0, "high": 25105.0, "low": 25098.0, "close": 25102.0,
+    })
+    # 09:44..09:46: later bars
+    for i in range(29, 32):
+        px = 25122.0 + (i - 28) * 2.0
+        bars.append({
+            "date": (t1 + timedelta(minutes=i)).isoformat(),
+            "open": px - 1.0, "high": px + 2.0, "low": px - 2.0, "close": px,
+        })
+    return bars
+
+
+def _make_chain(spot_strike: int = 25100) -> dict:
+    contracts = []
+    for k in range(spot_strike - 150, spot_strike + 200, 50):
+        contracts.append({
+            "strikePrice": k,
+            "ce": {"tradingSymbol": f"NIFTY {k} CE 23 NOV 26", "liveData": {"bid": 110.0, "ask": 112.0}},
+            "pe": {"tradingSymbol": f"NIFTY {k} PE 23 NOV 26", "liveData": {"bid": 95.0, "ask": 97.0}},
+        })
+    return {"expiry": "2026-11-23", "contracts": contracts}
+
+
+def test_shadow_account_catches_up_across_scan_gap_and_enters_live(tmp_path) -> None:
+    from datetime import datetime
+    from app.trading.dual_agent_ema_policy import IST
+    from app.trading.dual_agent_shadow_account import DualAgentShadowAccount
+
+    bars = _make_shadow_bars()
+    chain = _make_chain()
+    acc = DualAgentShadowAccount(tmp_path / "shadow.db")
+
+    # Tick at 09:38 (last closed bar = 09:37), then simulate a 6-minute scan gap until 09:44
+    res1 = acc.tick(now=datetime(2026, 11, 20, 9, 38, 5, tzinfo=IST), raw_1m=bars, chain=chain, news_safe=True, fee_policy="v1")
+    assert res1["state"] == "SCANNING"
+
+    # Next tick arrives at 09:44:05 (after gap spanning 09:38..09:43; 09:42 armed, 09:43 is live Bar t+1)
+    res2 = acc.tick(now=datetime(2026, 11, 20, 9, 44, 5, tzinfo=IST), raw_1m=bars, chain=chain, news_safe=True, fee_policy="v1")
+    assert res2["state"] == "ENTERED"
+    assert acc.pos is not None and acc.pos.side == "CALL" and acc.pos.entry_time == "09:43"
+
+
+def test_shadow_account_persists_pending_cross_across_restart(tmp_path) -> None:
+    from datetime import datetime
+    from app.trading.dual_agent_ema_policy import IST
+    from app.trading.dual_agent_shadow_account import DualAgentShadowAccount
+
+    bars = _make_shadow_bars()
+    chain = _make_chain()
+    db_path = tmp_path / "shadow_restart.db"
+
+    acc1 = DualAgentShadowAccount(db_path)
+    res1 = acc1.tick(now=datetime(2026, 11, 20, 9, 43, 5, tzinfo=IST), raw_1m=bars, chain=chain, news_safe=True, fee_policy="v1")
+    assert res1["state"] == "SCANNING"
+    assert acc1.arbiter.ce_agent.pending is not None
+
+    # Simulate process restart before Bar t+1 (09:43) closes at 09:44
+    acc2 = DualAgentShadowAccount(db_path)
+    assert acc2.arbiter.ce_agent.pending is not None
+    res2 = acc2.tick(now=datetime(2026, 11, 20, 9, 44, 5, tzinfo=IST), raw_1m=bars, chain=chain, news_safe=True, fee_policy="v1")
+    assert res2["state"] == "ENTERED"
+    assert acc2.pos is not None and acc2.pos.side == "CALL"
+
+
+def test_shadow_account_skips_stale_signal_during_gap_without_entering(tmp_path) -> None:
+    import sqlite3
+    from datetime import datetime
+    from app.trading.dual_agent_ema_policy import IST
+    from app.trading.dual_agent_shadow_account import DualAgentShadowAccount
+
+    bars = _make_shadow_bars()
+    chain = _make_chain()
+    db_path = tmp_path / "shadow_stale.db"
+    acc = DualAgentShadowAccount(db_path)
+
+    # First tick arrives at 09:47:05 (09:43 confirmation is already 3 minutes stale)
+    res = acc.tick(now=datetime(2026, 11, 20, 9, 47, 5, tzinfo=IST), raw_1m=bars, chain=chain, news_safe=True, fee_policy="v1")
+    assert res["state"] == "SCANNING"
+    assert acc.pos is None
+    with sqlite3.connect(db_path) as conn:
+        actions = [r[0] for r in conn.execute("SELECT action FROM shadow_decisions").fetchall()]
+    assert "SKIPPED_STALE_CATCHUP" in actions
+
+
+def test_crew_journal_connect_readonly_recovers_from_wal_disk_io_error(tmp_path, monkeypatch) -> None:
+    import sqlite3
+    import pytest
+    from app.db import crew_journal as cj
+
+    db_path = tmp_path / "journal.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("CREATE TABLE crew_meta (key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO crew_meta VALUES ('k', 'v')")
+
+    real_connect = sqlite3.connect
+
+    def flaky_connect(database, *args, **kwargs):
+        if isinstance(database, str) and database.endswith("?mode=ro"):
+            raise sqlite3.OperationalError("disk I/O error")
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(cj.sqlite3, "connect", flaky_connect)
+    conn = cj.connect_readonly(db_path)
+    try:
+        assert conn.execute("SELECT value FROM crew_meta WHERE key='k'").fetchone()[0] == "v"
+        with pytest.raises(sqlite3.OperationalError):
+            conn.execute("INSERT INTO crew_meta VALUES ('x', 'y')")
+    finally:
+        conn.close()
+
+
+def test_ce_agent_falls_back_to_1m_ema20_sl_when_structural_level_exceeds_max_risk() -> None:
+    cfg = DualAgentConfig()
+    ce = DirectionalAgent(CE_DEFAULT_CONFIG, cfg)
+    # Mirrors 2026-11-20 09:42->09:43: structural level (25353.85) is 143.6pt away (> 55pt max)
+    ctx_t = MarketContext(
+        time_hhmm="09:42", base_levels=[25353.85], atr_5m=43.0,
+        st_dir_5m=-1, ema20_5m=25458.92, ema200_5m=25333.92, recent_liquidity_sweep=True,
+    )
+    assert ce.on_1m_close(
+        ctx=ctx_t, prev_e9=25456.0, prev_e20=25457.0, curr_close=25472.6, curr_e9=25459.5, curr_e20=25458.25
+    ) is None
+
+    ctx_t1 = MarketContext(
+        time_hhmm="09:43", base_levels=[25353.85], atr_5m=43.0,
+        st_dir_5m=-1, ema20_5m=25458.92, ema200_5m=25333.92, recent_liquidity_sweep=True,
+    )
+    prop = ce.on_1m_close(
+        ctx=ctx_t1, prev_e9=25459.5, prev_e20=25458.25, curr_close=25489.4, curr_e9=25465.47, curr_e20=25461.22
+    )
+    assert prop is not None
+    assert prop.side == "CALL"
+    assert prop.conquered_level == 25461.22
+    assert prop.initial_sl == 25461.22 - 8.0
+    assert 17.2 <= prop.risk_pts <= 55.0
+    assert "1M EMA20" in prop.thesis_summary
